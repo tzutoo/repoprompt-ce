@@ -84,9 +84,19 @@ Completed account setup on 2026-05-31:
 - Created the GitHub `release` environment, stored its Developer ID PKCS#12, export password, ephemeral CI keychain password, CE provisioning profile, CE Sparkle private key, and `NOTARYTOOL_*` secrets, and set the `SIGN_IDENTITY` environment variable.
 - Moved the contributor cohort into the `APPROVED_CONTRIBUTORS` repository secret. The future tree no longer tracks the cohort or the private claims-refresh script.
 
+Pre-public validation limitation:
+
+- The source repository is currently private, and newly queued GitHub Actions
+  jobs fail before runner startup with GitHub's billing-or-spending-limit
+  annotation. This is not expected to block the public workflow:
+  [GitHub documents](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+  that standard GitHub-hosted runners are free in public repositories, and CE's
+  workflows use the standard `macos-26` label rather than a larger-runner label.
+  After switching the source repository public, rerun CI and **Publish Release**
+  before relying on the release path.
+
 Remaining blockers:
 
-- Resolve the GitHub Actions admission failure before the first protected CI draft release: newly queued jobs currently fail before any steps run with GitHub's billing-or-spending-limit annotation.
 - Enable a GitHub configuration that exposes required-reviewer protection for the `release` environment, or document and enforce an equivalent maintainer approval gate before treating the publishing workflow as protected. The current private-repository settings do not expose a required-reviewer control.
 - Scrub the historical contributor cohort from existing git history before the repository is made public.
 - Finish the comprehensive notice inventory for SwiftPM dependencies.
