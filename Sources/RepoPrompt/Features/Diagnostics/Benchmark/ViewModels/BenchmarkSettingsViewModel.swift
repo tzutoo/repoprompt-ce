@@ -1078,7 +1078,6 @@ final class BenchmarkSettingsViewModel: ObservableObject {
 
         return lines.joined(separator: "\n")
     }
-
 }
 
 private extension Array {
