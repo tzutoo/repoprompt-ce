@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Platform: macOS 26+](https://img.shields.io/badge/platform-macOS%2026%2B-black)
 
-**A native macOS app and agent orchestrator for context engineering.**
+**A free, open-source native macOS app and agent orchestrator for context engineering.**
 
 RepoPrompt CE helps coding agents understand your codebase before they act. It
 assembles focused, reviewable context from files, CodeMaps, repository
@@ -39,7 +39,7 @@ For a release-mode app under `/Applications`, double-click
 [`Install RepoPrompt CE Local Production.command`](Install%20RepoPrompt%20CE%20Local%20Production.command)
 in Finder.
 
-The installer builds RepoPrompt CE from source and installs
+The installer builds RepoPrompt CE from source and replaces any existing
 `/Applications/RepoPrompt CE.app` using a dedicated self-signed certificate
 trusted only on your Mac. macOS may ask you to approve the certificate.
 
