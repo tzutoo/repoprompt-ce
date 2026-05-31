@@ -3,7 +3,13 @@ import XCTest
 
 final class AgentToolResultPersistencePolicyTests: XCTestCase {
     func testConfirmedOracleSendToolNamesPersistBoundedStructuredSummaries() throws {
-        for toolName in ["ask_oracle", "oracle_send"] {
+        let rows: [(toolName: String, receivesOracleMetadata: Bool)] = [
+            ("ask_oracle", true),
+            ("oracle_send", true),
+            ("chat_send", false)
+        ]
+
+        for row in rows {
             let rawResponse = String(repeating: "oracle raw response ", count: 40)
             let rawError = String(repeating: "raw oracle error ", count: 20)
             let rawDiff = "diff --git a/File.swift b/File.swift\n@@ -1 +1 @@\n-old\n+new"
@@ -16,24 +22,34 @@ final class AgentToolResultPersistencePolicyTests: XCTestCase {
                 "errors": [rawError]
             ])
 
-            let summary = try XCTUnwrap(persistedSummary(toolName: toolName, rawResultJSON: raw))
+            let summary = try XCTUnwrap(persistedSummary(toolName: row.toolName, rawResultJSON: raw))
             let object = try decodedObject(summary.resultJSON)
 
-            XCTAssertEqual(object["status"] as? String, "success", toolName)
-            XCTAssertEqual(object["summary_only"] as? Bool, true, toolName)
-            XCTAssertEqual(object["chat_id"] as? String, "chat-123", toolName)
-            XCTAssertEqual(object["mode"] as? String, "review", toolName)
-            XCTAssertEqual(object["has_response"] as? Bool, true, toolName)
-            XCTAssertEqual(object["diff_count"] as? Int, 1, toolName)
-            XCTAssertEqual(object["error_count"] as? Int, 1, toolName)
-            XCTAssertEqual(object["summary_text"] as? String, "review • 1 diff", toolName)
-            XCTAssertNil(object["response"], toolName)
-            XCTAssertNil(object["diffs"], toolName)
-            XCTAssertNil(object["errors"], toolName)
-            XCTAssertFalse(summary.resultJSON.contains(rawResponse), toolName)
-            XCTAssertFalse(summary.resultJSON.contains(rawDiff), toolName)
-            XCTAssertFalse(summary.resultJSON.contains(rawError), toolName)
-            XCTAssertLessThanOrEqual(summary.resultJSON.utf8.count, AgentToolResultPersistencePolicy.maxPersistedToolSummaryBytes, toolName)
+            XCTAssertEqual(object["status"] as? String, "success", row.toolName)
+            XCTAssertTrue(summary.summaryOnly, row.toolName)
+            XCTAssertEqual(object["summary_only"] as? Bool, true, row.toolName)
+            if row.receivesOracleMetadata {
+                XCTAssertEqual(object["chat_id"] as? String, "chat-123", row.toolName)
+                XCTAssertEqual(object["mode"] as? String, "review", row.toolName)
+                XCTAssertEqual(object["has_response"] as? Bool, true, row.toolName)
+                XCTAssertEqual(object["diff_count"] as? Int, 1, row.toolName)
+                XCTAssertEqual(object["error_count"] as? Int, 1, row.toolName)
+                XCTAssertEqual(object["summary_text"] as? String, "review • 1 diff", row.toolName)
+            } else {
+                XCTAssertNil(object["chat_id"], row.toolName)
+                XCTAssertNil(object["mode"], row.toolName)
+                XCTAssertNil(object["has_response"], row.toolName)
+                XCTAssertNil(object["diff_count"], row.toolName)
+                XCTAssertNil(object["error_count"], row.toolName)
+                XCTAssertEqual(object["summary_text"] as? String, "chat_send • success", row.toolName)
+            }
+            XCTAssertNil(object["response"], row.toolName)
+            XCTAssertNil(object["diffs"], row.toolName)
+            XCTAssertNil(object["errors"], row.toolName)
+            XCTAssertFalse(summary.resultJSON.contains(rawResponse), row.toolName)
+            XCTAssertFalse(summary.resultJSON.contains(rawDiff), row.toolName)
+            XCTAssertFalse(summary.resultJSON.contains(rawError), row.toolName)
+            XCTAssertLessThanOrEqual(summary.resultJSON.utf8.count, AgentToolResultPersistencePolicy.maxPersistedToolSummaryBytes, row.toolName)
         }
     }
 
@@ -80,29 +96,6 @@ final class AgentToolResultPersistencePolicyTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary.resultJSON.utf8.count, AgentToolResultPersistencePolicy.maxPersistedToolSummaryBytes)
     }
 
-    func testLegacyChatSendNameDoesNotReceiveOracleStructuredPersistence() throws {
-        let raw = jsonString([
-            "status": "success",
-            "chat_id": "legacy-chat",
-            "mode": "review",
-            "response": "legacy raw response",
-            "diffs": [["path": "File.swift", "diff": "raw diff"]]
-        ])
-
-        let summary = try XCTUnwrap(persistedSummary(toolName: "chat_send", rawResultJSON: raw))
-        let object = try decodedObject(summary.resultJSON)
-
-        XCTAssertEqual(object["status"] as? String, "success")
-        XCTAssertEqual(object["summary_only"] as? Bool, true)
-        XCTAssertNil(object["chat_id"])
-        XCTAssertNil(object["mode"])
-        XCTAssertNil(object["has_response"])
-        XCTAssertNil(object["diff_count"])
-        XCTAssertNil(object["response"])
-        XCTAssertFalse(summary.resultJSON.contains("legacy raw response"))
-        XCTAssertFalse(summary.resultJSON.contains("raw diff"))
-    }
-
     func testCursorACPStructuredSummaryKeepsPrecedenceForAllowedOracleTools() throws {
         let raw = jsonString([
             "status": "success",
@@ -145,24 +138,14 @@ final class AgentToolResultPersistencePolicyTests: XCTestCase {
         ])
         let promptSummary = try XCTUnwrap(persistedSummary(toolName: "prompt", rawResultJSON: promptRaw))
         let promptObject = try decodedObject(promptSummary.resultJSON)
+        let export = try XCTUnwrap(promptObject["export"] as? [String: Any])
 
         XCTAssertFalse(promptSummary.summaryOnly)
         XCTAssertEqual(promptObject["op"] as? String, "export")
+        XCTAssertEqual(export["path"] as? String, "/tmp/context.txt")
+        XCTAssertEqual(export["tokens"] as? Int, 42)
+        XCTAssertEqual(export["bytes"] as? Int, 2048)
         XCTAssertNil(promptObject["summary_only"])
-
-        let oracleRaw = jsonString([
-            "status": "success",
-            "chat_id": "chat-456",
-            "mode": "plan",
-            "response": "short response"
-        ])
-        let oracleSummary = try XCTUnwrap(persistedSummary(toolName: "ask_oracle", rawResultJSON: oracleRaw))
-        let oracleObject = try decodedObject(oracleSummary.resultJSON)
-
-        XCTAssertTrue(oracleSummary.summaryOnly)
-        XCTAssertEqual(oracleObject["summary_only"] as? Bool, true)
-        XCTAssertEqual(oracleObject["chat_id"] as? String, "chat-456")
-        XCTAssertNil(oracleObject["response"])
     }
 
     private func persistedSummary(toolName: String, rawResultJSON: String) -> AgentPersistedToolResultSummary? {

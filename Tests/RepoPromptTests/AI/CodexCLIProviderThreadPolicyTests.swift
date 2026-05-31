@@ -3,24 +3,19 @@ import Foundation
 import XCTest
 
 final class CodexCLIProviderThreadPolicyTests: XCTestCase {
-    func testEphemeralProviderForwardsPolicyAndAlwaysStartsFreshThread() async throws {
-        let recorder = CodexProviderThreadPolicyRecorder()
-        let provider = makeProvider(startNewCodexThreadsEphemerally: true, recorder: recorder)
+    func testProviderForwardsThreadPolicyAndAlwaysStartsFreshThreadMatrix() async throws {
+        for startNewCodexThreadsEphemerally in [true, false] {
+            let recorder = CodexProviderThreadPolicyRecorder()
+            let provider = makeProvider(
+                startNewCodexThreadsEphemerally: startNewCodexThreadsEphemerally,
+                recorder: recorder
+            )
 
-        try await exhaust(provider: provider)
+            try await exhaust(provider: provider)
 
-        XCTAssertEqual(recorder.recordedEphemeralPolicies, [true])
-        XCTAssertEqual(recorder.recordedExistingSessionFlags, [false])
-    }
-
-    func testDefaultProviderLeavesFreshThreadPersistent() async throws {
-        let recorder = CodexProviderThreadPolicyRecorder()
-        let provider = makeProvider(startNewCodexThreadsEphemerally: false, recorder: recorder)
-
-        try await exhaust(provider: provider)
-
-        XCTAssertEqual(recorder.recordedEphemeralPolicies, [false])
-        XCTAssertEqual(recorder.recordedExistingSessionFlags, [false])
+            XCTAssertEqual(recorder.recordedEphemeralPolicies, [startNewCodexThreadsEphemerally])
+            XCTAssertEqual(recorder.recordedExistingSessionFlags, [false])
+        }
     }
 
     private func makeProvider(

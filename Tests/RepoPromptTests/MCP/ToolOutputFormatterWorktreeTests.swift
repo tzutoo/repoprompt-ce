@@ -25,18 +25,54 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         let dto = ToolResultDTOs.ManageWorktreeReplyDTO(
             op: "bind",
             worktree: Self.worktreeDTO(),
-            binding: Self.bindingDTO(id: "new", worktreeID: "wt_feature"),
+            binding: Self.bindingDTO(id: "new", worktreeID: "wt_new"),
             previousBinding: Self.bindingDTO(id: "old", worktreeID: "wt_previous")
         )
 
         let text = try Self.onlyText(ToolOutputFormatter.formatManageWorktree(args: [:], value: Self.value(dto)))
 
         XCTAssertTrue(text.contains("### Binding"))
+        XCTAssertTrue(text.contains("wt_new"))
         XCTAssertTrue(text.contains("### Previous Binding"))
         XCTAssertTrue(text.contains("wt_previous"))
         XCTAssertTrue(text.contains("### Next Steps"))
         XCTAssertTrue(text.contains("agent_run"))
+        XCTAssertTrue(text.contains("circle.fill"))
+        XCTAssertTrue(text.contains("ring"))
         XCTAssertFalse(text.contains("<session_id>"), "A completed bind should not suggest rebinding with a placeholder session id.")
+    }
+
+    func testListOutputShowsVisualIdentityAndBoundedGraph() throws {
+        let dto = ToolResultDTOs.ManageWorktreeReplyDTO(
+            op: "list",
+            repository: .init(
+                repositoryID: "gitrepo_123",
+                repoKey: "repo-123",
+                displayName: "Repo",
+                rootPath: "/tmp/repo",
+                commonGitDir: "/tmp/repo/.git",
+                mainWorktreeRoot: "/tmp/repo"
+            ),
+            worktrees: [Self.listWorktreeDTO()],
+            graph: .init(
+                requested: true,
+                limit: 12,
+                lines: ["* abc1234 (HEAD -> feature/demo) Demo commit", "* def5678 Base commit"],
+                source: "git log --graph --decorate --oneline --color=never -n 12"
+            )
+        )
+        let blocks = try ToolOutputFormatter.formatManageWorktree(args: [:], value: Self.value(dto))
+        let text = try Self.onlyText(blocks)
+
+        XCTAssertTrue(text.contains("## Manage Worktree List"))
+        XCTAssertTrue(text.contains("Repo (`repo-123`)"))
+        XCTAssertTrue(text.contains("`wt_123`"))
+        XCTAssertTrue(text.contains("feature/demo"))
+        XCTAssertTrue(text.contains("#2563EB"))
+        XCTAssertTrue(text.contains("### Commit / Worktree Graph"))
+        XCTAssertTrue(text.contains("bounded to 12 lines"))
+        XCTAssertTrue(text.contains("* abc1234 (HEAD -> feature/demo) Demo commit"))
+        XCTAssertFalse(text.contains("placeholder"))
     }
 
     func testGraphDTOEncodesInspectableMetadata() throws {
@@ -97,22 +133,14 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         XCTAssertTrue(text.contains("manage_worktree {\"op\":\"continue\""), text)
     }
 
-    func testFileTreeOutputShowsSessionBoundWorktreeScope() throws {
-        let dto = ToolResultDTOs.FileTreeDTO(
+    func testDiscoveryToolOutputsShowSessionBoundWorktreeScope() throws {
+        let fileTree = ToolResultDTOs.FileTreeDTO(
             rootsCount: 1,
             usesLegend: false,
             tree: "Project\n└── Sources",
             worktreeScope: Self.scope()
         )
-
-        let text = try Self.onlyText(ToolOutputFormatter.formatFileTree(value: Self.value(dto)))
-
-        Self.assertScopeBlock(in: text)
-        XCTAssertTrue(text.contains("Project\n└── Sources"), text)
-    }
-
-    func testFileSearchOutputShowsSessionBoundWorktreeScope() throws {
-        let dto = ToolResultDTOs.SearchResultDTO(
+        let search = ToolResultDTOs.SearchResultDTO(
             totalMatches: 1,
             totalFiles: 1,
             contentMatches: 1,
@@ -123,15 +151,7 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
             contentMatchGroups: [],
             worktreeScope: Self.scope()
         )
-
-        let text = try Self.onlyText(ToolOutputFormatter.formatSearch(value: Self.value(dto)))
-
-        Self.assertScopeBlock(in: text)
-        XCTAssertTrue(text.contains("filesystem searches use"), text)
-    }
-
-    func testReadFileOutputShowsSessionBoundWorktreeScope() throws {
-        let dto = ToolResultDTOs.ReadFileReply(
+        let readFile = ToolResultDTOs.ReadFileReply(
             content: "print(\"hi\")",
             totalLines: 1,
             firstLine: 1,
@@ -139,12 +159,30 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
             displayPath: "Sources/App.swift",
             worktreeScope: Self.scope()
         )
+        let cases = try [
+            (
+                "file tree",
+                Self.onlyText(ToolOutputFormatter.formatFileTree(value: Self.value(fileTree))),
+                ["Project\n└── Sources"]
+            ),
+            (
+                "file search",
+                Self.onlyText(ToolOutputFormatter.formatSearch(value: Self.value(search))),
+                ["filesystem searches use"]
+            ),
+            (
+                "read file",
+                Self.onlyText(ToolOutputFormatter.formatReadFile(args: ["path": Self.value("Sources/App.swift")], value: Self.value(readFile))),
+                ["filesystem reads use", "```swift"]
+            )
+        ]
 
-        let text = try Self.onlyText(ToolOutputFormatter.formatReadFile(args: ["path": Self.value("Sources/App.swift")], value: Self.value(dto)))
-
-        Self.assertScopeBlock(in: text)
-        XCTAssertTrue(text.contains("filesystem reads use"), text)
-        XCTAssertTrue(text.contains("```swift"), text)
+        for (name, text, expectedSnippets) in cases {
+            Self.assertScopeBlock(in: text)
+            for snippet in expectedSnippets {
+                XCTAssertTrue(text.contains(snippet), "\(name): missing \(snippet)\n\(text)")
+            }
+        }
     }
 
     func testWorkspaceContextOutputShowsSingleWorktreeScopeBlock() throws {
@@ -176,33 +214,61 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
     }
 
     func testAgentRunOutputShowsWorktreeSummaryAndUnavailableState() throws {
-        let snapshot = AgentRunSnapshot(
-            op: "start",
-            status: "failed",
-            sessionID: "session-1",
-            session: Session(name: "Feature agent"),
-            worktreeBindings: [
-                WorktreeBinding(
-                    worktreeID: "wt_missing",
-                    worktreeRootPath: "/tmp/repo-missing",
-                    worktreeName: "repo-missing",
-                    branch: "feature/demo",
-                    logicalRootName: "Repo",
-                    logicalRootPath: "/tmp/repo",
-                    visualLabel: "demo",
-                    visualColorHex: "#2563EB",
-                    unavailable: true
-                )
-            ]
-        )
+        let cases = [
+            (
+                "available",
+                AgentRunSnapshot(
+                    op: "start",
+                    status: "running",
+                    sessionID: "session-available",
+                    session: Session(name: "Available feature agent"),
+                    worktreeBindings: [
+                        WorktreeBinding(
+                            worktreeID: "wt_test",
+                            worktreeRootPath: "/tmp/repo-feature",
+                            worktreeName: "repo-feature",
+                            branch: "feature/available",
+                            logicalRootName: "Repo",
+                            logicalRootPath: "/tmp/repo",
+                            visualLabel: "Feature WT",
+                            visualColorHex: "#3366FF",
+                            unavailable: false
+                        )
+                    ]
+                ),
+                ["- Worktree: **Feature WT**", "branch `feature/available`", "`wt_test`", "path `/tmp/repo-feature`", "#3366FF"]
+            ),
+            (
+                "unavailable",
+                AgentRunSnapshot(
+                    op: "start",
+                    status: "failed",
+                    sessionID: "session-unavailable",
+                    session: Session(name: "Feature agent"),
+                    worktreeBindings: [
+                        WorktreeBinding(
+                            worktreeID: "wt_missing",
+                            worktreeRootPath: "/tmp/repo-missing",
+                            worktreeName: "repo-missing",
+                            branch: "feature/demo",
+                            logicalRootName: "Repo",
+                            logicalRootPath: "/tmp/repo",
+                            visualLabel: "demo",
+                            visualColorHex: "#2563EB",
+                            unavailable: true
+                        )
+                    ]
+                ),
+                ["- Worktree: **demo**", "branch `feature/demo`", "`wt_missing`", "path `/tmp/repo-missing`", "⚠️ unavailable"]
+            )
+        ]
 
-        let text = try Self.onlyText(ToolOutputFormatter.formatAgentRun(args: ["op": Self.value("start")], value: Self.value(snapshot)))
-
-        XCTAssertTrue(text.contains("- Worktree: **demo**"))
-        XCTAssertTrue(text.contains("branch `feature/demo`"))
-        XCTAssertTrue(text.contains("`wt_missing`"))
-        XCTAssertTrue(text.contains("path `/tmp/repo-missing`"))
-        XCTAssertTrue(text.contains("⚠️ unavailable"))
+        for (name, snapshot, expectedSnippets) in cases {
+            let text = try Self.onlyText(ToolOutputFormatter.formatAgentRun(args: ["op": Self.value("start")], value: Self.value(snapshot)))
+            for snippet in expectedSnippets {
+                XCTAssertTrue(text.contains(snippet), "\(name): missing \(snippet)\n\(text)")
+            }
+        }
     }
 
     private static func scope() -> ToolResultDTOs.WorktreeScopeDTO {
@@ -317,6 +383,27 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
             prunableReason: nil,
             visual: .init(label: "demo", colorHex: "#2563EB", iconName: "circle.fill", markerStyle: "ring"),
             status: nil
+        )
+    }
+
+    private static func listWorktreeDTO() -> ToolResultDTOs.ManageWorktreeReplyDTO.WorktreeDTO {
+        .init(
+            worktreeID: "wt_123",
+            specifier: "@id:wt_123",
+            path: "/tmp/repo-wt",
+            gitDir: "/tmp/repo/.git/worktrees/repo-wt",
+            name: "repo-wt",
+            branch: "feature/demo",
+            head: "abcdef0",
+            isMain: false,
+            isCurrent: true,
+            isDetached: false,
+            isLocked: false,
+            lockReason: nil,
+            isPrunable: false,
+            prunableReason: nil,
+            visual: .init(label: "demo", colorHex: "#2563EB", iconName: "circle.fill", markerStyle: "ring"),
+            status: .init(staged: 1, modified: 2, untracked: 3, isDirty: true)
         )
     }
 

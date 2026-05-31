@@ -3,24 +3,20 @@ import XCTest
 
 @MainActor
 final class RecommendationProviderFilterNormalizationTests: XCTestCase {
-    func testRemovedOnlyRecommendationProviderFilterFallsBackToCurrentAllProviders() {
-        XCTAssertEqual(
-            GlobalSettingsStore.normalizedRecommendationProviderFilter(raw: ["geminiCLI"]),
-            Set(RecommendationProviderKind.allCases)
-        )
-    }
+    func testRecommendationProviderFilterNormalizationMatrix() {
+        let currentAllProviders = Set(RecommendationProviderKind.allCases)
+        let rows: [(label: String, raw: [String], expected: Set<RecommendationProviderKind>)] = [
+            ("removed-only", ["geminiCLI"], currentAllProviders),
+            ("explicit-empty", [], []),
+            ("legacy-all-providers", ["claudeCode", "codex", "openAI", "anthropic", "geminiCLI"], currentAllProviders)
+        ]
 
-    func testExplicitEmptyRecommendationProviderFilterStaysEmpty() {
-        XCTAssertEqual(
-            GlobalSettingsStore.normalizedRecommendationProviderFilter(raw: []),
-            []
-        )
-    }
-
-    func testLegacyAllProvidersShapeFallsBackToCurrentAllProviders() {
-        XCTAssertEqual(
-            GlobalSettingsStore.normalizedRecommendationProviderFilter(raw: ["claudeCode", "codex", "openAI", "anthropic", "geminiCLI"]),
-            Set(RecommendationProviderKind.allCases)
-        )
+        for row in rows {
+            XCTAssertEqual(
+                GlobalSettingsStore.normalizedRecommendationProviderFilter(raw: row.raw),
+                row.expected,
+                row.label
+            )
+        }
     }
 }

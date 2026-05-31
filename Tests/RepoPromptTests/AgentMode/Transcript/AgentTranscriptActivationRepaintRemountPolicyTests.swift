@@ -17,7 +17,7 @@ final class AgentTranscriptActivationRepaintRemountPolicyTests: XCTestCase {
         XCTAssertEqual(key, AgentTranscriptRehydrateRetryKey(tabID: tabID, presentationRevision: 7, layoutPassToken: 42))
     }
 
-    func testDuplicateRevisionOrExceededLimitSuppressesRemount() {
+    func testDuplicateRevisionExceededLimitDetachedOrIdleActivationSuppressesRemount() {
         let tabID = UUID()
         let oldSignal = AgentTranscriptRestoreSignal(tabID: nil, bindingsHydrated: false, presentationRevision: 0)
         let newSignal = AgentTranscriptRestoreSignal(tabID: tabID, bindingsHydrated: true, presentationRevision: 3)
@@ -41,13 +41,6 @@ final class AgentTranscriptActivationRepaintRemountPolicyTests: XCTestCase {
             remountCount: AgentTranscriptActivationRepaintRemountPolicy.maximumRemountsPerActivation,
             layoutPassToken: 2
         ))
-    }
-
-    func testDetachedOrIdleActivationDoesNotRemount() {
-        let tabID = UUID()
-        let oldSignal = AgentTranscriptRestoreSignal(tabID: nil, bindingsHydrated: false, presentationRevision: 0)
-        let newSignal = AgentTranscriptRestoreSignal(tabID: tabID, bindingsHydrated: true, presentationRevision: 1)
-
         XCTAssertNil(AgentTranscriptActivationRepaintRemountPolicy.remountKey(
             oldSignal: oldSignal,
             newSignal: newSignal,

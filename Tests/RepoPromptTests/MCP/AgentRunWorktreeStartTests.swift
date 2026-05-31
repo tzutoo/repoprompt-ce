@@ -5,22 +5,17 @@ import XCTest
 
 @MainActor
 final class AgentRunWorktreeStartTests: XCTestCase {
-    func testEffectiveWorkspacePathUsesBoundWorktreeForPrimaryRoot() throws {
+    func testEffectiveWorkspacePathUsesBoundWorktreeAndPreservesUnboundFallback() throws {
         let root = try makeTemporaryDirectory(named: "root")
         let worktree = try makeTemporaryDirectory(named: "worktree")
         let viewModel = makeViewModel(workspacePath: root.path)
-        let session = AgentModeViewModel.TabSession(tabID: UUID())
-        session.worktreeBindings = [makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)]
+        let boundSession = AgentModeViewModel.TabSession(tabID: UUID())
+        boundSession.worktreeBindings = [makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)]
 
-        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: session), worktree.path)
-    }
+        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: boundSession), worktree.path)
 
-    func testEffectiveWorkspacePathPreservesUnboundFallback() throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let viewModel = makeViewModel(workspacePath: root.path)
-        let session = AgentModeViewModel.TabSession(tabID: UUID())
-
-        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: session), root.path)
+        let unboundSession = AgentModeViewModel.TabSession(tabID: UUID())
+        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: unboundSession), root.path)
     }
 
     func testMissingBoundWorktreeFailsWithRecoveryMessage() throws {
@@ -77,226 +72,88 @@ final class AgentRunWorktreeStartTests: XCTestCase {
         XCTAssertEqual(object["worktree_bindings"]?.arrayValue?.count, 1)
     }
 
-    func testAgentRunFormatterDisplaysWorktreeContext() throws {
+    func testChildSessionWorktreeBindingInheritanceCanBeOptedOut() throws {
         let root = try makeTemporaryDirectory(named: "root")
         let worktree = try makeTemporaryDirectory(named: "worktree")
-        let binding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path, label: "Feature WT")
-        let snapshot = AgentRunMCPSnapshot(
-            sessionID: UUID(),
-            tabID: nil,
-            sessionName: "Worktree Agent",
-            agentRaw: AgentProviderKind.codexExec.rawValue,
-            agentDisplayName: AgentProviderKind.codexExec.displayName,
-            modelRaw: "codex",
-            reasoningEffortRaw: nil,
-            status: .running,
-            statusText: nil,
-            latestAssistantPreview: nil,
-            interaction: nil,
-            transcriptItemCount: 0,
-            updatedAt: Date(),
-            parentSessionID: nil,
-            failureReason: nil,
-            worktreeBindings: [AgentRunMCPSnapshot.WorktreeBinding(binding: binding)],
-            activeWorktreeMerges: []
-        )
+        let parentID = UUID()
+        let viewModel = makeViewModel(workspacePath: root.path)
+        let parent = viewModel.session(for: UUID())
+        parent.activeAgentSessionID = parentID
+        parent.worktreeBindings = [makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)]
 
-        let content = ToolOutputFormatter.formatAgentRun(
-            args: ["op": .string("start")],
-            value: snapshot.toValue()
-        )
-        let text: String
-        if case let .text(text: rendered, annotations: _, _meta: _) = try XCTUnwrap(content.first) {
-            text = rendered
-        } else {
-            return XCTFail("Expected text content")
+        let inheritedChild = viewModel.session(for: UUID())
+        inheritedChild.activeAgentSessionID = UUID()
+        viewModel.applySpawnParentSessionID(parentID, to: inheritedChild)
+        XCTAssertEqual(inheritedChild.parentSessionID, parentID)
+        XCTAssertEqual(inheritedChild.worktreeBindings, parent.worktreeBindings)
+        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: inheritedChild), worktree.path)
+
+        let optedOutChild = viewModel.session(for: UUID())
+        optedOutChild.activeAgentSessionID = UUID()
+        viewModel.applySpawnParentSessionID(parentID, to: optedOutChild, inheritWorktreeBindings: false)
+        XCTAssertEqual(optedOutChild.parentSessionID, parentID)
+        XCTAssertTrue(optedOutChild.worktreeBindings.isEmpty)
+        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: optedOutChild), root.path)
+    }
+
+    func testAgentRunStartParentSourceWorktreeInheritanceMatrix() async throws {
+        for (sourceIsMCPControlled, inheritWorktreeBindings) in [
+            (true, true),
+            (true, false),
+            (false, true),
+            (false, false)
+        ] {
+            let root = try makeTemporaryDirectory(named: "root")
+            let worktree = try makeTemporaryDirectory(named: "worktree")
+            let window = try await makeWindow(root: root)
+            defer { WindowStatesManager.shared.unregisterWindowState(window) }
+            let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
+            let parentID = UUID()
+            let parentBinding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)
+            if sourceIsMCPControlled {
+                installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
+            } else {
+                let source = window.agentModeViewModel.session(for: sourceTabID)
+                source.activeAgentSessionID = parentID
+                source.worktreeBindings = [parentBinding]
+                XCTAssertNil(source.mcpControlContext)
+            }
+            let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
+            var args: [String: Value] = [
+                "op": .string("start"),
+                "message": .string("parent source inheritance matrix"),
+                "detach": .bool(true),
+                "timeout": .int(0)
+            ]
+            if !inheritWorktreeBindings {
+                args["inherit_worktree"] = .bool(false)
+            }
+
+            let value = try await service.execute(args: args)
+
+            let object = try XCTUnwrap(value.objectValue)
+            let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
+            let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
+            let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
+            XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
+
+            let child = window.agentModeViewModel.session(for: childTabID)
+            XCTAssertEqual(child.activeAgentSessionID, childSessionID)
+            XCTAssertEqual(child.parentSessionID, parentID)
+            if inheritWorktreeBindings {
+                let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
+                XCTAssertEqual(bindings.count, 1)
+                let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
+                XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, worktree.path)
+                XCTAssertEqual(child.worktreeBindings, [parentBinding])
+                XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), worktree.path)
+            } else {
+                XCTAssertNil(object["worktree"])
+                XCTAssertNil(object["worktree_bindings"])
+                XCTAssertTrue(child.worktreeBindings.isEmpty)
+                XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), root.path)
+            }
         }
-        XCTAssertTrue(text.contains("Worktree: **Feature WT**"), text)
-        XCTAssertTrue(text.contains("wt_test"), text)
-        XCTAssertTrue(text.contains(worktree.path), text)
-        XCTAssertTrue(text.contains("#3366FF"), text)
-    }
-
-    func testChildSessionCopiesParentWorktreeBindingsByDefault() throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let parentID = UUID()
-        let childID = UUID()
-        let viewModel = makeViewModel(workspacePath: root.path)
-        let parent = viewModel.session(for: UUID())
-        parent.activeAgentSessionID = parentID
-        parent.worktreeBindings = [makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)]
-        let child = viewModel.session(for: UUID())
-        child.activeAgentSessionID = childID
-
-        viewModel.applySpawnParentSessionID(parentID, to: child)
-
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertEqual(child.worktreeBindings, parent.worktreeBindings)
-        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: child), worktree.path)
-    }
-
-    func testChildSessionCanSkipParentWorktreeBindingCopy() throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let parentID = UUID()
-        let childID = UUID()
-        let viewModel = makeViewModel(workspacePath: root.path)
-        let parent = viewModel.session(for: UUID())
-        parent.activeAgentSessionID = parentID
-        parent.worktreeBindings = [makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)]
-        let child = viewModel.session(for: UUID())
-        child.activeAgentSessionID = childID
-
-        viewModel.applySpawnParentSessionID(parentID, to: child, inheritWorktreeBindings: false)
-
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertTrue(child.worktreeBindings.isEmpty)
-        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: child), root.path)
-    }
-
-    func testAgentRunStartFromAgentModeRunInheritsParentWorktreeByDefault() async throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)
-        installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
-
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("inherit parent worktree"),
-            "detach": .bool(true),
-            "timeout": .int(0)
-        ])
-
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
-        XCTAssertEqual(bindings.count, 1)
-        let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
-        XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, worktree.path)
-
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertEqual(child.worktreeBindings, [parentBinding])
-        XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), worktree.path)
-    }
-
-    func testAgentRunStartInheritWorktreeFalseKeepsParentButSkipsBindingCopy() async throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)
-        installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
-
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("skip parent worktree"),
-            "detach": .bool(true),
-            "timeout": .int(0),
-            "inherit_worktree": .bool(false)
-        ])
-
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        XCTAssertNil(object["worktree"])
-        XCTAssertNil(object["worktree_bindings"])
-
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertTrue(child.worktreeBindings.isEmpty)
-        XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), root.path)
-    }
-
-    func testAgentRunStartFromRoutedUISourceParentsAndInheritsWorktree() async throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)
-        let source = window.agentModeViewModel.session(for: sourceTabID)
-        source.activeAgentSessionID = parentID
-        source.worktreeBindings = [parentBinding]
-        XCTAssertNil(source.mcpControlContext)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
-
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("ui source parents and inherits worktree"),
-            "detach": .bool(true),
-            "timeout": .int(0)
-        ])
-
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
-        XCTAssertEqual(bindings.count, 1)
-        let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
-        XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, worktree.path)
-
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertEqual(child.worktreeBindings, [parentBinding])
-        XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), worktree.path)
-    }
-
-    func testAgentRunStartFromRoutedUISourceInheritWorktreeFalseKeepsParentButSkipsBindingCopy() async throws {
-        let root = try makeTemporaryDirectory(named: "root")
-        let worktree = try makeTemporaryDirectory(named: "worktree")
-        let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path)
-        let source = window.agentModeViewModel.session(for: sourceTabID)
-        source.activeAgentSessionID = parentID
-        source.worktreeBindings = [parentBinding]
-        XCTAssertNil(source.mcpControlContext)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
-
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("ui source parents without inheriting worktree"),
-            "detach": .bool(true),
-            "timeout": .int(0),
-            "inherit_worktree": .bool(false)
-        ])
-
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        XCTAssertNil(object["worktree"])
-        XCTAssertNil(object["worktree_bindings"])
-
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertTrue(child.worktreeBindings.isEmpty)
-        XCTAssertEqual(try window.agentModeViewModel.effectiveWorkspacePath(for: child), root.path)
     }
 
     func testAgentRunTopLevelStartWithoutSpawnSourceRemainsAllowed() async throws {
@@ -706,99 +563,58 @@ final class AgentRunWorktreeStartTests: XCTestCase {
         XCTAssertEqual(session.providerSessionID, "managed-old-identity")
     }
 
-    func testAgentRunStartExplicitWorktreeIDOverridesInheritedBinding() async throws {
-        let fixture = try makeGitFixture()
-        let parentWorktree = fixture.sandbox.appendingPathComponent("parent-worktree", isDirectory: true)
-        let overrideWorktree = fixture.sandbox.appendingPathComponent("override-worktree", isDirectory: true)
-        try runGit(["worktree", "add", "-b", "feature/parent-\(fixture.suffix)", parentWorktree.path, "HEAD"], cwd: fixture.repo)
-        try runGit(["worktree", "add", "-b", "feature/override-\(fixture.suffix)", overrideWorktree.path, "HEAD"], cwd: fixture.repo)
-        let descriptors = try await VCSService.shared.listGitWorktrees(at: fixture.repo)
-        let overrideDescriptor = try XCTUnwrap(descriptors.first { samePath($0.path, overrideWorktree.path) })
-        let window = try await makeWindow(root: fixture.repo)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(
-            logicalRoot: fixture.repo.path,
-            worktreeRoot: parentWorktree.standardizedFileURL.path,
-            worktreeID: "parent-\(fixture.suffix)"
-        )
-        installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
+    func testAgentRunStartExplicitWorktreeIDOverridesInheritanceSetting() async throws {
+        for inheritWorktreeBindings in [true, false] {
+            let fixture = try makeGitFixture()
+            let parentWorktree = fixture.sandbox.appendingPathComponent("parent-worktree", isDirectory: true)
+            let explicitWorktree = fixture.sandbox.appendingPathComponent("explicit-worktree", isDirectory: true)
+            try runGit(["worktree", "add", "-b", "feature/parent-\(fixture.suffix)", parentWorktree.path, "HEAD"], cwd: fixture.repo)
+            try runGit(["worktree", "add", "-b", "feature/explicit-\(fixture.suffix)", explicitWorktree.path, "HEAD"], cwd: fixture.repo)
+            let descriptors = try await VCSService.shared.listGitWorktrees(at: fixture.repo)
+            let explicitDescriptor = try XCTUnwrap(descriptors.first { samePath($0.path, explicitWorktree.path) })
+            let window = try await makeWindow(root: fixture.repo)
+            defer { WindowStatesManager.shared.unregisterWindowState(window) }
+            let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
+            let parentID = UUID()
+            let parentBinding = makeBinding(
+                logicalRoot: fixture.repo.path,
+                worktreeRoot: parentWorktree.standardizedFileURL.path,
+                worktreeID: "parent-\(fixture.suffix)"
+            )
+            installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
+            let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
+            var args: [String: Value] = [
+                "op": .string("start"),
+                "message": .string("explicit worktree overrides inheritance setting"),
+                "detach": .bool(true),
+                "timeout": .int(0),
+                "worktree_id": .string(explicitDescriptor.worktreeID)
+            ]
+            if !inheritWorktreeBindings {
+                args["inherit_worktree"] = .bool(false)
+            }
 
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("override inherited worktree"),
-            "detach": .bool(true),
-            "timeout": .int(0),
-            "worktree_id": .string(overrideDescriptor.worktreeID)
-        ])
+            let value = try await service.execute(args: args)
 
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
-        XCTAssertEqual(bindings.count, 1)
-        let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
-        XCTAssertEqual(bindingObject["worktree_id"]?.stringValue, overrideDescriptor.worktreeID)
-        XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, overrideDescriptor.path)
-        XCTAssertNotEqual(bindingObject["worktree_id"]?.stringValue, parentBinding.worktreeID)
+            let object = try XCTUnwrap(value.objectValue)
+            let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
+            let childSessionID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue)))
+            let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
+            XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
+            let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
+            XCTAssertEqual(bindings.count, 1)
+            let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
+            XCTAssertEqual(bindingObject["worktree_id"]?.stringValue, explicitDescriptor.worktreeID)
+            XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, explicitDescriptor.path)
+            XCTAssertNotEqual(bindingObject["worktree_id"]?.stringValue, parentBinding.worktreeID)
 
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertEqual(child.worktreeBindings.count, 1)
-        XCTAssertEqual(child.worktreeBindings.first?.worktreeID, overrideDescriptor.worktreeID)
-        XCTAssertEqual(child.worktreeBindings.first?.worktreeRootPath, overrideDescriptor.path)
-    }
-
-    func testAgentRunStartInheritWorktreeFalseStillBindsExplicitWorktreeID() async throws {
-        let fixture = try makeGitFixture()
-        let parentWorktree = fixture.sandbox.appendingPathComponent("parent-worktree", isDirectory: true)
-        let explicitWorktree = fixture.sandbox.appendingPathComponent("explicit-worktree", isDirectory: true)
-        try runGit(["worktree", "add", "-b", "feature/parent-\(fixture.suffix)", parentWorktree.path, "HEAD"], cwd: fixture.repo)
-        try runGit(["worktree", "add", "-b", "feature/explicit-\(fixture.suffix)", explicitWorktree.path, "HEAD"], cwd: fixture.repo)
-        let descriptors = try await VCSService.shared.listGitWorktrees(at: fixture.repo)
-        let explicitDescriptor = try XCTUnwrap(descriptors.first { samePath($0.path, explicitWorktree.path) })
-        let window = try await makeWindow(root: fixture.repo)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
-        let parentID = UUID()
-        let parentBinding = makeBinding(
-            logicalRoot: fixture.repo.path,
-            worktreeRoot: parentWorktree.standardizedFileURL.path,
-            worktreeID: "parent-\(fixture.suffix)"
-        )
-        installParentAgentSession(parentID, binding: parentBinding, sourceTabID: sourceTabID, in: window)
-        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
-
-        let value = try await service.execute(args: [
-            "op": .string("start"),
-            "message": .string("explicit worktree with inheritance disabled"),
-            "detach": .bool(true),
-            "timeout": .int(0),
-            "inherit_worktree": .bool(false),
-            "worktree_id": .string(explicitDescriptor.worktreeID)
-        ])
-
-        let object = try XCTUnwrap(value.objectValue)
-        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
-        let childTabID = try XCTUnwrap(try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue)))
-        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
-        let bindings = try XCTUnwrap(object["worktree_bindings"]?.arrayValue)
-        XCTAssertEqual(bindings.count, 1)
-        let bindingObject = try XCTUnwrap(bindings.first?.objectValue)
-        XCTAssertEqual(bindingObject["worktree_id"]?.stringValue, explicitDescriptor.worktreeID)
-        XCTAssertEqual(bindingObject["worktree_root_path"]?.stringValue, explicitDescriptor.path)
-        XCTAssertNotEqual(bindingObject["worktree_id"]?.stringValue, parentBinding.worktreeID)
-
-        let child = window.agentModeViewModel.session(for: childTabID)
-        XCTAssertEqual(child.parentSessionID, parentID)
-        XCTAssertEqual(child.worktreeBindings.count, 1)
-        XCTAssertEqual(child.worktreeBindings.first?.worktreeID, explicitDescriptor.worktreeID)
-        XCTAssertEqual(child.worktreeBindings.first?.worktreeRootPath, explicitDescriptor.path)
+            let child = window.agentModeViewModel.session(for: childTabID)
+            XCTAssertEqual(child.activeAgentSessionID, childSessionID)
+            XCTAssertEqual(child.parentSessionID, parentID)
+            XCTAssertEqual(child.worktreeBindings.count, 1)
+            XCTAssertEqual(child.worktreeBindings.first?.worktreeID, explicitDescriptor.worktreeID)
+            XCTAssertEqual(child.worktreeBindings.first?.worktreeRootPath, explicitDescriptor.path)
+        }
     }
 
     private func makeAgentRunStartService(window: WindowState, sourceTabID: UUID?) -> AgentRunMCPToolService {

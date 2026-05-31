@@ -355,12 +355,14 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         XCTAssertEqual(removed.selection.selectedPaths, [textURL.path])
     }
 
-    func testManageSelectionSliceSetPreservesSelectedFullFiles() async throws {
-        let root = try makeTemporaryRoot(name: "SliceSetPreservesFull")
-        let fullURL = root.appendingPathComponent("A.swift")
-        let slicedURL = root.appendingPathComponent("B.swift")
-        try write("struct A {}", to: fullURL)
-        try write("line1\nline2\nline3", to: slicedURL)
+    func testManageSelectionSliceSetPreservesFullFilesAndReplacesOnlySpecifiedSlices() async throws {
+        let root = try makeTemporaryRoot(name: "SliceSetFileScoped")
+        let fullURL = root.appendingPathComponent("Full.swift")
+        let firstURL = root.appendingPathComponent("A.swift")
+        let secondURL = root.appendingPathComponent("B.swift")
+        try write("struct Full {}", to: fullURL)
+        try write("a1\na2\na3\na4", to: firstURL)
+        try write("b1\nb2\nb3\nb4\nb5\nb6", to: secondURL)
 
         let store = WorkspaceFileContextStore()
         _ = try await store.loadRoot(path: root.path)
@@ -372,53 +374,37 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             codemapAutoEnabled: false
         )
 
-        let result = await service.buildManageSelectionSet(
+        let added = await service.buildManageSelectionSet(
             paths: [],
-            slices: [WorkspaceSelectionSliceInput(path: slicedURL.path, ranges: [LineRange(start: 2, end: 3)])],
+            slices: [
+                WorkspaceSelectionSliceInput(path: firstURL.path, ranges: [LineRange(start: 1, end: 2)]),
+                WorkspaceSelectionSliceInput(path: secondURL.path, ranges: [LineRange(start: 5, end: 6)])
+            ],
             mode: "slices",
             existing: initial
         )
 
-        XCTAssertTrue(result.invalidPaths.isEmpty)
-        XCTAssertEqual(result.selection.selectedPaths, [fullURL.path, slicedURL.path])
-        XCTAssertEqual(result.selection.slices[slicedURL.path], [LineRange(start: 2, end: 3)])
-    }
+        XCTAssertTrue(added.invalidPaths.isEmpty)
+        XCTAssertEqual(Set(added.selection.selectedPaths), Set([fullURL.path, firstURL.path, secondURL.path]))
+        XCTAssertEqual(added.selection.slices[firstURL.path], [LineRange(start: 1, end: 2)])
+        XCTAssertEqual(added.selection.slices[secondURL.path], [LineRange(start: 5, end: 6)])
 
-    func testManageSelectionSliceSetReplacesOnlySpecifiedFileSlices() async throws {
-        let root = try makeTemporaryRoot(name: "SliceSetFileScoped")
-        let firstURL = root.appendingPathComponent("A.swift")
-        let secondURL = root.appendingPathComponent("B.swift")
-        try write("a1\na2\na3\na4", to: firstURL)
-        try write("b1\nb2\nb3\nb4\nb5\nb6", to: secondURL)
-
-        let store = WorkspaceFileContextStore()
-        _ = try await store.loadRoot(path: root.path)
-        let service = WorkspaceSelectionMutationService(store: store)
-        let initial = StoredSelection(
-            selectedPaths: [firstURL.path, secondURL.path],
-            autoCodemapPaths: [],
-            slices: [
-                firstURL.path: [LineRange(start: 1, end: 2)],
-                secondURL.path: [LineRange(start: 5, end: 6)]
-            ],
-            codemapAutoEnabled: false
-        )
-
-        let result = await service.buildManageSelectionSet(
+        let replaced = await service.buildManageSelectionSet(
             paths: [],
             slices: [WorkspaceSelectionSliceInput(path: firstURL.path, ranges: [LineRange(start: 3, end: 4)])],
             mode: "slices",
-            existing: initial
+            existing: added.selection
         )
 
-        XCTAssertTrue(result.invalidPaths.isEmpty)
-        XCTAssertEqual(result.selection.selectedPaths, [firstURL.path, secondURL.path])
-        XCTAssertEqual(result.selection.slices[firstURL.path], [LineRange(start: 3, end: 4)])
-        XCTAssertEqual(result.selection.slices[secondURL.path], [LineRange(start: 5, end: 6)])
+        XCTAssertTrue(replaced.invalidPaths.isEmpty)
+        XCTAssertEqual(Set(replaced.selection.selectedPaths), Set([fullURL.path, firstURL.path, secondURL.path]))
+        XCTAssertNil(replaced.selection.slices[fullURL.path])
+        XCTAssertEqual(replaced.selection.slices[firstURL.path], [LineRange(start: 3, end: 4)])
+        XCTAssertEqual(replaced.selection.slices[secondURL.path], [LineRange(start: 5, end: 6)])
     }
 
-    func testManageSelectionSliceSetRejectsBarePathsWithoutLineRanges() async throws {
-        let root = try makeTemporaryRoot(name: "SliceSetRejectsBarePaths")
+    func testManageSelectionSliceSetRejectsInvalidRequestsWithoutMutation() async throws {
+        let root = try makeTemporaryRoot(name: "SliceSetRejectsInvalid")
         let fileURL = root.appendingPathComponent("A.swift")
         try write("struct A {}", to: fileURL)
 
@@ -427,26 +413,14 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         let service = WorkspaceSelectionMutationService(store: store)
         let initial = StoredSelection(selectedPaths: [fileURL.path], autoCodemapPaths: [], slices: [:], codemapAutoEnabled: false)
 
-        let result = await service.buildManageSelectionSet(
+        let barePath = await service.buildManageSelectionSet(
             paths: [fileURL.path],
             slices: [],
             mode: "slices",
             existing: initial
         )
-
-        XCTAssertEqual(result.selection, initial)
-        XCTAssertEqual(result.invalidPaths, ["mode 'slices' requires line ranges for paths: \(fileURL.path). Use #L ranges, the slices array, or op='add' mode='full' for whole files."])
-    }
-
-    func testManageSelectionSliceSetRejectsEmptySlicesAndPreservesParseErrors() async throws {
-        let root = try makeTemporaryRoot(name: "SliceSetRejectsEmpty")
-        let fileURL = root.appendingPathComponent("A.swift")
-        try write("struct A {}", to: fileURL)
-
-        let store = WorkspaceFileContextStore()
-        _ = try await store.loadRoot(path: root.path)
-        let service = WorkspaceSelectionMutationService(store: store)
-        let initial = StoredSelection(selectedPaths: [fileURL.path], autoCodemapPaths: [], slices: [:], codemapAutoEnabled: false)
+        XCTAssertEqual(barePath.selection, initial)
+        XCTAssertEqual(barePath.invalidPaths, ["mode 'slices' requires line ranges for paths: \(fileURL.path). Use #L ranges, the slices array, or op='add' mode='full' for whole files."])
 
         let empty = await service.buildManageSelectionSet(
             paths: [],
@@ -594,34 +568,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         XCTAssertEqual(event?.requiresFullResync, true)
     }
 
-    func testBatchRootUnloadPublishesUnloadEventsAndClearsLoadedRoots() async throws {
-        let rootA = try makeTemporaryRoot(name: "BatchUnloadA")
-        let rootB = try makeTemporaryRoot(name: "BatchUnloadB")
-        try write("a", to: rootA.appendingPathComponent("A.swift"))
-        try write("b", to: rootB.appendingPathComponent("B.swift"))
-
-        let store = WorkspaceFileContextStore()
-        let recordA = try await store.loadRoot(path: rootA.path)
-        let recordB = try await store.loadRoot(path: rootB.path)
-        var events = await store.appliedIndexEvents().makeAsyncIterator()
-
-        await store.unloadRoots(ids: [recordA.id, recordB.id])
-
-        let firstEvent = await events.next()
-        let secondEvent = await events.next()
-        let unloadEvents = try [XCTUnwrap(firstEvent), XCTUnwrap(secondEvent)]
-        XCTAssertEqual(Set(unloadEvents.map(\.rootID)), Set([recordA.id, recordB.id]))
-        XCTAssertTrue(unloadEvents.allSatisfy(\.isRootUnload))
-        XCTAssertTrue(unloadEvents.allSatisfy(\.requiresFullResync))
-        let remainingRoots = await store.roots()
-        let fileA = await store.file(rootID: recordA.id, relativePath: "A.swift")
-        let fileB = await store.file(rootID: recordB.id, relativePath: "B.swift")
-        XCTAssertTrue(remainingRoots.isEmpty)
-        XCTAssertNil(fileA)
-        XCTAssertNil(fileB)
-    }
-
-    func testBatchRootUnloadDeduplicatesIDsAndPreservesRemainingRootOrder() async throws {
+    func testBatchRootUnloadDeduplicatesIDsPublishesEventsAndClearsLoadedRoots() async throws {
         let rootA = try makeTemporaryRoot(name: "BatchUnloadDedupA")
         let rootB = try makeTemporaryRoot(name: "BatchUnloadDedupB")
         let rootC = try makeTemporaryRoot(name: "BatchUnloadDedupC")
@@ -643,6 +590,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         let secondEvent = try XCTUnwrap(maybeSecondEvent)
         XCTAssertEqual([firstEvent.rootID, secondEvent.rootID], [recordB.id, recordA.id])
         XCTAssertTrue([firstEvent, secondEvent].allSatisfy(\.isRootUnload))
+        XCTAssertTrue([firstEvent, secondEvent].allSatisfy(\.requiresFullResync))
         let remainingRoots = await store.roots()
         let fileAAfterUnload = await store.file(rootID: recordA.id, relativePath: "A.swift")
         let fileBAfterUnload = await store.file(rootID: recordB.id, relativePath: "B.swift")
@@ -651,6 +599,18 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         XCTAssertNil(fileAAfterUnload)
         XCTAssertNil(fileBAfterUnload)
         XCTAssertNotNil(fileCAfterUnload)
+
+        await store.unloadRoots(ids: [recordC.id])
+
+        let maybeFinalEvent = await events.next()
+        let finalEvent = try XCTUnwrap(maybeFinalEvent)
+        XCTAssertEqual(finalEvent.rootID, recordC.id)
+        XCTAssertTrue(finalEvent.isRootUnload)
+        XCTAssertTrue(finalEvent.requiresFullResync)
+        let rootsAfterFinalUnload = await store.roots()
+        let fileCAfterFinalUnload = await store.file(rootID: recordC.id, relativePath: "C.swift")
+        XCTAssertTrue(rootsAfterFinalUnload.isEmpty)
+        XCTAssertNil(fileCAfterFinalUnload)
     }
 
     func testWorkspaceFileMutationServiceCreatesReadsAndOverwritesThroughStore() async throws {
@@ -953,42 +913,6 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadFolderCreatesRootShellAndLeavesDescendantsUnmaterialized() async throws {
-        let root = try makeTemporaryRoot(name: "RootShellLoad")
-        let nestedFolderURL = root.appendingPathComponent("Sources/Nested")
-        let fileURL = nestedFolderURL.appendingPathComponent("A.swift")
-        try write("struct A {}", to: fileURL)
-
-        let store = WorkspaceFileContextStore()
-        let manager = WorkspaceFilesViewModel(workspaceFileContextStore: store)
-        await manager.setCodeScanEnabled(false)
-        let workspace = WorkspaceModel(name: "RootShellLoad", repoPaths: [root.path])
-
-        try await manager.loadFolder(at: root, for: workspace)
-
-        let loadedRoots = await store.roots()
-        let rootRecord = try XCTUnwrap(loadedRoots.first)
-        let storeFolders = await store.folders(inRoot: rootRecord.id).map(\.standardizedRelativePath)
-        let storeFiles = await store.files(inRoot: rootRecord.id).map(\.standardizedRelativePath)
-        let shell = try XCTUnwrap(manager.rootFolders.first)
-
-        XCTAssertEqual(manager.rootFolders.count, 1)
-        XCTAssertEqual(shell.id, rootRecord.id)
-        XCTAssertTrue(shell.children.isEmpty)
-        XCTAssertNil(manager.findFolderByFullPath(nestedFolderURL.path))
-        XCTAssertNil(manager.findFileByFullPath(fileURL.path))
-        XCTAssertTrue(manager.allFilesSnapshot(sorted: false).isEmpty)
-        XCTAssertTrue(storeFolders.contains("Sources"))
-        XCTAssertTrue(storeFolders.contains("Sources/Nested"))
-        XCTAssertEqual(storeFiles, ["Sources/Nested/A.swift"])
-
-        await manager.unloadAllRootFolders()
-        XCTAssertTrue(manager.rootFolders.isEmpty)
-        let rootsAfterUnload = await store.roots()
-        XCTAssertTrue(rootsAfterUnload.isEmpty)
-    }
-
-    @MainActor
     func testWatcherAddedUIViewModelsUseStoreRecordIDs() async throws {
         let root = try makeTemporaryRoot(name: "WatcherUIIdentity")
         try write("seed", to: root.appendingPathComponent("Existing.swift"))
@@ -1073,6 +997,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
 
         let storeRoots = await store.roots()
         let rootRecord = try XCTUnwrap(storeRoots.first)
+        let storeFolders = await store.folders(inRoot: rootRecord.id).map(\.standardizedRelativePath)
         let storeFiles = await store.files(inRoot: rootRecord.id)
         let swiftFileRecord = try XCTUnwrap(storeFiles.first { $0.standardizedRelativePath == "Sources/Nested/A.swift" })
 
@@ -1083,14 +1008,22 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
         let snapshot = try XCTUnwrap(codemapSnapshot)
 
         let rootVM = try XCTUnwrap(manager.rootFolders.first)
+        XCTAssertEqual(manager.rootFolders.count, 1)
         XCTAssertEqual(rootVM.id, rootRecord.id)
         XCTAssertTrue(rootVM.children.isEmpty)
         XCTAssertNil(manager.findFileByFullPath(fileURL.path))
         XCTAssertNil(manager.findFolderByFullPath(root.appendingPathComponent("Sources").path))
         XCTAssertNil(manager.findFolderByFullPath(root.appendingPathComponent("Sources/Nested").path))
+        XCTAssertTrue(manager.allFilesSnapshot(sorted: false).isEmpty)
+        XCTAssertTrue(storeFolders.contains("Sources"))
+        XCTAssertTrue(storeFolders.contains("Sources/Nested"))
+        XCTAssertEqual(Set(storeFiles.map(\.standardizedRelativePath)), Set(["README.md", "Sources/Nested/A.swift"]))
         XCTAssertEqual(snapshot.fileID, swiftFileRecord.id)
 
         await manager.unloadAllRootFolders()
+        XCTAssertTrue(manager.rootFolders.isEmpty)
+        let rootsAfterUnload = await store.roots()
+        XCTAssertTrue(rootsAfterUnload.isEmpty)
     }
 
     func testStoreReadContentReturnsCurrentDiskBytesAfterExternalChange() async throws {

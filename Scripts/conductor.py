@@ -2649,6 +2649,7 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
         ("windows", [cli, "-e", "windows"]),
         ("workspace switch", [cli, "-w", window_id, "-e", f"workspace switch {workspace}"]),
         ("tree roots", [cli, "-w", window_id, "-e", "tree --type roots"]),
+        ("manage_worktree list", [cli, "-w", window_id, "-e", "manage_worktree op=list"]),
         (
             "agent_manage roles",
             [cli, "-w", window_id, "-c", "agent_manage", "-j", json.dumps({"op": "list_agents", "roles_only": True})],

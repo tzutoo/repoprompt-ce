@@ -132,11 +132,13 @@ actor PartitionStore {
         }
     }
 
+    private let baseURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let dateFormatter = ISO8601DateFormatter()
 
-    init() {
+    init(baseURL: URL? = nil) {
+        self.baseURL = baseURL ?? Self.partitionsBaseURL()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         self.encoder = encoder
@@ -352,8 +354,7 @@ actor PartitionStore {
     // MARK: - Helpers
 
     private func partitionURL(forRoot rootPath: String, scope: PartitionScope) -> URL {
-        let base = Self.partitionsBaseURL()
-        let folder = base.appendingPathComponent(repoKey(forRoot: rootPath), isDirectory: true)
+        let folder = baseURL.appendingPathComponent(repoKey(forRoot: rootPath), isDirectory: true)
 
         let suffix = if let tabID = scope.tabID {
             "-\(tabID.uuidString.lowercased())"

@@ -46,6 +46,44 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
         XCTAssertEqual(result.editsApplied, 1)
     }
 
+    func testUnmatchedSearchBlockReportsSingleAndBatchContracts() async throws {
+        let originalText = "present\n"
+        let singleRequest = ApplyEditsRequest(
+            path: "file.swift",
+            mode: .single(search: "missing", replace: "replacement", replaceAll: false),
+            verbose: false
+        )
+
+        do {
+            _ = try await engine.apply(request: singleRequest, to: originalText)
+            XCTFail("Expected unmatched single edit to fail")
+        } catch let error as ApplyEditsError {
+            XCTAssertEqual(error, .invalidParams("search block not found in file"))
+        }
+
+        let batchRequest = ApplyEditsRequest(
+            path: "file.swift",
+            mode: .batch([
+                ApplyEditsOperation(search: "missing", replace: "replacement", replaceAll: false)
+            ]),
+            verbose: false
+        )
+
+        let result = try await engine.apply(request: batchRequest, to: originalText)
+
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.updatedText, originalText)
+        XCTAssertEqual(result.editsRequested, 1)
+        XCTAssertEqual(result.editsApplied, 0)
+        XCTAssertEqual(result.outcomes, [
+            EditOutcome(
+                index: 0,
+                status: "failed",
+                error: "search block not found in file (matches are exact, including whitespace/indentation)"
+            )
+        ])
+    }
+
     func testBatchLiteralFastPathReturnsNoteAndVerboseOutcomes() async throws {
         let request = ApplyEditsRequest(
             path: "file.swift",
@@ -109,7 +147,10 @@ final class ApplyEditsCoreRecoveryTests: XCTestCase {
         XCTAssertEqual(outcomes.count, 2)
         XCTAssertEqual(outcomes[0].index, 0)
         XCTAssertEqual(outcomes[0].status, "failed")
-        XCTAssertNotNil(outcomes[0].error)
+        XCTAssertEqual(
+            outcomes[0].error,
+            "Search block matches multiple locations (lines 1, 2). Please make the block more specific or use the replace_all parameter to replace all occurrences."
+        )
         XCTAssertEqual(outcomes[1], EditOutcome(index: 1, status: "success", error: nil))
     }
 

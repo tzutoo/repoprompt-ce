@@ -277,6 +277,35 @@ class LifecycleQueueTests(LifecycleTestCase):
         self.assertEqual(payload["blockedBy"][0]["conflictingLanes"], ["build"])
 
 
+class SmokeOperationTests(unittest.TestCase):
+    def test_manage_worktree_list_stage_runs_after_tree_roots_before_agent_manage(self) -> None:
+        calls: list[tuple[str, list[str]]] = []
+
+        def record_command(name: str, argv: list[str], *_args: object, **_kwargs: object) -> tuple[int, str, str]:
+            calls.append((name, argv))
+            return 0, "", ""
+
+        with mock.patch.object(conductor, "require_debug_cli", return_value="/tmp/rpce-cli-debug"), mock.patch.object(
+            conductor, "run_operation_command", side_effect=record_command
+        ):
+            code = conductor.operation_smoke(Path.cwd(), {"windowId": "7", "workspace": "test-workspace"})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            calls,
+            [
+                ("windows", ["/tmp/rpce-cli-debug", "-e", "windows"]),
+                ("workspace switch", ["/tmp/rpce-cli-debug", "-w", "7", "-e", "workspace switch test-workspace"]),
+                ("tree roots", ["/tmp/rpce-cli-debug", "-w", "7", "-e", "tree --type roots"]),
+                ("manage_worktree list", ["/tmp/rpce-cli-debug", "-w", "7", "-e", "manage_worktree op=list"]),
+                (
+                    "agent_manage roles",
+                    ["/tmp/rpce-cli-debug", "-w", "7", "-c", "agent_manage", "-j", '{"op": "list_agents", "roles_only": true}'],
+                ),
+            ],
+        )
+
+
 class RunScriptTransitionTests(unittest.TestCase):
     def test_guarded_failed_relaunch_does_not_stop_existing_app_before_packaging_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

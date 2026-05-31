@@ -2,60 +2,25 @@
 import XCTest
 
 final class ChatNameExtractorTests: XCTestCase {
-    func testExtractsQuotedSelfClosingChatName() {
-        var content = "<chatName=\"Implementation Plan\"/>\nBody"
+    func testExtractAndRemoveScenarios() {
+        let scenarios: [(name: String, input: String, expectedName: String?, expectedContent: String)] = [
+            ("quoted self-closing marker", "<chatName=\"Implementation Plan\"/>\nBody", "Implementation Plan", "\nBody"),
+            ("unquoted non-self-closing marker", "Intro\n<chatName=Plan>\nBody", "Plan", "Intro\n\nBody"),
+            ("valid marker embedded in surrounding text", "Before <chatName = \"Review Notes\" /> after", "Review Notes", "Before  after"),
+            ("absent marker", "Intro\nNo chat name here.\nBody", nil, "Intro\nNo chat name here.\nBody"),
+            ("empty quoted value", "Intro\n<chatName=\"\"/>\nBody", nil, "Intro\n<chatName=\"\"/>\nBody"),
+            ("missing assignment and value", "Intro\n<chatName/>\nBody", nil, "Intro\n<chatName/>\nBody")
+        ]
 
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
+        for scenario in scenarios {
+            XCTContext.runActivity(named: scenario.name) { _ in
+                var content = scenario.input
 
-        XCTAssertEqual(name, "Implementation Plan")
-        XCTAssertEqual(content, "\nBody")
-    }
+                let name = ChatNameExtractor.extractAndRemove(from: &content)
 
-    func testExtractsUnquotedNonSelfClosingChatName() {
-        var content = "Intro\n<chatName=Plan>\nBody"
-
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
-
-        XCTAssertEqual(name, "Plan")
-        XCTAssertEqual(content, "Intro\n\nBody")
-    }
-
-    func testNonMatchReturnsNilAndLeavesContentUnchanged() {
-        var content = "Intro\nNo chat name here.\nBody"
-        let original = content
-
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
-
-        XCTAssertNil(name)
-        XCTAssertEqual(content, original)
-    }
-
-    func testEmptyQuotedNameReturnsNilAndLeavesContentUnchanged() {
-        var content = "Intro\n<chatName=\"\"/>\nBody"
-        let original = content
-
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
-
-        XCTAssertNil(name)
-        XCTAssertEqual(content, original)
-    }
-
-    func testMissingNameReturnsNilAndLeavesContentUnchanged() {
-        var content = "Intro\n<chatName/>\nBody"
-        let original = content
-
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
-
-        XCTAssertNil(name)
-        XCTAssertEqual(content, original)
-    }
-
-    func testPreservesSurroundingContentWhenRemovingSnippet() {
-        var content = "Before <chatName = \"Review Notes\" /> after"
-
-        let name = ChatNameExtractor.extractAndRemove(from: &content)
-
-        XCTAssertEqual(name, "Review Notes")
-        XCTAssertEqual(content, "Before  after")
+                XCTAssertEqual(name, scenario.expectedName)
+                XCTAssertEqual(content, scenario.expectedContent)
+            }
+        }
     }
 }

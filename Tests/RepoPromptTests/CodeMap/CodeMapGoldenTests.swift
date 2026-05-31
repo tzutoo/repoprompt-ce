@@ -3,34 +3,34 @@ import Foundation
 import XCTest
 
 final class CodeMapGoldenTests: XCTestCase {
-    func testCEFixturesMatchGoldenCodeMapDescriptions() throws {
-        try assertFixturesMatchGoldens(
-            relativePaths: CodeMapFixtureRunner.fixtureRelativePaths,
-            maximumCount: 5
-        )
-    }
+    func testFixturesMatchGoldenCodeMapDescriptions() throws {
+        let groups: [(name: String, relativePaths: [String], maximumCount: Int)] = [
+            ("CE/core", CodeMapFixtureRunner.fixtureRelativePaths, 5),
+            ("expanded languages", CodeMapFixtureRunner.expandedLanguageFixtureRelativePaths, 5),
+            ("edge fixtures", CodeMapFixtureRunner.edgeFixtureRelativePaths, 3)
+        ]
 
-    func testExpandedLanguageFixturesMatchGoldenCodeMapDescriptions() throws {
-        try assertFixturesMatchGoldens(
-            relativePaths: CodeMapFixtureRunner.expandedLanguageFixtureRelativePaths,
-            maximumCount: 5
-        )
-    }
-
-    func testCodeMapEdgeFixturesPreserveExportsTypesAndMethods() throws {
-        try assertFixturesMatchGoldens(
-            relativePaths: CodeMapFixtureRunner.edgeFixtureRelativePaths,
-            maximumCount: 3
-        )
+        for group in groups {
+            try XCTContext.runActivity(named: group.name) { _ in
+                try assertFixturesMatchGoldens(
+                    relativePaths: group.relativePaths,
+                    maximumCount: group.maximumCount
+                )
+            }
+        }
     }
 
     func testSnapshotFileTreeMarksCodeMapFixtures() throws {
         let tempRoot = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-        let actual = CodeMapFixtureRunner.renderFixtureFileTree(tempRoot: tempRoot)
         let expected = try CodeMapFixtureRunner.expectedFileTree()
-        XCTAssertEqual(actual, expected)
+
+        for mode in ["full", "auto"] {
+            XCTContext.runActivity(named: mode) { _ in
+                let actual = CodeMapFixtureRunner.renderFixtureFileTree(tempRoot: tempRoot, mode: mode)
+                XCTAssertEqual(actual, expected)
+            }
+        }
     }
 
     func testSnapshotFileTreeNoneModeProducesNoOutputOrLegend() throws {
@@ -58,15 +58,6 @@ final class CodeMapGoldenTests: XCTestCase {
         XCTAssertTrue(actual.contains("(* denotes selected files)"))
         XCTAssertTrue(actual.contains("(+ denotes code-map available)"))
         XCTAssertFalse(actual.contains("worker.go"))
-    }
-
-    func testSnapshotFileTreeAutoModeStillRendersFixtureTree() throws {
-        let tempRoot = try makeTempRoot()
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-        let actual = CodeMapFixtureRunner.renderFixtureFileTree(tempRoot: tempRoot, mode: "auto")
-        let expected = try CodeMapFixtureRunner.expectedFileTree()
-        XCTAssertEqual(actual, expected)
     }
 
     private func makeTempRoot() throws -> URL {

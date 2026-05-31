@@ -4,33 +4,24 @@ import XCTest
 
 final class AIModelPreferenceRegressionTests: XCTestCase {
     @MainActor
-    func testPlanningDropdownDoesNotDisplayFirstAvailableModelWhenRawIsEmpty() {
+    func testPlanningDropdownInvalidStateMatrixDoesNotDisplayFirstAvailableModel() {
         let availableModels: [AIModel] = [.codexCustom(name: "gpt-5.5-low")]
+        let rows = [
+            (rawValue: "", expectedDisplayName: "Select an Oracle model"),
+            (rawValue: "legacy-oracle-model", expectedDisplayName: "Invalid Oracle model")
+        ]
 
-        let displayName = AIModelDropdown.displayName(
-            forRawValue: "",
-            destinationID: "planningModel",
-            availableModels: availableModels,
-            customOpenRouterModels: []
-        )
+        for row in rows {
+            let displayName = AIModelDropdown.displayName(
+                forRawValue: row.rawValue,
+                destinationID: "planningModel",
+                availableModels: availableModels,
+                customOpenRouterModels: []
+            )
 
-        XCTAssertEqual(displayName, "Select an Oracle model")
-        XCTAssertNotEqual(displayName, availableModels[0].displayName)
-    }
-
-    @MainActor
-    func testPlanningDropdownDoesNotDisplayFirstAvailableModelWhenRawIsInvalid() {
-        let availableModels: [AIModel] = [.codexCustom(name: "gpt-5.5-low")]
-
-        let displayName = AIModelDropdown.displayName(
-            forRawValue: "legacy-oracle-model",
-            destinationID: "planningModel",
-            availableModels: availableModels,
-            customOpenRouterModels: []
-        )
-
-        XCTAssertEqual(displayName, "Invalid Oracle model")
-        XCTAssertNotEqual(displayName, availableModels[0].displayName)
+            XCTAssertEqual(displayName, row.expectedDisplayName, row.rawValue)
+            XCTAssertNotEqual(displayName, availableModels[0].displayName, row.rawValue)
+        }
     }
 
     @MainActor
@@ -111,7 +102,7 @@ final class AIModelPreferenceRegressionTests: XCTestCase {
         XCTAssertFalse(contents.contains("let effectiveModel = planningAvailable ? planningModel : await promptVM.preferredAIModel"))
     }
 
-    func testMCPOraclePlanningResolutionUsesProviderConfiguredAvailability() throws {
+    func testMCPOraclePlanningResolutionUsesProviderConfiguredAvailabilityWithoutAutoHeal() throws {
         let repoRoot = try RepoRoot.url(filePath: #filePath)
         let sourcePath = "Sources/RepoPrompt/Features/Prompt/ViewModels/PromptViewModel.swift"
         let contents = try String(contentsOf: repoRoot.appendingPathComponent(sourcePath), encoding: .utf8)
@@ -119,13 +110,6 @@ final class AIModelPreferenceRegressionTests: XCTestCase {
         XCTAssertTrue(contents.contains("func mcpOraclePlanningModelResolution() -> MCPOraclePlanningModelResolution"))
         XCTAssertTrue(contents.contains("self?.isProviderConfigured(for: model) ?? false"))
         XCTAssertFalse(contents.contains("self?.isModelAvailable(model) ?? false"))
-    }
-
-    func testPlanningValidationDoesNotAutoHealStrictOracleModel() throws {
-        let repoRoot = try RepoRoot.url(filePath: #filePath)
-        let sourcePath = "Sources/RepoPrompt/Features/Prompt/ViewModels/PromptViewModel.swift"
-        let contents = try String(contentsOf: repoRoot.appendingPathComponent(sourcePath), encoding: .utf8)
-
         XCTAssertFalse(contents.contains("pickPlanningModelFallback"))
         XCTAssertFalse(contents.contains("prompt.validate_planning_model.fallback"))
     }

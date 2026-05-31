@@ -17,6 +17,7 @@ final class AgentWorkspaceRootsSidebarStoreTests: XCTestCase {
         XCTAssertEqual(rows.map(\.isPrimary), [true, false, false])
         XCTAssertEqual(rows.map(\.canMoveUp), [false, true, true])
         XCTAssertEqual(rows.map(\.canMoveDown), [true, true, false])
+        XCTAssertEqual(rows.map(\.worktree), [nil, nil, nil])
     }
 
     func testRowsDoNotMarkSingleRootAsPrimaryOrMovable() {
@@ -37,15 +38,6 @@ final class AgentWorkspaceRootsSidebarStoreTests: XCTestCase {
     }
 
     // MARK: - Worktree indicators (Item 10)
-
-    func testRowsLeaveWorktreeNilByDefault() {
-        let rows = AgentWorkspaceRootsSidebarStore.rows(from: [
-            makeProjection(name: "A", path: "/tmp/A"),
-            makeProjection(name: "B", path: "/tmp/B")
-        ])
-
-        XCTAssertEqual(rows.map(\.worktree), [nil, nil])
-    }
 
     func testWithWorktreeAttachesIndicatorWithoutMutatingOtherFields() {
         let base = AgentWorkspaceRootRow(

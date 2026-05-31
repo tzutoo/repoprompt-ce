@@ -2,40 +2,29 @@
 import XCTest
 
 final class GitRepoTargetResolverTests: XCTestCase {
-    func testPreservesWorktreeSpecifierAsCurrentRepo() async throws {
+    func testResolvesSupportedRepositorySelectorSyntax() async throws {
         let fixture = ResolverFixture()
-        let repos = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["@wt"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.linkedRepo
-        )
+        let scenarios = [
+            ("current worktree", ["@wt"], [fixture.mainRepo], fixture.linkedRepo, [fixture.linkedRepo.rootPath]),
+            ("main from linked worktree", ["@main"], [fixture.linkedRepo], fixture.linkedRepo, [fixture.mainRepo.rootPath]),
+            ("main branch", ["@main:feature/demo"], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath]),
+            ("worktree ID", ["@id:\(fixture.linkedWorktree.worktreeID)"], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath]),
+            ("explicit branch", ["@branch:feature/demo"], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath]),
+            ("bare branch", ["feature/demo"], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath]),
+            ("worktree name", ["repo-feature"], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath]),
+            ("absolute path", [fixture.linkedRepo.rootPath], [fixture.mainRepo], fixture.mainRepo, [fixture.linkedRepo.rootPath])
+        ]
 
-        XCTAssertEqual(repos.map(\.rootPath), [fixture.linkedRepo.rootPath])
-    }
+        for scenario in scenarios {
+            let repos = try await fixture.resolver.resolveRepoRoots(
+                explicitRootTokens: scenario.1,
+                allRepos: scenario.2,
+                visibleRoots: fixture.visibleRoots,
+                defaultRepo: scenario.3
+            )
 
-    func testPreservesMainSpecifierFromLinkedWorktree() async throws {
-        let fixture = ResolverFixture()
-        let repos = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["@main"],
-            allRepos: [fixture.linkedRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.linkedRepo
-        )
-
-        XCTAssertEqual(repos.map(\.rootPath), [fixture.mainRepo.rootPath])
-    }
-
-    func testPreservesMainBranchSpecifier() async throws {
-        let fixture = ResolverFixture()
-        let repos = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["@main:feature/demo"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-
-        XCTAssertEqual(repos.map(\.rootPath), [fixture.linkedRepo.rootPath])
+            XCTAssertEqual(repos.map(\.rootPath), scenario.4, scenario.0)
+        }
     }
 
     func testRejectsLegacyWorktreeBranchSpecifier() async throws {
@@ -53,56 +42,6 @@ final class GitRepoTargetResolverTests: XCTestCase {
             XCTAssertTrue(error.message.contains("@wt:feature/demo"))
             XCTAssertTrue(error.message.contains("@main:feature/demo"))
         }
-    }
-
-    func testResolvesWorktreeByIDSelector() async throws {
-        let fixture = ResolverFixture()
-        let repos = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["@id:\(fixture.linkedWorktree.worktreeID)"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-
-        XCTAssertEqual(repos.map(\.rootPath), [fixture.linkedRepo.rootPath])
-    }
-
-    func testResolvesWorktreeByBranchSpecifierAndBareBranch() async throws {
-        let fixture = ResolverFixture()
-        let explicit = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["@branch:feature/demo"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-        let bare = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["feature/demo"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-
-        XCTAssertEqual(explicit.map(\.rootPath), [fixture.linkedRepo.rootPath])
-        XCTAssertEqual(bare.map(\.rootPath), [fixture.linkedRepo.rootPath])
-    }
-
-    func testResolvesWorktreeByNameAndAbsolutePath() async throws {
-        let fixture = ResolverFixture()
-        let byName = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: ["repo-feature"],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-        let byPath = try await fixture.resolver.resolveRepoRoots(
-            explicitRootTokens: [fixture.linkedRepo.rootPath],
-            allRepos: [fixture.mainRepo],
-            visibleRoots: fixture.visibleRoots,
-            defaultRepo: fixture.mainRepo
-        )
-
-        XCTAssertEqual(byName.map(\.rootPath), [fixture.linkedRepo.rootPath])
-        XCTAssertEqual(byPath.map(\.rootPath), [fixture.linkedRepo.rootPath])
     }
 
     func testDeduplicatesReposByResolvedPath() async throws {

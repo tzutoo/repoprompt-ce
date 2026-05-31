@@ -166,19 +166,6 @@ final class AgentPermissionSecureStoreTests: XCTestCase {
         XCTAssertEqual(store.diagnostic(for: .codex)?.kind, .keychainWriteFailed)
     }
 
-    func testRemovedGeminiPermissionDocumentsAreIgnoredDuringReset() {
-        let removedGeminiKey = "rp.agent.permissions.gemini.v1"
-        let secureStrings = FakeSecurePlainStringStore()
-        secureStrings.plainValues[removedGeminiKey] = "removed-gemini-plain"
-        let store = makeStore(secureStrings: secureStrings)
-
-        secureStrings.failSaveKeys = Set(AgentPermissionSecureDomain.allCases.map(\.storageKey))
-        _ = store.resetAgentPermissionsToSafeDefaults()
-
-        XCTAssertEqual(secureStrings.plainValues[removedGeminiKey], "removed-gemini-plain")
-        XCTAssertFalse(secureStrings.savedPlainValues.contains { $0.key == removedGeminiKey })
-    }
-
     private func makeStore(
         secureStrings: FakeSecurePlainStringStore,
         notificationCenter: NotificationCenter = NotificationCenter()

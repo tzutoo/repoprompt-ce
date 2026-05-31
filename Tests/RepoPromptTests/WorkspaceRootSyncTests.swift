@@ -171,15 +171,6 @@ final class WorkspaceRootSyncTests: XCTestCase {
         XCTAssertFalse(encoded.contains("discoveryInstructions"), encoded)
     }
 
-    func testWorkspaceManagerSourceNoLongerImportsLegacyAggregateWorkspaces() throws {
-        let repoRoot = try RepoRoot.url(filePath: #filePath)
-        let sourcePath = "Sources/RepoPrompt/Features/Workspaces/ViewModels/WorkspaceManagerViewModel.swift"
-        let contents = try String(contentsOf: repoRoot.appendingPathComponent(sourcePath), encoding: .utf8)
-
-        XCTAssertFalse(contents.contains("migrateLegacyAggregatorIfNeeded"), sourcePath)
-        XCTAssertFalse(contents.contains("workspaces_legacy.json"), sourcePath)
-    }
-
     func testWorkspaceFolderLoadConcurrencyLimitIsBounded() {
         XCTAssertEqual(WorkspaceManagerViewModel.boundedWorkspaceRootLoadLimit(forRootCount: 0), 0)
         XCTAssertEqual(WorkspaceManagerViewModel.boundedWorkspaceRootLoadLimit(forRootCount: 1), 1)

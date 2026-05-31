@@ -92,7 +92,10 @@ final class GitWorktreeMergeGitServiceTests: XCTestCase {
         defer { fixture.cleanup() }
         try fixture.commitFile("Source.txt", contents: "source\n", message: "Source change", cwd: fixture.source)
 
-        let preview = try await fixture.preview(publishArtifacts: false)
+        let preview = try await fixture.preview(publishArtifacts: true)
+        let artifacts = try XCTUnwrap(preview.artifacts)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts.mapPath), artifacts.mapPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts.sidecarPath), artifacts.sidecarPath)
         let result = try await VCSService().applyGitWorktreeMerge(.init(preview: preview))
 
         XCTAssertEqual(result.status, .completed)
@@ -102,6 +105,13 @@ final class GitWorktreeMergeGitServiceTests: XCTestCase {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: " ")
         XCTAssertEqual(parents.count, 3)
+
+        let dirty = try GitMergeFixture()
+        defer { dirty.cleanup() }
+        try "dirty\n".write(to: dirty.source.appendingPathComponent("Dirty.txt"), atomically: true, encoding: .utf8)
+        let dirtyPreview = try await dirty.preview(publishArtifacts: false)
+        XCTAssertTrue(dirtyPreview.inspection.isBlocked)
+        XCTAssertTrue(dirtyPreview.inspection.blockers.contains { $0.code == .sourceDirty })
     }
 
     func testPreviewRejectsEndpointHeadChangedBeforeInspection() async throws {
@@ -158,10 +168,26 @@ final class GitWorktreeMergeGitServiceTests: XCTestCase {
         try targetStale.commitFile("Source.txt", contents: "source\n", message: "Source change", cwd: targetStale.source)
         let targetStalePreview = try await targetStale.preview(publishArtifacts: false)
         try targetStale.commitFile("Target.txt", contents: "target\n", message: "Target change", cwd: targetStale.repo)
+        let targetHeadAfterIntentionalChange = try targetStale.gitOutput(["rev-parse", "HEAD"], cwd: targetStale.repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetTreeAfterIntentionalChange = try targetStale.gitOutput(["rev-parse", "HEAD^{tree}"], cwd: targetStale.repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let statusAfterIntentionalChange = try targetStale.gitOutput(["status", "--porcelain"], cwd: targetStale.repo)
         let targetResult = try await VCSService().applyGitWorktreeMerge(.init(preview: targetStalePreview))
         XCTAssertEqual(targetResult.status, .stale)
         XCTAssertEqual(targetResult.staleReason, "Target worktree changed since preview.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: targetStale.repo.appendingPathComponent("Source.txt").path))
+        XCTAssertEqual(
+            try targetStale.gitOutput(["rev-parse", "HEAD"], cwd: targetStale.repo)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            targetHeadAfterIntentionalChange
+        )
+        XCTAssertEqual(
+            try targetStale.gitOutput(["rev-parse", "HEAD^{tree}"], cwd: targetStale.repo)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            targetTreeAfterIntentionalChange
+        )
+        XCTAssertEqual(try targetStale.gitOutput(["status", "--porcelain"], cwd: targetStale.repo), statusAfterIntentionalChange)
     }
 
     func testConflictPredictionUnavailableIsAdvisoryFallback() async throws {

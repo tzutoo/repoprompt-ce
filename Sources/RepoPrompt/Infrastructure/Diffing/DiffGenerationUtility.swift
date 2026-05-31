@@ -368,11 +368,9 @@ class DiffGenerationUtility {
                 let edits = DiffEditCreator.myersDiff(oldLines: oldBlock, newLines: sanitizedNew)
                 let diffLines = convertDiffEditsToLines(edits)
 
-                // ➍ Create chunks with absolute positions, adjusting for accumulated changes
-                let positionOffset = allChunks.reduce(0) { acc, chunk in
-                    acc + chunk.lineCountDifference()
-                }
-                let chunks = splitDiffLinesIntoChunks(diffLines: diffLines, startingAt: globalMatch + positionOffset)
+                // ➍ Create chunks at original-file positions. The applier adjusts later
+                // chunks as preceding insertions or deletions are applied.
+                let chunks = splitDiffLinesIntoChunks(diffLines: diffLines, startingAt: globalMatch)
                 allChunks.append(contentsOf: chunks)
 
                 // Move cursor past the replaced section

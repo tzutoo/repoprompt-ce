@@ -27,7 +27,8 @@ build/
 # Agent-authored working documents
 docs/analysis/
 docs/designs/
-docs/investigations/
+docs/investigations/*
+!docs/investigations/test-coverage-value-audit-ledger-2026-05-29.md
 docs/references/
 docs/reviews/
 docs/plans/*

@@ -4,23 +4,16 @@ import XCTest
 
 final class FileViewModelAcceptedCodeMapTests: XCTestCase {
     @MainActor
-    func testSetCodeMapRejectsMismatchedFileAPI() {
-        let fixture = makeFileFixture()
-        let mismatchedAPI = makeFileAPI(path: fixture.rootURL.appendingPathComponent("other.swift").path)
-
-        fixture.file.setCodeMap(mismatchedAPI)
-
-        XCTAssertFalse(fixture.file.hasAcceptedCodeMap)
-        XCTAssertNil(fixture.file.fileAPI)
-        XCTAssertNil(fixture.file.codemapLineCount)
-    }
-
-    @MainActor
-    func testClearAndReplacementInvalidateAcceptedFlag() {
+    func testSetCodeMapLifecycleRejectsMismatchesAndInvalidatesAcceptedFlag() {
         let fixture = makeFileFixture()
         let validAPI = makeFileAPI(path: fixture.fileURL.path, symbol: "acceptedSymbol")
         let replacementAPI = makeFileAPI(path: fixture.fileURL.path, symbol: "replacementSymbol")
         let mismatchedAPI = makeFileAPI(path: fixture.rootURL.appendingPathComponent("other.swift").path)
+
+        fixture.file.setCodeMap(mismatchedAPI)
+        XCTAssertFalse(fixture.file.hasAcceptedCodeMap)
+        XCTAssertNil(fixture.file.fileAPI)
+        XCTAssertNil(fixture.file.codemapLineCount)
 
         fixture.file.setCodeMap(validAPI)
         XCTAssertTrue(fixture.file.hasAcceptedCodeMap)

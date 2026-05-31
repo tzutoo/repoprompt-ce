@@ -13,34 +13,26 @@ final class CodexNativeSessionControllerThreadStartTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testOptedInFreshThreadStartIncludesEphemeralTrue() async throws {
-        let (controller, recordURL) = try await makeController(options: makeStandardChatOptions(startNewThreadsEphemerally: true))
+    func testFreshThreadStartEphemeralJSONRPCShapeMatrix() async throws {
+        let rows: [(label: String, options: CodexNativeSessionController.Options?, instructions: String, expectedEphemeral: Bool?)] = [
+            ("opted-in standard chat", makeStandardChatOptions(startNewThreadsEphemerally: true), "Oracle", true),
+            ("default standard chat", makeStandardChatOptions(startNewThreadsEphemerally: false), "Chat", nil),
+            ("Agent Mode default", nil, "Agent", nil)
+        ]
 
-        _ = try await controller.startOrResume(existing: nil, baseInstructions: "Oracle")
-        await controller.shutdown()
+        for row in rows {
+            let (controller, recordURL) = try await makeController(options: row.options)
 
-        let params = try recordedParams(for: "thread/start", at: recordURL)
-        XCTAssertEqual(params["ephemeral"] as? Bool, true)
-    }
+            _ = try await controller.startOrResume(existing: nil, baseInstructions: row.instructions)
+            await controller.shutdown()
 
-    func testStandardFreshThreadStartOmitsEphemeralByDefault() async throws {
-        let (controller, recordURL) = try await makeController(options: makeStandardChatOptions(startNewThreadsEphemerally: false))
-
-        _ = try await controller.startOrResume(existing: nil, baseInstructions: "Chat")
-        await controller.shutdown()
-
-        let params = try recordedParams(for: "thread/start", at: recordURL)
-        XCTAssertNil(params["ephemeral"])
-    }
-
-    func testAgentModeDefaultFreshThreadStartOmitsEphemeral() async throws {
-        let (controller, recordURL) = try await makeController(options: nil)
-
-        _ = try await controller.startOrResume(existing: nil, baseInstructions: "Agent")
-        await controller.shutdown()
-
-        let params = try recordedParams(for: "thread/start", at: recordURL)
-        XCTAssertNil(params["ephemeral"])
+            let params = try recordedParams(for: "thread/start", at: recordURL)
+            if let expectedEphemeral = row.expectedEphemeral {
+                XCTAssertEqual(params["ephemeral"] as? Bool, expectedEphemeral, row.label)
+            } else {
+                XCTAssertNil(params["ephemeral"], row.label)
+            }
+        }
     }
 
     func testResumeNeverIncludesEphemeralWhenFreshStartsAreOptedIn() async throws {

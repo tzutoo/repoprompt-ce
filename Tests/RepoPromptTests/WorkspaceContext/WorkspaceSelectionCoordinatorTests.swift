@@ -108,38 +108,28 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(decision.owner, .canonicalCoordinator)
     }
 
-    func testSaveSnapshotFallsBackToStoredSelectionNotLiveUIWhenCanonicalTabDoesNotMatch() {
+    func testSaveSnapshotFallsBackToStoredSelectionWhenCanonicalIsUnusable() {
         let liveUI = StoredSelection(selectedPaths: ["/tmp/live.swift"])
         let stored = StoredSelection(selectedPaths: ["/tmp/stored.swift"], codemapAutoEnabled: false)
         let canonical = StoredSelection(selectedPaths: ["/tmp/other.swift"], codemapAutoEnabled: false)
-
-        let decision = WorkspaceManagerViewModel.selectionForSaveSnapshot(
-            liveUISelection: liveUI,
-            storedSelection: stored,
-            canonicalSelection: canonical,
-            canonicalTabID: UUID(),
-            activeTabID: UUID()
-        )
-
-        XCTAssertEqual(decision.selection, stored)
-        XCTAssertEqual(decision.owner, .storedComposeTab)
-    }
-
-    func testSaveSnapshotUsesStoredSelectionWhenCanonicalMissing() {
-        let liveUI = StoredSelection(selectedPaths: ["/tmp/live.swift"])
-        let stored = StoredSelection(selectedPaths: ["/tmp/stored.swift"], codemapAutoEnabled: false)
         let activeTabID = UUID()
+        let scenarios: [(name: String, canonicalSelection: StoredSelection?, canonicalTabID: UUID?)] = [
+            ("canonical tab does not match", canonical, UUID()),
+            ("canonical selection is missing", nil, nil)
+        ]
 
-        let decision = WorkspaceManagerViewModel.selectionForSaveSnapshot(
-            liveUISelection: liveUI,
-            storedSelection: stored,
-            canonicalSelection: nil,
-            canonicalTabID: nil,
-            activeTabID: activeTabID
-        )
+        for scenario in scenarios {
+            let decision = WorkspaceManagerViewModel.selectionForSaveSnapshot(
+                liveUISelection: liveUI,
+                storedSelection: stored,
+                canonicalSelection: scenario.canonicalSelection,
+                canonicalTabID: scenario.canonicalTabID,
+                activeTabID: activeTabID
+            )
 
-        XCTAssertEqual(decision.selection, stored)
-        XCTAssertEqual(decision.owner, .storedComposeTab)
+            XCTAssertEqual(decision.selection, stored, scenario.name)
+            XCTAssertEqual(decision.owner, .storedComposeTab, scenario.name)
+        }
     }
 }
 

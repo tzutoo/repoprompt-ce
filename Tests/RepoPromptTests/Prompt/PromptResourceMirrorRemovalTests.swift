@@ -1,31 +1,22 @@
 import XCTest
 
 final class PromptResourceMirrorRemovalTests: XCTestCase {
-    func testBundledPromptMirrorDirectoryIsAbsent() throws {
+    func testBundledPromptMirrorBoundaryPreservesCanonicalSourcesWithoutStaleReferences() throws {
         let repoRoot = try RepoRoot.url(filePath: #filePath)
         let bundledPromptMirror = repoRoot.appendingPathComponent(resourcePromptMirrorPath, isDirectory: true)
+        let canonicalLegacyPrompts = repoRoot.appendingPathComponent(canonicalPromptSourcePath, isDirectory: true)
+            .appendingPathComponent("Legacy", isDirectory: true)
 
         var isDirectory: ObjCBool = false
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: bundledPromptMirror.path, isDirectory: &isDirectory),
             "Prompt Swift sources must live under \(canonicalPromptSourcePath), not bundled AppResources."
         )
-    }
-
-    func testCanonicalLegacyPromptSourcesRemainPresent() throws {
-        let repoRoot = try RepoRoot.url(filePath: #filePath)
-        let canonicalLegacyPrompts = repoRoot.appendingPathComponent(canonicalPromptSourcePath, isDirectory: true)
-            .appendingPathComponent("Legacy", isDirectory: true)
-
-        var isDirectory: ObjCBool = false
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: canonicalLegacyPrompts.path, isDirectory: &isDirectory) && isDirectory.boolValue,
             "Legacy compiled prompt sources are intentionally preserved."
         )
-    }
 
-    func testSourcesAndTestsDoNotReferenceBundledPromptMirror() throws {
-        let repoRoot = try RepoRoot.url(filePath: #filePath)
         let scannedRoots = ["Sources", "Tests"].map { repoRoot.appendingPathComponent($0, isDirectory: true) }
         let forbiddenFragments = [resourcePromptMirrorPath, resourcePromptMirrorPathWithoutAppResources]
 

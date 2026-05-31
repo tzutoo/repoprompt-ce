@@ -4,35 +4,32 @@ import MCP
 import XCTest
 
 final class TabContextRoutingTests: XCTestCase {
-    func testBindingResolverResolvesExplicitContextID() async throws {
+    func testBindingResolverResolvesExplicitContextIDAndLegacyTabIDAlias() async throws {
         let contextID = UUID()
         let workspaceID = UUID()
-        let connectionID = UUID()
-        let resolver = makeResolver(matchesByContextID: [
+        let explicitResolver = makeResolver(matchesByContextID: [
             contextID: [match(windowID: 7, tabID: contextID, workspaceID: workspaceID, roots: ["/tmp/project"])]
         ])
 
-        let resolved = try await resolver.resolveLogicalContextBinding(
-            connectionID: connectionID,
+        let explicit = try await explicitResolver.resolveLogicalContextBinding(
+            connectionID: UUID(),
             explicitContextID: contextID,
             legacyTabID: nil,
             workingDirs: [],
             requestedWindowID: nil
         )
 
-        XCTAssertEqual(resolved?.logicalContext.tabID, contextID)
-        XCTAssertEqual(resolved?.logicalContext.workspaceID, workspaceID)
-        XCTAssertEqual(resolved?.windowID, 7)
-    }
+        XCTAssertEqual(explicit?.logicalContext.tabID, contextID)
+        XCTAssertEqual(explicit?.logicalContext.workspaceID, workspaceID)
+        XCTAssertEqual(explicit?.windowID, 7)
 
-    func testBindingResolverResolvesLegacyTabIDAlias() async throws {
         let tabID = UUID()
-        let workspaceID = UUID()
-        let resolver = makeResolver(matchesByContextID: [
-            tabID: [match(windowID: 3, tabID: tabID, workspaceID: workspaceID)]
+        let legacyWorkspaceID = UUID()
+        let legacyResolver = makeResolver(matchesByContextID: [
+            tabID: [match(windowID: 3, tabID: tabID, workspaceID: legacyWorkspaceID)]
         ])
 
-        let resolved = try await resolver.resolveLogicalContextBinding(
+        let legacy = try await legacyResolver.resolveLogicalContextBinding(
             connectionID: UUID(),
             explicitContextID: nil,
             legacyTabID: tabID,
@@ -40,8 +37,9 @@ final class TabContextRoutingTests: XCTestCase {
             requestedWindowID: nil
         )
 
-        XCTAssertEqual(resolved?.logicalContext.tabID, tabID)
-        XCTAssertEqual(resolved?.windowID, 3)
+        XCTAssertEqual(legacy?.logicalContext.tabID, tabID)
+        XCTAssertEqual(legacy?.logicalContext.workspaceID, legacyWorkspaceID)
+        XCTAssertEqual(legacy?.windowID, 3)
     }
 
     func testBindingResolverUsesRequestedWindowIDToDisambiguateMultiWindowContext() async throws {
@@ -251,34 +249,25 @@ final class TabContextRoutingTests: XCTestCase {
         XCTAssertFalse(ServerNetworkManager.shouldPersistResolvedLogicalContextWindowMapping(for: AppSettingsMCPService.toolName))
     }
 
-    func testRunlessBindingReleaseCanPreserveConnectionRunHintForPendingExactMatch() {
-        let connectionID = UUID()
-        let pendingRunID = UUID()
-        let result = MCPServerViewModel.runMappingsAfterBindingRelease(
-            contextRunID: nil,
-            connectionID: connectionID,
-            connectionIDByRunID: [pendingRunID: connectionID],
-            connectionIDToRunID: [connectionID: pendingRunID],
-            preserveConnectionRunIDMapping: true
-        )
+    func testRunlessBindingReleasePreservesOrDropsConnectionRunHintAccordingToPolicy() {
+        for preserveConnectionRunIDMapping in [true, false] {
+            let connectionID = UUID()
+            let pendingRunID = UUID()
+            let result = MCPServerViewModel.runMappingsAfterBindingRelease(
+                contextRunID: nil,
+                connectionID: connectionID,
+                connectionIDByRunID: [pendingRunID: connectionID],
+                connectionIDToRunID: [connectionID: pendingRunID],
+                preserveConnectionRunIDMapping: preserveConnectionRunIDMapping
+            )
 
-        XCTAssertEqual(result.connectionIDByRunID[pendingRunID], connectionID)
-        XCTAssertEqual(result.connectionIDToRunID[connectionID], pendingRunID)
-    }
-
-    func testRunlessBindingReleaseDropsConnectionRunHintWhenNotPreserved() {
-        let connectionID = UUID()
-        let pendingRunID = UUID()
-        let result = MCPServerViewModel.runMappingsAfterBindingRelease(
-            contextRunID: nil,
-            connectionID: connectionID,
-            connectionIDByRunID: [pendingRunID: connectionID],
-            connectionIDToRunID: [connectionID: pendingRunID],
-            preserveConnectionRunIDMapping: false
-        )
-
-        XCTAssertEqual(result.connectionIDByRunID[pendingRunID], connectionID)
-        XCTAssertNil(result.connectionIDToRunID[connectionID])
+            XCTAssertEqual(result.connectionIDByRunID[pendingRunID], connectionID)
+            if preserveConnectionRunIDMapping {
+                XCTAssertEqual(result.connectionIDToRunID[connectionID], pendingRunID)
+            } else {
+                XCTAssertNil(result.connectionIDToRunID[connectionID])
+            }
+        }
     }
 
     @MainActor
@@ -350,7 +339,7 @@ final class TabContextRoutingTests: XCTestCase {
         }
     #endif
 
-    func testAgentRunStartWithoutSourceFailsClosedWhenNestedIdentityWasLostDuringRehydration() {
+    func testAgentRunStartWithoutSourceRejectsNestedOriginsButAllowsLegitimateTopLevelOrigins() {
         XCTAssertTrue(MCPServerViewModel.shouldRejectAgentRunStartWithoutResolvedSource(
             capturedPurpose: .agentModeRun,
             currentPurpose: .unknown,
@@ -366,9 +355,6 @@ final class TabContextRoutingTests: XCTestCase {
             currentPurpose: .unknown,
             cachedRunPolicyPurpose: .agentModeRun
         ))
-    }
-
-    func testAgentRunStartWithoutSourceStillAllowsLegitimateTopLevelOrigin() {
         XCTAssertFalse(MCPServerViewModel.shouldRejectAgentRunStartWithoutResolvedSource(
             capturedPurpose: .unknown,
             currentPurpose: .unknown,

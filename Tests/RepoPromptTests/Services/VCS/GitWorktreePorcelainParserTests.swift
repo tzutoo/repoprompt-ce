@@ -103,23 +103,20 @@ final class GitWorktreePorcelainParserTests: XCTestCase {
         XCTAssertNil(records[0].prunableReason)
     }
 
-    func testParseMalformedAttributeBeforeWorktreeThrows() {
-        XCTAssertThrowsError(try GitWorktreePorcelainParser.parse("HEAD abc\0", format: .nulTerminated)) { error in
-            guard case let VCSError.parseError(message) = error else {
-                XCTFail("Expected parseError, got \(error)")
-                return
-            }
-            XCTAssertTrue(message.contains("before worktree path"))
-        }
-    }
+    func testParseMalformedRecordsThrowBranchSpecificErrors() {
+        let scenarios = [
+            ("attribute before worktree", "HEAD abc\0", "before worktree path"),
+            ("empty worktree path", "worktree \0HEAD abc\0", "missing a path")
+        ]
 
-    func testParseMalformedEmptyWorktreePathThrows() {
-        XCTAssertThrowsError(try GitWorktreePorcelainParser.parse("worktree \0HEAD abc\0", format: .nulTerminated)) { error in
-            guard case let VCSError.parseError(message) = error else {
-                XCTFail("Expected parseError, got \(error)")
-                return
+        for scenario in scenarios {
+            XCTAssertThrowsError(try GitWorktreePorcelainParser.parse(scenario.1, format: .nulTerminated), scenario.0) { error in
+                guard case let VCSError.parseError(message) = error else {
+                    XCTFail("Expected parseError, got \(error)", file: #filePath, line: #line)
+                    return
+                }
+                XCTAssertTrue(message.contains(scenario.2), scenario.0)
             }
-            XCTAssertTrue(message.contains("missing a path"))
         }
     }
 

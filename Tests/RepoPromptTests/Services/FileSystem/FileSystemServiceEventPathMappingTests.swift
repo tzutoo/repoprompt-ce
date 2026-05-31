@@ -9,28 +9,26 @@ final class FileSystemServiceEventPathMappingTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testSafeInRootEventPathMapsRelative() async throws {
-        let root = try temporaryRoots.makeRoot(suiteName: "FileSystemServiceEventPathMapping")
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
-        let service = try await makeService(root: root)
-
-        let result = await service.mapRelativeEventPathForTesting(root.appendingPathComponent("src/file.txt").path)
-
-        XCTAssertTrue(result.isInside)
-        XCTAssertEqual(result.value, "src/file.txt")
-    }
-
-    func testOutOfRootEventPathIsRejected() async throws {
+    func testRoutineEventPathsMapOnlySafeRootRelativeValues() async throws {
         let parent = try temporaryRoots.makeRoot(suiteName: "FileSystemServiceEventPathMapping")
         let root = parent.appendingPathComponent("root", isDirectory: true)
         let outside = parent.appendingPathComponent("outside/file.txt")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
         let service = try await makeService(root: root)
+        let scenarios = [
+            ("direct in-root path", root.appendingPathComponent("src/file.txt").path, true, "src/file.txt"),
+            ("outside-root sibling", outside.path, false, outside.path),
+            ("root-name prefix false positive", root.path + "-suffix/file.txt", false, root.path + "-suffix/file.txt"),
+            ("empty input", "", false, ""),
+            ("unsafe but standardizable in-root input", root.path + "//src/./file.txt", true, "src/file.txt")
+        ]
 
-        let result = await service.mapRelativeEventPathForTesting(outside.path)
+        for scenario in scenarios {
+            let result = await service.mapRelativeEventPathForTesting(scenario.1)
 
-        XCTAssertFalse(result.isInside)
-        XCTAssertEqual(result.value, outside.path)
+            XCTAssertEqual(result.isInside, scenario.2, scenario.0)
+            XCTAssertEqual(result.value, scenario.3, scenario.0)
+        }
     }
 
     func testSymlinkCanonicalFallbackMapsUnsafeCanonicalPathInsideRoot() async throws {
@@ -48,40 +46,6 @@ final class FileSystemServiceEventPathMappingTests: XCTestCase {
             .appendingPathComponent("../real-root/src/file.txt")
             .path
         let result = await service.mapRelativeEventPathForTesting(unsafeCanonicalPath)
-
-        XCTAssertTrue(result.isInside)
-        XCTAssertEqual(result.value, "src/file.txt")
-    }
-
-    func testRootBoundaryFalsePositiveIsRejected() async throws {
-        let parent = try temporaryRoots.makeRoot(suiteName: "FileSystemServiceEventPathMapping")
-        let root = parent.appendingPathComponent("root", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let service = try await makeService(root: root)
-        let falsePositivePath = root.path + "-suffix/file.txt"
-
-        let result = await service.mapRelativeEventPathForTesting(falsePositivePath)
-
-        XCTAssertFalse(result.isInside)
-        XCTAssertEqual(result.value, falsePositivePath)
-    }
-
-    func testEmptyEventPathIsRejected() async throws {
-        let root = try temporaryRoots.makeRoot(suiteName: "FileSystemServiceEventPathMapping")
-        let service = try await makeService(root: root)
-
-        let result = await service.mapRelativeEventPathForTesting("")
-
-        XCTAssertFalse(result.isInside)
-        XCTAssertEqual(result.value, "")
-    }
-
-    func testUnsafeEventPathFallsBackToStandardization() async throws {
-        let root = try temporaryRoots.makeRoot(suiteName: "FileSystemServiceEventPathMapping")
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
-        let service = try await makeService(root: root)
-
-        let result = await service.mapRelativeEventPathForTesting(root.path + "//src/./file.txt")
 
         XCTAssertTrue(result.isInside)
         XCTAssertEqual(result.value, "src/file.txt")

@@ -89,15 +89,6 @@ final class PromptMigrationRemovalTests: XCTestCase {
             XCTAssertFalse(encodedCustom.contains(removedKey))
         }
     }
-
-    func testPromptViewModelNoLongerCreatesLegacyPreviousSettingsPreset() throws {
-        let repoRoot = try RepoRoot.url(filePath: #filePath)
-        let sourcePath = "Sources/RepoPrompt/Features/Prompt/ViewModels/PromptViewModel.swift"
-        let contents = try String(contentsOf: repoRoot.appendingPathComponent(sourcePath), encoding: .utf8)
-
-        XCTAssertFalse(contents.contains("Your Previous Settings"), sourcePath)
-        XCTAssertFalse(contents.contains("migratePromptsFromDefaultsIfNeeded"), sourcePath)
-    }
 }
 
 private extension String? {

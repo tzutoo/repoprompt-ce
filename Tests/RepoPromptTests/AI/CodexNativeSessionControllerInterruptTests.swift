@@ -2,22 +2,24 @@
 import XCTest
 
 final class CodexNativeSessionControllerInterruptTests: XCTestCase {
-    func testActiveTurnMismatchParserExtractsFoundTurnID() {
-        let description = "turn/interrupt failed: expected active turn id `turn-old` but found `turn-new`"
+    func testActiveTurnMismatchParserMatrix() {
+        let rows: [(description: String, expectedTurnID: String?)] = [
+            ("turn/interrupt failed: expected active turn id `turn-old` but found `turn-new`", "turn-new"),
+            ("network failed", nil),
+            ("expected active turn id `old` but found ``", nil),
+            ("expected active turn id `old` but found turn-new", nil)
+        ]
 
-        XCTAssertEqual(
-            CodexNativeSessionController.activeTurnMismatchActualTurnID(fromErrorDescription: description),
-            "turn-new"
-        )
+        for row in rows {
+            XCTAssertEqual(
+                CodexNativeSessionController.activeTurnMismatchActualTurnID(fromErrorDescription: row.description),
+                row.expectedTurnID,
+                row.description
+            )
+        }
     }
 
-    func testActiveTurnMismatchParserRejectsUnrelatedAndMalformedErrors() {
-        XCTAssertNil(CodexNativeSessionController.activeTurnMismatchActualTurnID(fromErrorDescription: "network failed"))
-        XCTAssertNil(CodexNativeSessionController.activeTurnMismatchActualTurnID(fromErrorDescription: "expected active turn id `old` but found ``"))
-        XCTAssertNil(CodexNativeSessionController.activeTurnMismatchActualTurnID(fromErrorDescription: "expected active turn id `old` but found turn-new"))
-    }
-
-    func testResolvedInterruptTurnIDDoesNotUseCachedTurnAfterSuccessfulNoActiveRefresh() {
+    func testResolvedInterruptTurnIDMatrix() {
         XCTAssertNil(
             CodexNativeSessionController.resolvedInterruptTurnID(
                 cachedTurnID: "stale-turn",
@@ -30,9 +32,6 @@ final class CodexNativeSessionControllerInterruptTests: XCTestCase {
                 refreshResult: .refreshed(" \t\n")
             )
         )
-    }
-
-    func testResolvedInterruptTurnIDFallsBackToCachedTurnOnlyWhenRefreshFails() {
         XCTAssertEqual(
             CodexNativeSessionController.resolvedInterruptTurnID(
                 cachedTurnID: "stale-turn",

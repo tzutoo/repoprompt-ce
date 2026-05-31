@@ -158,16 +158,18 @@ final class AgentWorktreeMergeAttentionTests: XCTestCase {
         XCTAssertEqual(presentation.detailText, "2 conflicted files")
     }
 
-    func testWorktreeMergeCardPresentationFallsBackOnMissingDtoToNeutral() {
-        let presentation = WorktreeMergeCardPresentationBuilder.build(dto: nil, toolIsError: false)
-        XCTAssertEqual(presentation.title, "Merge Worktree")
-        XCTAssertEqual(presentation.status, ToolCardStatus.neutral)
-    }
+    func testWorktreeMergeCardPresentationNilDTOFallbackMatrix() {
+        let rows: [(label: String, toolIsError: Bool, status: ToolCardStatus, subtitle: String)] = [
+            ("neutral fallback", false, .neutral, "manage_worktree"),
+            ("tool error", true, .failure, "failed")
+        ]
 
-    func testWorktreeMergeCardPresentationReportsFailureWhenToolIsError() {
-        let presentation = WorktreeMergeCardPresentationBuilder.build(dto: nil, toolIsError: true)
-        XCTAssertEqual(presentation.status, ToolCardStatus.failure)
-        XCTAssertEqual(presentation.subtitle, "failed")
+        for row in rows {
+            let presentation = WorktreeMergeCardPresentationBuilder.build(dto: nil, toolIsError: row.toolIsError)
+            XCTAssertEqual(presentation.title, "Merge Worktree", row.label)
+            XCTAssertEqual(presentation.status, row.status, row.label)
+            XCTAssertEqual(presentation.subtitle, row.subtitle, row.label)
+        }
     }
 
     func testWorktreeMergeCardPresentationCompletedStatusIsSuccess() {

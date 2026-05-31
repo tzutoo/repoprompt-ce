@@ -2,28 +2,25 @@
 import XCTest
 
 final class PromptContextResolvedFileTreeTests: XCTestCase {
-    func testNoneModeDoesNotRenderFileTreeEvenWhenIncluded() {
-        let context = makeContext(includeFileTree: true, fileTreeMode: .none)
+    func testResolvedFileTreeRenderingTruthTable() {
+        let scenarios: [(name: String, includeFileTree: Bool, fileTreeMode: FileTreeOption, rendersFileTree: Bool, effectiveMode: FileTreeOption)] = [
+            ("included none mode", true, .none, false, .none),
+            ("disabled selected mode", false, .selected, false, .none),
+            ("included selected mode", true, .selected, true, .selected),
+            ("included auto mode", true, .auto, true, .auto)
+        ]
 
-        XCTAssertFalse(context.rendersFileTree)
-        XCTAssertEqual(context.effectiveFileTreeMode, .none)
-    }
+        for scenario in scenarios {
+            XCTContext.runActivity(named: scenario.name) { _ in
+                let context = makeContext(
+                    includeFileTree: scenario.includeFileTree,
+                    fileTreeMode: scenario.fileTreeMode
+                )
 
-    func testDisabledFileTreeForcesEffectiveNoneMode() {
-        let context = makeContext(includeFileTree: false, fileTreeMode: .selected)
-
-        XCTAssertFalse(context.rendersFileTree)
-        XCTAssertEqual(context.effectiveFileTreeMode, .none)
-    }
-
-    func testSelectedAndAutoModesRenderWhenIncluded() {
-        let selected = makeContext(includeFileTree: true, fileTreeMode: .selected)
-        let auto = makeContext(includeFileTree: true, fileTreeMode: .auto)
-
-        XCTAssertTrue(selected.rendersFileTree)
-        XCTAssertEqual(selected.effectiveFileTreeMode, .selected)
-        XCTAssertTrue(auto.rendersFileTree)
-        XCTAssertEqual(auto.effectiveFileTreeMode, .auto)
+                XCTAssertEqual(context.rendersFileTree, scenario.rendersFileTree)
+                XCTAssertEqual(context.effectiveFileTreeMode, scenario.effectiveMode)
+            }
+        }
     }
 
     private func makeContext(

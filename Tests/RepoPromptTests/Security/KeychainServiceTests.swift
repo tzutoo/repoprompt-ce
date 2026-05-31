@@ -76,6 +76,51 @@ final class KeychainServiceTests: XCTestCase {
         XCTAssertEqual(deleteQuery.stringValue(for: kSecUseAuthenticationUI), kSecUseAuthenticationUISkip as String)
     }
 
+    func testSaveUpdatesCanonicalNoninteractiveItemWithoutAddingWhenPresent() throws {
+        let fake = FakeSecItemClient(
+            copyHandler: { _, _ in errSecItemNotFound },
+            updateHandler: { _, _ in errSecSuccess }
+        )
+        let service = makeService(serviceName: KeychainService.canonicalServiceName, secItemClient: fake)
+
+        try service.save("stored-value", for: "api-key", accessMode: .nonInteractive(reason: .test))
+
+        XCTAssertEqual(fake.operationLog, ["update"])
+        XCTAssertTrue(fake.addQueries.isEmpty)
+        let updateQuery = try XCTUnwrap(fake.updateQueries.first)
+        XCTAssertEqual(updateQuery.stringValue(for: kSecClass), kSecClassGenericPassword as String)
+        XCTAssertEqual(updateQuery.stringValue(for: kSecAttrService), KeychainService.canonicalServiceName)
+        XCTAssertEqual(updateQuery.stringValue(for: kSecAttrAccount), "api-key")
+        XCTAssertEqual(updateQuery.stringValue(for: kSecUseAuthenticationUI), kSecUseAuthenticationUISkip as String)
+        let updateAttributes = try XCTUnwrap(fake.updateAttributes.first)
+        XCTAssertEqual(updateAttributes.dataValue(for: kSecValueData), Data("stored-value".utf8))
+    }
+
+    func testSaveAddsCanonicalNoninteractiveItemAfterMissingUpdate() throws {
+        let fake = FakeSecItemClient(
+            copyHandler: { _, _ in errSecItemNotFound },
+            addHandler: { _, _ in errSecSuccess },
+            updateHandler: { _, _ in errSecItemNotFound }
+        )
+        let service = makeService(serviceName: KeychainService.canonicalServiceName, secItemClient: fake)
+
+        try service.save("stored-value", for: "api-key", accessMode: .nonInteractive(reason: .test))
+
+        XCTAssertEqual(fake.operationLog, ["update", "add"])
+        let updateQuery = try XCTUnwrap(fake.updateQueries.first)
+        XCTAssertEqual(updateQuery.stringValue(for: kSecAttrService), KeychainService.canonicalServiceName)
+        XCTAssertEqual(updateQuery.stringValue(for: kSecAttrAccount), "api-key")
+        XCTAssertEqual(updateQuery.stringValue(for: kSecUseAuthenticationUI), kSecUseAuthenticationUISkip as String)
+        let addQuery = try XCTUnwrap(fake.addQueries.first)
+        XCTAssertEqual(addQuery.stringValue(for: kSecClass), kSecClassGenericPassword as String)
+        XCTAssertEqual(addQuery.stringValue(for: kSecAttrService), KeychainService.canonicalServiceName)
+        XCTAssertEqual(addQuery.stringValue(for: kSecAttrAccount), "api-key")
+        XCTAssertEqual(addQuery.stringValue(for: kSecUseAuthenticationUI), kSecUseAuthenticationUISkip as String)
+        XCTAssertEqual(addQuery.dataValue(for: kSecValueData), Data("stored-value".utf8))
+        XCTAssertEqual(addQuery.stringValue(for: kSecAttrAccessible), kSecAttrAccessibleAfterFirstUnlock as String)
+        XCTAssertEqual(addQuery.boolValue(for: kSecAttrSynchronizable), false)
+    }
+
     private func makeService(
         serviceName: String = "test.canonical.service",
         secItemClient: SecItemClient
@@ -100,6 +145,7 @@ private final class FakeSecItemClient: SecItemClient {
     private(set) var updateQueries: [CapturedQuery] = []
     private(set) var updateAttributes: [CapturedQuery] = []
     private(set) var deleteQueries: [CapturedQuery] = []
+    private(set) var operationLog: [String] = []
 
     init(
         copyHandler: @escaping CopyHandler,
@@ -122,6 +168,7 @@ private final class FakeSecItemClient: SecItemClient {
     func add(_ query: CFDictionary, _ result: UnsafeMutablePointer<AnyObject?>?) -> OSStatus {
         let captured = CapturedQuery(query)
         addQueries.append(captured)
+        operationLog.append("add")
         return addHandler(captured, result)
     }
 
@@ -130,6 +177,7 @@ private final class FakeSecItemClient: SecItemClient {
         let capturedAttributes = CapturedQuery(attributes)
         updateQueries.append(capturedQuery)
         updateAttributes.append(capturedAttributes)
+        operationLog.append("update")
         return updateHandler(capturedQuery, capturedAttributes)
     }
 
@@ -169,6 +217,16 @@ private struct CapturedQuery {
         }
         if let value = dictionary[key] as? NSData {
             return value as Data
+        }
+        return nil
+    }
+
+    func boolValue(for key: CFString) -> Bool? {
+        if let value = dictionary[key as String] as? Bool {
+            return value
+        }
+        if let value = dictionary[key] as? Bool {
+            return value
         }
         return nil
     }

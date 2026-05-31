@@ -2,89 +2,75 @@
 import XCTest
 
 final class DiffChunkTextApplierTests: XCTestCase {
-    func testAdjustsLaterStartLineAfterInsertion() throws {
-        let original = "a\nb\nc\nd"
-        let chunks = [
-            DiffChunk(
-                lines: [DiffLine(content: "+inserted")],
-                startLine: 2
+    func testAdjustsLaterStartLineForCumulativeOffsets() throws {
+        let scenarios: [(name: String, chunks: [DiffChunk], expected: String)] = [
+            (
+                "insertion shifts later replacement forward",
+                [
+                    DiffChunk(
+                        lines: [DiffLine(content: "+inserted")],
+                        startLine: 2
+                    ),
+                    DiffChunk(
+                        lines: [
+                            DiffLine(content: "-d"),
+                            DiffLine(content: "+D")
+                        ],
+                        startLine: 3
+                    )
+                ],
+                "a\nb\ninserted\nc\nD"
             ),
-            DiffChunk(
-                lines: [
-                    DiffLine(content: "-d"),
-                    DiffLine(content: "+D")
+            (
+                "deletion shifts later replacement backward",
+                [
+                    DiffChunk(
+                        lines: [DiffLine(content: "-b")],
+                        startLine: 1
+                    ),
+                    DiffChunk(
+                        lines: [
+                            DiffLine(content: "-d"),
+                            DiffLine(content: "+D")
+                        ],
+                        startLine: 3
+                    )
                 ],
-                startLine: 3
+                "a\nc\nD"
             )
         ]
 
-        let result = try DiffChunkTextApplier.apply(chunks: chunks, to: original)
-
-        XCTAssertEqual(result, "a\nb\ninserted\nc\nD")
+        for scenario in scenarios {
+            try XCTContext.runActivity(named: scenario.name) { _ in
+                let result = try DiffChunkTextApplier.apply(chunks: scenario.chunks, to: "a\nb\nc\nd")
+                XCTAssertEqual(result, scenario.expected)
+            }
+        }
     }
 
-    func testAdjustsLaterStartLineAfterDeletion() throws {
-        let original = "a\nb\nc\nd"
-        let chunks = [
-            DiffChunk(
-                lines: [DiffLine(content: "-b")],
-                startLine: 1
-            ),
-            DiffChunk(
-                lines: [
-                    DiffLine(content: "-d"),
-                    DiffLine(content: "+D")
-                ],
-                startLine: 3
-            )
+    func testPreservesTextShapeAndReturnsOriginalTextForEmptyChunks() throws {
+        let replacementChunk = DiffChunk(
+            lines: [
+                DiffLine(content: "-two"),
+                DiffLine(content: "+TWO")
+            ],
+            startLine: 1
+        )
+        let scenarios: [(name: String, original: String, chunks: [DiffChunk], expected: String, forbiddenFragment: String?)] = [
+            ("CRLF remains CRLF", "one\r\ntwo\r\nthree", [replacementChunk], "one\r\nTWO\r\nthree", "one\nTWO"),
+            ("existing trailing LF remains present", "one\ntwo\n", [replacementChunk], "one\nTWO\n", nil),
+            ("empty chunk input returns byte-equivalent original text", "one\r\ntwo\r\n", [], "one\r\ntwo\r\n", nil)
         ]
 
-        let result = try DiffChunkTextApplier.apply(chunks: chunks, to: original)
-
-        XCTAssertEqual(result, "a\nc\nD")
-    }
-
-    func testPreservesOriginalLineEnding() throws {
-        let original = "one\r\ntwo\r\nthree"
-        let chunks = [
-            DiffChunk(
-                lines: [
-                    DiffLine(content: "-two"),
-                    DiffLine(content: "+TWO")
-                ],
-                startLine: 1
-            )
-        ]
-
-        let result = try DiffChunkTextApplier.apply(chunks: chunks, to: original)
-
-        XCTAssertEqual(result, "one\r\nTWO\r\nthree")
-        XCTAssertFalse(result.contains("one\nTWO"))
-    }
-
-    func testPreservesOriginalTrailingNewline() throws {
-        let original = "one\ntwo\n"
-        let chunks = [
-            DiffChunk(
-                lines: [
-                    DiffLine(content: "-two"),
-                    DiffLine(content: "+TWO")
-                ],
-                startLine: 1
-            )
-        ]
-
-        let result = try DiffChunkTextApplier.apply(chunks: chunks, to: original)
-
-        XCTAssertEqual(result, "one\nTWO\n")
-    }
-
-    func testReturnsOriginalTextForEmptyChunkInput() throws {
-        let original = "one\r\ntwo\r\n"
-
-        let result = try DiffChunkTextApplier.apply(chunks: [], to: original)
-
-        XCTAssertEqual(result, original)
+        for scenario in scenarios {
+            try XCTContext.runActivity(named: scenario.name) { _ in
+                let result = try DiffChunkTextApplier.apply(chunks: scenario.chunks, to: scenario.original)
+                XCTAssertEqual(result, scenario.expected)
+                if let forbiddenFragment = scenario.forbiddenFragment {
+                    XCTAssertFalse(result.contains(forbiddenFragment))
+                }
+            }
+        }
     }
 
     func testAppliesChunksInInputOrder() throws {

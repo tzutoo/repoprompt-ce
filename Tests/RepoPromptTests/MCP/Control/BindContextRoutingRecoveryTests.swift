@@ -68,21 +68,17 @@ final class BindContextRoutingRecoveryTests: XCTestCase {
         ]))
     }
 
-    func testMCPConnectionManagerHasNoIncompleteBindContextFastPath() throws {
+    func testMCPConnectionManagerHasNoIncompleteBindContextFastPathOrUnsafeRegisteredServicesSnapshot() throws {
         let source = try readMCPConnectionManagerSource()
         XCTAssertFalse(source.contains("fastBindContextReadOnlyResult"))
         XCTAssertFalse(source.contains("served read-only request via fast path"))
+        XCTAssertFalse(source.contains("registeredServicesSnapshot"))
+        XCTAssertFalse(source.contains("nonisolated(unsafe) private var registeredServicesSnapshot"))
     }
 
     func testStandardWorkspaceSwitchBindsConnectionOnlyWhenWindowIDIsExplicit() {
         XCTAssertTrue(WindowRoutingService.shouldBindConnectionAfterStandardWorkspaceSwitch(explicitWindowIDProvided: true))
         XCTAssertFalse(WindowRoutingService.shouldBindConnectionAfterStandardWorkspaceSwitch(explicitWindowIDProvided: false))
-    }
-
-    func testMCPConnectionManagerHasNoUnsafeRegisteredServicesSnapshot() throws {
-        let source = try readMCPConnectionManagerSource()
-        XCTAssertFalse(source.contains("registeredServicesSnapshot"))
-        XCTAssertFalse(source.contains("nonisolated(unsafe) private var registeredServicesSnapshot"))
     }
 
     private func readMCPConnectionManagerSource() throws -> String {
