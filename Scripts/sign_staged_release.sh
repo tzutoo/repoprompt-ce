@@ -87,7 +87,7 @@ plutil -convert xml1 -o "$canonical_app_entitlements" "$app_entitlements"
 plutil -convert xml1 -o "$canonical_signed_entitlements" "$signed_entitlements"
 cmp "$canonical_app_entitlements" "$canonical_signed_entitlements" ||
     fail "Signed app entitlements do not match trusted release policy"
-"$SCRIPT_DIR/smoke_embedded_mcp_helper.sh" "$APP_BUNDLE" "Developer ID staged app MCP helper"
+"$SCRIPT_DIR/validate_embedded_mcp_helper_layout.sh" "$APP_BUNDLE" "Developer ID staged app MCP helper layout"
 
 signature_details="$(codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1)"
 identifier="$(printf '%s\n' "$signature_details" | awk -F= '/^Identifier=/{print $2; exit}')"

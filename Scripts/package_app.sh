@@ -151,9 +151,6 @@ printf 'Debug secure storage backend marker: %s\n' "$DEBUG_STORAGE_BACKEND_MARKE
 printf 'Signing mode marker: %s\n' "$SIGNING_MODE_MARKER"
 
 SWIFT_BUILD_ARGS=(-c "$CONF")
-if (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
-    SWIFT_BUILD_ARGS+=(-Xswiftc -DREPOPROMPT_LOCAL_SELF_SIGNED_BUILD)
-fi
 
 phase "Building $APP_NAME ($CONF)"
 run "$RUN_WITHOUT_GITHUB_TOKENS" swift build "${SWIFT_BUILD_ARGS[@]}" --product "$APP_NAME"
@@ -310,7 +307,8 @@ else
 fi
 run codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 verify_signed_app_identity
-run "$CONTROL_PLANE_SCRIPTS_DIR/smoke_embedded_mcp_helper.sh" "$APP_BUNDLE" "Packaged app MCP helper"
+run "$CONTROL_PLANE_SCRIPTS_DIR/validate_embedded_mcp_helper_layout.sh" "$APP_BUNDLE" "Packaged app MCP helper layout"
+run "$RUN_WITHOUT_GITHUB_TOKENS" "$CONTROL_PLANE_SCRIPTS_DIR/smoke_embedded_mcp_helper.sh" "$APP_BUNDLE" "Packaged app MCP helper"
 if [[ "$(python3 - <<PY
 from pathlib import Path
 print(Path('$APP_BUNDLE').resolve(strict=False) == Path('$COMPAT_APP_BUNDLE').resolve(strict=False))
