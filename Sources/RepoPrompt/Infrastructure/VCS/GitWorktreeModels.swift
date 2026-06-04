@@ -85,6 +85,7 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
     public let appManagedContainer: URL?
     public let mainWorktreeRoot: URL?
     public let knownWorktreeRoots: [URL]
+    public let copyWorktreeIncludeFiles: Bool
 
     public init(
         path: URL,
@@ -96,7 +97,8 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
         allowExternalPath: Bool = false,
         appManagedContainer: URL? = nil,
         mainWorktreeRoot: URL? = nil,
-        knownWorktreeRoots: [URL] = []
+        knownWorktreeRoots: [URL] = [],
+        copyWorktreeIncludeFiles: Bool = false
     ) {
         self.path = path
         self.branch = branch
@@ -108,6 +110,48 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
         self.appManagedContainer = appManagedContainer
         self.mainWorktreeRoot = mainWorktreeRoot
         self.knownWorktreeRoots = knownWorktreeRoots
+        self.copyWorktreeIncludeFiles = copyWorktreeIncludeFiles
+    }
+}
+
+public struct GitWorktreeCreateResult: Sendable, Equatable {
+    public let descriptor: GitWorktreeDescriptor
+    public let includeCopyResult: GitWorktreeIncludeCopyResult?
+
+    public init(
+        descriptor: GitWorktreeDescriptor,
+        includeCopyResult: GitWorktreeIncludeCopyResult? = nil
+    ) {
+        self.descriptor = descriptor
+        self.includeCopyResult = includeCopyResult
+    }
+}
+
+public struct GitWorktreeIncludeCopyResult: Sendable, Equatable {
+    public let copiedCount: Int
+    public let matchedCount: Int
+    public let skippedSummaries: [String]
+    public let errorSummaries: [String]
+
+    public init(
+        copiedCount: Int,
+        matchedCount: Int,
+        skippedSummaries: [String] = [],
+        errorSummaries: [String] = []
+    ) {
+        self.copiedCount = copiedCount
+        self.matchedCount = matchedCount
+        self.skippedSummaries = skippedSummaries
+        self.errorSummaries = errorSummaries
+    }
+
+    public var warningText: String? {
+        let details = (skippedSummaries + errorSummaries).filter { !$0.isEmpty }
+        guard !details.isEmpty else { return nil }
+        let detailText = details.prefix(5).joined(separator: "; ")
+        let remaining = details.count - min(details.count, 5)
+        let suffix = remaining > 0 ? "; +\(remaining) more" : ""
+        return ".worktreeinclude copied \(copiedCount) of \(matchedCount) eligible file(s); some files were skipped or failed: \(detailText)\(suffix)"
     }
 }
 

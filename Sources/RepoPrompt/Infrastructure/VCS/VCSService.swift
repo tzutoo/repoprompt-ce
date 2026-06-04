@@ -454,6 +454,18 @@ public extension VCSService {
         request: GitWorktreeCreateRequest,
         at repoURL: URL
     ) async throws -> GitWorktreeDescriptor {
+        let result = try await createGitWorktreeWithResult(request: request, at: repoURL)
+        if let warning = result.includeCopyResult?.warningText {
+            NSLog("RepoPrompt .worktreeinclude copy warning for worktree %@: %@", result.descriptor.path, warning)
+        }
+        return result.descriptor
+    }
+
+    /// Create a Git worktree and keep best-effort `.worktreeinclude` copy details.
+    func createGitWorktreeWithResult(
+        request: GitWorktreeCreateRequest,
+        at repoURL: URL
+    ) async throws -> GitWorktreeCreateResult {
         let resolved = await resolveRepo(from: repoURL)
         guard let resolved else {
             throw VCSError.notARepository(path: repoURL.path)
@@ -462,10 +474,10 @@ public extension VCSService {
             throw VCSError.unsupportedOperation(operation: "create_worktree", backend: resolved.backendKind)
         }
 
-        let created = try await gitBackend().createWorktree(request: request, at: resolved.rootURL)
+        let result = try await gitBackend().createWorktreeWithResult(request: request, at: resolved.rootURL)
         invalidateCache(for: resolved.rootURL)
         invalidateCache(for: request.path)
-        return created
+        return result
     }
 
     func inspectGitWorktreeMerge(_ request: GitWorktreeMergeInspectRequest) async throws -> GitWorktreeMergeInspection {

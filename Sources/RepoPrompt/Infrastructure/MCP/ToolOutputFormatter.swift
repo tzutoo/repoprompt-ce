@@ -3693,7 +3693,10 @@ extension ToolOutputFormatter {
         }
         if let warning = dto.warning, !warning.isEmpty {
             out.append("")
-            out.append("> ⚠️ \(warning)")
+            let lines = warning.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            for (index, line) in lines.enumerated() {
+                out.append(index == 0 ? "> ⚠️ \(line)" : "> \(line)")
+            }
         }
         return [.text(out.joined(separator: "\n"))]
     }
