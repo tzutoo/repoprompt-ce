@@ -22,20 +22,7 @@ struct AgentContextExportSource: Equatable {
     }
 
     static func worktreeBindingFingerprint(_ bindings: [AgentSessionWorktreeBinding]) -> String {
-        bindings
-            .map { binding in
-                [
-                    binding.repositoryID,
-                    binding.repoKey,
-                    StandardizedPath.absolute((binding.logicalRootPath as NSString).expandingTildeInPath),
-                    binding.worktreeID,
-                    StandardizedPath.absolute((binding.worktreeRootPath as NSString).expandingTildeInPath),
-                    binding.branch ?? "",
-                    binding.head ?? ""
-                ].joined(separator: "\u{1F}")
-            }
-            .sorted()
-            .joined(separator: "\u{1E}")
+        AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(bindings)
     }
 }
 
@@ -143,17 +130,13 @@ enum AgentContextExportResolver {
         source: AgentContextExportSource,
         store: WorkspaceFileContextStore
     ) async -> WorkspaceLookupContext {
-        guard let sessionID = source.activeAgentSessionID,
-              !source.worktreeBindings.isEmpty,
-              let projection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
-                  sessionID: sessionID,
-                  bindings: source.worktreeBindings
-              ),
-              !projection.isEmpty
-        else {
-            return WorkspaceLookupContext.visibleWorkspace
-        }
-        return WorkspaceLookupContext(rootScope: projection.lookupRootScope, bindingProjection: projection)
+        await AgentWorkspaceLookupContextResolver.lookupContext(
+            source: AgentWorkspaceLookupContextSource(
+                activeAgentSessionID: source.activeAgentSessionID,
+                worktreeBindings: source.worktreeBindings
+            ),
+            store: store
+        )
     }
 
     static func resolveModel(
