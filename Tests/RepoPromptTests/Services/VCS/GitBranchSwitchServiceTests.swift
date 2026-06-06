@@ -148,6 +148,67 @@ final class GitBranchSwitchServiceTests: XCTestCase {
         XCTAssertTrue(try runGitCapture(["stash", "list"], cwd: repo).isEmpty)
     }
 
+    func testOptionsAnnotateBranchCheckedOutInAnotherWorktree() async throws {
+        let repo = try makeGitFixture()
+        let occupiedWorktree = try addLinkedWorktree(for: "feature/local", repo: repo)
+        let service = VCSService()
+
+        let options = try await service.gitBranchSwitchOptions(at: repo)
+        let branch = try XCTUnwrap(options.branches.first { $0.name == "feature/local" })
+
+        XCTAssertFalse(branch.isCurrent)
+        XCTAssertTrue(branch.isCheckedOutInAnotherWorktree)
+        XCTAssertEqual(branch.checkedOutWorktree?.worktreePath, occupiedWorktree.standardizedFileURL.path)
+        XCTAssertEqual(branch.checkedOutWorktree?.worktreeName, "feature-local")
+        XCTAssertEqual(branch.checkedOutWorktreeLabel, "feature-local")
+        XCTAssertNotNil(branch.checkedOutWorktree?.worktreeID)
+    }
+
+    func testPreflightRejectsBranchCheckedOutInAnotherWorktree() async throws {
+        let repo = try makeGitFixture()
+        let occupiedWorktree = try addLinkedWorktree(for: "feature/local", repo: repo)
+        let service = VCSService()
+
+        do {
+            _ = try await service.preflightGitBranchSwitch(branchName: "feature/local", at: repo)
+            XCTFail("Expected occupied branch preflight to fail")
+        } catch let error as GitBranchSwitchError {
+            XCTAssertEqual(
+                error,
+                .branchCheckedOutInWorktree(
+                    branch: "feature/local",
+                    worktreePath: occupiedWorktree.standardizedFileURL.path,
+                    worktreeName: "feature-local"
+                )
+            )
+        }
+
+        XCTAssertEqual(try currentBranch(cwd: repo), "main")
+    }
+
+    func testSwitchRejectsBranchCheckedOutInAnotherWorktreeAndLeavesCheckoutUnchanged() async throws {
+        let repo = try makeGitFixture()
+        let occupiedWorktree = try addLinkedWorktree(for: "feature/local", repo: repo)
+        let service = VCSService()
+
+        do {
+            _ = try await service.switchGitBranch(GitBranchSwitchRequest(branchName: "feature/local"), at: repo)
+            XCTFail("Expected occupied branch switch to fail")
+        } catch let error as GitBranchSwitchError {
+            XCTAssertEqual(
+                error,
+                .branchCheckedOutInWorktree(
+                    branch: "feature/local",
+                    worktreePath: occupiedWorktree.standardizedFileURL.path,
+                    worktreeName: "feature-local"
+                )
+            )
+        }
+
+        XCTAssertEqual(try currentBranch(cwd: repo), "main")
+        XCTAssertEqual(try String(contentsOf: repo.appendingPathComponent("branch.txt")), "main\n")
+    }
+
     private func makeGitFixture() throws -> URL {
         let root = try makeTemporaryDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -170,6 +231,22 @@ final class GitBranchSwitchServiceTests: XCTestCase {
         try runGit(["commit", "-m", "Other commit"], cwd: repo)
         try runGit(["switch", "main"], cwd: repo)
         return repo
+    }
+
+    private func addLinkedWorktree(for branch: String, repo: URL) throws -> URL {
+        let worktreesRoot = repo.deletingLastPathComponent().appendingPathComponent(".worktrees", isDirectory: true)
+        try FileManager.default.createDirectory(at: worktreesRoot, withIntermediateDirectories: true)
+        let worktree = worktreesRoot.appendingPathComponent(safeWorktreeDirectoryName(for: branch), isDirectory: true)
+        try runGit(["worktree", "add", worktree.path, branch], cwd: repo)
+        return worktree.standardizedFileURL
+    }
+
+    private func safeWorktreeDirectoryName(for branch: String) -> String {
+        let safeName = branch.unicodeScalars.map { scalar in
+            CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : "-"
+        }.joined()
+        let trimmed = safeName.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "worktree" : trimmed
     }
 
     private func makeTemporaryDirectory() throws -> URL {

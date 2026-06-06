@@ -96,6 +96,19 @@ public struct VCSUncommittedFile: Equatable, Sendable {
 
 // MARK: - VCS Branch/Tag Types
 
+/// Describes a local branch that is already checked out by another Git worktree.
+public struct VCSBranchWorktreeOccupancy: Sendable, Equatable, Hashable {
+    public let worktreePath: String
+    public let worktreeName: String?
+    public let worktreeID: String?
+
+    public init(worktreePath: String, worktreeName: String? = nil, worktreeID: String? = nil) {
+        self.worktreePath = worktreePath
+        self.worktreeName = worktreeName
+        self.worktreeID = worktreeID
+    }
+}
+
 /// Represents a branch (git) or bookmark (jujutsu).
 public struct VCSBranch: Identifiable, Sendable, Equatable {
     /// The name of the branch/bookmark.
@@ -107,14 +120,39 @@ public struct VCSBranch: Identifiable, Sendable, Equatable {
     /// The date of the last commit on this branch (if available).
     public let lastCommitDate: Date?
 
+    /// The other worktree currently occupying this branch, if any.
+    public let checkedOutWorktree: VCSBranchWorktreeOccupancy?
+
     public var id: String {
         name
     }
 
-    public init(name: String, isCurrent: Bool, lastCommitDate: Date? = nil) {
+    public var isCheckedOutInAnotherWorktree: Bool {
+        checkedOutWorktree != nil
+    }
+
+    public var checkedOutWorktreeLabel: String? {
+        guard let checkedOutWorktree else { return nil }
+        if let name = checkedOutWorktree.worktreeName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty
+        {
+            return name
+        }
+        let fallback = URL(fileURLWithPath: checkedOutWorktree.worktreePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? nil : fallback
+    }
+
+    public init(
+        name: String,
+        isCurrent: Bool,
+        lastCommitDate: Date? = nil,
+        checkedOutWorktree: VCSBranchWorktreeOccupancy? = nil
+    ) {
         self.name = name
         self.isCurrent = isCurrent
         self.lastCommitDate = lastCommitDate
+        self.checkedOutWorktree = checkedOutWorktree
     }
 }
 

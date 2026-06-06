@@ -1326,6 +1326,7 @@ actor GitService {
         let branches = try await getLocalBranches(at: repoURL)
         let currentBranch = try await currentBranchOrNil(at: repoURL)
         let currentHead = try await getHeadSHA(at: repoURL)
+        let worktreeOccupancy = try await branchWorktreeOccupancyByBranchName(excludingCurrentCheckoutAt: repoURL)
         return GitBranchSwitchOptions(
             rootPath: repoURL.standardizedFileURL.path,
             repoRootPath: repoURL.standardizedFileURL.path,
@@ -1336,7 +1337,8 @@ actor GitService {
                 VCSBranch(
                     name: branch.name,
                     isCurrent: branch.name == currentBranch || branch.isCurrent,
-                    lastCommitDate: branch.lastCommitDate
+                    lastCommitDate: branch.lastCommitDate,
+                    checkedOutWorktree: worktreeOccupancy[branch.name]
                 )
             }
         )
@@ -1345,6 +1347,7 @@ actor GitService {
     func preflightGitBranchSwitch(branchName: String, at repoURL: URL) async throws -> GitBranchSwitchPreflight {
         try Self.validateLocalBranchName(branchName)
         try await requireLocalBranch(branchName, at: repoURL)
+        try await requireBranchNotCheckedOutInAnotherWorktree(branchName, at: repoURL)
         let currentBranch = try await currentBranchOrNil(at: repoURL)
         let currentHead = try await getHeadSHA(at: repoURL)
         async let dirtyFilesTask = getUncommittedFiles(at: repoURL)
@@ -1403,6 +1406,8 @@ actor GitService {
                 )
             }
 
+            try await requireBranchNotCheckedOutInAnotherWorktree(request.branchName, at: repoURL)
+
             let switchResult = try await runGit(["switch", "--no-guess", request.branchName], at: repoURL)
             if switchResult.2 != 0 {
                 if Self.shouldFallbackFromGitSwitchError(switchResult.1) {
@@ -1456,6 +1461,39 @@ actor GitService {
         guard exitCode == 0 else {
             throw GitBranchSwitchError.branchNotLocal(branchName)
         }
+    }
+
+    private func branchWorktreeOccupancyByBranchName(
+        excludingCurrentCheckoutAt repoURL: URL
+    ) async throws -> [String: VCSBranchWorktreeOccupancy] {
+        let worktrees = try await listWorktrees(at: repoURL)
+        var result: [String: VCSBranchWorktreeOccupancy] = [:]
+
+        for descriptor in worktrees {
+            guard let branch = descriptor.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !branch.isEmpty,
+                  !descriptor.isDetached,
+                  !descriptor.isCurrent
+            else { continue }
+
+            result[branch] = VCSBranchWorktreeOccupancy(
+                worktreePath: descriptor.path,
+                worktreeName: descriptor.name,
+                worktreeID: descriptor.worktreeID
+            )
+        }
+
+        return result
+    }
+
+    private func requireBranchNotCheckedOutInAnotherWorktree(_ branchName: String, at repoURL: URL) async throws {
+        let worktreeOccupancy = try await branchWorktreeOccupancyByBranchName(excludingCurrentCheckoutAt: repoURL)
+        guard let occupied = worktreeOccupancy[branchName] else { return }
+        throw GitBranchSwitchError.branchCheckedOutInWorktree(
+            branch: branchName,
+            worktreePath: occupied.worktreePath,
+            worktreeName: occupied.worktreeName
+        )
     }
 
     private static func validateExpectedCheckout(

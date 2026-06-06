@@ -71,6 +71,7 @@ enum GitBranchSwitchError: LocalizedError, Equatable {
     case unavailable(String)
     case invalidBranchName(String)
     case branchNotLocal(String)
+    case branchCheckedOutInWorktree(branch: String, worktreePath: String, worktreeName: String?)
     case staleCheckout(expectedBranch: String?, actualBranch: String?, expectedHead: String?, actualHead: String?)
     case gitRefused(String)
 
@@ -82,6 +83,13 @@ enum GitBranchSwitchError: LocalizedError, Equatable {
             return "Invalid Git branch name for branch switching: \(branch)"
         case let .branchNotLocal(branch):
             return "Local branch not found: \(branch). RepoPrompt only switches existing local branches in this UI."
+        case let .branchCheckedOutInWorktree(branch, worktreePath, worktreeName):
+            if let worktreeName = worktreeName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !worktreeName.isEmpty
+            {
+                return "Cannot switch this checkout to \(branch) because that branch is already checked out in worktree \(worktreeName) at \(worktreePath)."
+            }
+            return "Cannot switch this checkout to \(branch) because that branch is already checked out in another worktree at \(worktreePath)."
         case let .staleCheckout(expectedBranch, actualBranch, expectedHead, actualHead):
             let expected = expectedBranch ?? expectedHead.map(GitShortRef.detachedLabel(head:)) ?? "unknown checkout"
             let actual = actualBranch ?? actualHead.map(GitShortRef.detachedLabel(head:)) ?? "unknown checkout"

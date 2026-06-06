@@ -47,7 +47,7 @@ struct GitContextBranchSwitchCapsule: View {
     }
 
     private var branchRowEstimatedHeight: CGFloat {
-        fontPreset.scaledClamped(28, min: 24, max: 36)
+        fontPreset.scaledClamped(34, min: 28, max: 44)
     }
 
     private var branchListMaxHeight: CGFloat {
@@ -242,14 +242,23 @@ struct GitContextBranchSwitchCapsule: View {
                 selectBranch(branch)
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: branch.isCurrent ? "checkmark.circle.fill" : "circle")
+                    Image(systemName: iconName)
                         .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
-                        .foregroundStyle(branch.isCurrent ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(iconColor)
                         .frame(width: 14)
-                    Text(branch.name)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: branch.isCurrent ? .semibold : .regular))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(branch.name)
+                            .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: branch.isCurrent ? .semibold : .regular))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let captionText {
+                            Text(captionText)
+                                .font(fontPreset.swiftUIFont(sizeAtNormal: 9))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                     Spacer(minLength: 0)
                     if isSwitching {
                         ProgressView().controlSize(.small)
@@ -265,16 +274,50 @@ struct GitContextBranchSwitchCapsule: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(isSwitching || branch.isCurrent)
+            .disabled(isSwitching || branch.isCurrent || branch.isCheckedOutInAnotherWorktree)
             .onHover { hovered in
                 isHovered = hovered
             }
-            .help(branch.isCurrent ? "Already on \(branch.name)" : "Switch this checkout to \(branch.name)")
+            .help(helpText)
+        }
+
+        private var iconName: String {
+            if branch.isCurrent { return "checkmark.circle.fill" }
+            if branch.isCheckedOutInAnotherWorktree { return "lock.fill" }
+            return "circle"
+        }
+
+        private var iconColor: Color {
+            if branch.isCurrent { return .accentColor }
+            if branch.isCheckedOutInAnotherWorktree { return .orange }
+            return .secondary
+        }
+
+        private var captionText: String? {
+            guard branch.isCheckedOutInAnotherWorktree else { return nil }
+            if let label = branch.checkedOutWorktreeLabel {
+                return "Checked out in worktree \(label)"
+            }
+            return "Checked out in another worktree"
+        }
+
+        private var helpText: String {
+            if branch.isCurrent { return "Already on \(branch.name)" }
+            if let checkedOutWorktree = branch.checkedOutWorktree {
+                if let label = branch.checkedOutWorktreeLabel {
+                    return "Already checked out in worktree \(label) at \(checkedOutWorktree.worktreePath)"
+                }
+                return "Already checked out in another worktree at \(checkedOutWorktree.worktreePath)"
+            }
+            return "Switch this checkout to \(branch.name)"
         }
 
         private var backgroundColor: Color {
             if branch.isCurrent {
                 return Color.accentColor.opacity(isHovered ? 0.16 : 0.10)
+            }
+            if branch.isCheckedOutInAnotherWorktree {
+                return Color.orange.opacity(isHovered ? 0.14 : 0.08)
             }
             return isHovered ? Color.secondary.opacity(0.12) : .clear
         }
@@ -320,7 +363,7 @@ struct GitContextBranchSwitchCapsule: View {
     }
 
     private func selectBranch(_ branch: VCSBranch) async {
-        guard !branch.isCurrent else { return }
+        guard !branch.isCurrent, !branch.isCheckedOutInAnotherWorktree else { return }
         isSwitching = true
         actionErrorMessage = nil
         defer {
