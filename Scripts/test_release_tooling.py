@@ -62,7 +62,7 @@ class ReleaseToolingTests(unittest.TestCase):
             policy,
         )
         package_script = (SCRIPT_DIR / "package_app.sh").read_text(encoding="utf-8")
-        requirement_arg = 'APP_SIGN_ARGS+=(--requirements "designated => $LOCAL_SELF_SIGNED_REQUIREMENT")'
+        requirement_arg = 'APP_SIGN_ARGS+=(--requirements "=designated => $LOCAL_SELF_SIGNED_REQUIREMENT")'
         self.assertIn(requirement_arg, package_script)
         self.assertLess(package_script.index(requirement_arg), package_script.index('sign_path "$APP_BUNDLE"'))
 

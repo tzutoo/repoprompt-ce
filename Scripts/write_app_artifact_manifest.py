@@ -83,7 +83,7 @@ def signing_details(path: Path, *, allow_adhoc_without_requirement: bool = False
     certificate_sha256 = None
     with tempfile.TemporaryDirectory() as temp_dir:
         prefix = Path(temp_dir) / "certificate"
-        extraction = run([codesign, "-d", "--extract-certificates", str(prefix), str(path)])
+        extraction = run([codesign, "-d", f"--extract-certificates={prefix}", str(path)])
         leaf = Path(f"{prefix}0")
         if extraction.returncode == 0 and leaf.is_file():
             certificate_sha256 = sha256(leaf)

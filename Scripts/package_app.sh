@@ -29,6 +29,21 @@ run(){
     "$@"
 }
 fail(){ echo "ERROR: $*" >&2; exit 1; }
+paths_same(){
+    python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+
+left = Path(sys.argv[1])
+right = Path(sys.argv[2])
+try:
+    print("1" if left.samefile(right) else "0")
+except OSError:
+    left_resolved = str(left.resolve(strict=False)).lower()
+    right_resolved = str(right.resolve(strict=False)).lower()
+    print("1" if left_resolved == right_resolved else "0")
+PY
+}
 finish(){
     local status="$1" now total
     [[ -z "${APP_ENTITLEMENTS:-}" ]] || rm -f "$APP_ENTITLEMENTS"
@@ -208,12 +223,7 @@ run rm -rf "$APP_BUNDLE"
 if (( PUBLIC_UNIVERSAL_RELEASE )); then
     run rm -f "$ARTIFACT_MANIFEST"
 fi
-if [[ "$(python3 - <<PY
-from pathlib import Path
-import os
-print(Path('$APP_BUNDLE').resolve(strict=False) == Path('$COMPAT_APP_BUNDLE').resolve(strict=False))
-PY
-)" != "True" ]]; then
+if [[ "$(paths_same "$APP_BUNDLE" "$COMPAT_APP_BUNDLE")" != "1" ]]; then
     run rm -rf "$COMPAT_APP_BUNDLE"
 fi
 run mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources/bin" "$APP_BUNDLE/Contents/Frameworks"
@@ -327,7 +337,7 @@ verify_signed_app_identity(){
         run codesign --verify --deep --strict --verbose=2 -R="$LOCAL_SELF_SIGNED_REQUIREMENT" "$APP_BUNDLE"
         certificate_dir="$(mktemp -d)"
         certificate_prefix="$certificate_dir/leaf"
-        codesign -d --extract-certificates "$certificate_prefix" "$APP_BUNDLE" >/dev/null 2>&1 || {
+        codesign -d --extract-certificates="$certificate_prefix" "$APP_BUNDLE" >/dev/null 2>&1 || {
             rm -rf "$certificate_dir"
             fail "Could not extract the local signing certificate from the packaged app."
         }
@@ -358,7 +368,7 @@ if (( IS_RELEASE )) && (( ! USE_ADHOC_SIGNING )); then
     APP_SIGN_ARGS+=(--entitlements "$APP_ENTITLEMENTS")
 fi
 if (( USE_LOCAL_SELF_SIGNED_RELEASE )); then
-    APP_SIGN_ARGS+=(--requirements "designated => $LOCAL_SELF_SIGNED_REQUIREMENT")
+    APP_SIGN_ARGS+=(--requirements "=designated => $LOCAL_SELF_SIGNED_REQUIREMENT")
 fi
 if (( ${#APP_SIGN_ARGS[@]} )); then
     sign_path "$APP_BUNDLE" "${APP_SIGN_ARGS[@]}"
@@ -376,11 +386,7 @@ if (( PUBLIC_UNIVERSAL_RELEASE )); then
 fi
 run "$CONTROL_PLANE_SCRIPTS_DIR/validate_embedded_mcp_helper_layout.sh" "$APP_BUNDLE" "Packaged app MCP helper layout"
 run "$RUN_WITHOUT_GITHUB_TOKENS" "$CONTROL_PLANE_SCRIPTS_DIR/smoke_embedded_mcp_helper.sh" "$APP_BUNDLE" "Packaged app MCP helper"
-if [[ "$(python3 - <<PY
-from pathlib import Path
-print(Path('$APP_BUNDLE').resolve(strict=False) == Path('$COMPAT_APP_BUNDLE').resolve(strict=False))
-PY
-)" != "True" ]]; then
+if [[ "$(paths_same "$APP_BUNDLE" "$COMPAT_APP_BUNDLE")" != "1" ]]; then
     phase "Updating compatibility app bundle link"
     run mkdir -p "$(dirname "$COMPAT_APP_BUNDLE")"
     if (( USE_ADHOC_SIGNING )); then
