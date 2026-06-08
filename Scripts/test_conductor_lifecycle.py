@@ -107,9 +107,42 @@ class LifecycleQueueTests(LifecycleTestCase):
 
         self.assertEqual(payload, new_payload)
         self.assertEqual(requests[0], {"type": "status"})
-        self.assertEqual(requests[1], {"type": "stop", "force": True})
+        self.assertEqual(requests[1], {"type": "stop", "force": False})
         wait.assert_called_once_with(state.paths, timeout=conductor.TERMINATE_GRACE_SECONDS + 5.0)
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_ensure_daemon_refuses_mismatched_replacement_when_work_appears_before_stop(self) -> None:
+        tmp, state = self.make_state()
+        self.addCleanup(tmp.cleanup)
+        requests: list[dict] = []
+
+        def fake_request(_paths: conductor.Paths, message: dict, timeout: float = 1.0) -> dict:
+            requests.append(message)
+            if message["type"] == "status":
+                return {
+                    "protocolVersion": 3,
+                    "runningJobs": [],
+                    "queuedJobs": [],
+                }
+            if message["type"] == "stop":
+                raise conductor.ConductorError("daemon has active or queued jobs")
+            raise AssertionError(f"unexpected daemon request: {message}")
+
+        with mock.patch.object(conductor, "request_daemon", side_effect=fake_request), mock.patch.object(
+            conductor, "wait_until_stopped"
+        ) as wait, mock.patch.object(conductor.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(conductor.ConductorError, "jobs may have become active"):
+                conductor.ensure_daemon(state.paths)
+
+        self.assertEqual(
+            requests,
+            [
+                {"type": "status"},
+                {"type": "stop", "force": False},
+            ],
+        )
+        wait.assert_not_called()
+        popen.assert_not_called()
 
     def test_ensure_daemon_raises_for_locked_protocol_mismatch_with_active_jobs(self) -> None:
         tmp, state = self.make_state()
@@ -317,13 +350,8 @@ class LifecycleQueueTests(LifecycleTestCase):
                 }}
             )
             ticket = payload["ticket"]
-            saved_fd0 = os.dup(0)
-            try:
-                os.close(0)
-                state._run_job(ticket)
-            finally:
-                os.dup2(saved_fd0, 0)
-                os.close(saved_fd0)
+            os.close(0)
+            state._run_job(ticket)
             job = state.jobs[ticket]
             log = job.log_path.read_text(encoding="utf-8")
             if job.state != "completed" or "STDIN_DEVNULL_OK" not in log:
@@ -335,7 +363,13 @@ class LifecycleQueueTests(LifecycleTestCase):
             """
         )
 
-        result = subprocess.run([sys.executable, "-c", child_code], text=True, capture_output=True, timeout=10)
+        result = subprocess.run(
+            [sys.executable, "-c", child_code],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CLOSED_FD_REGRESSION_OK", result.stdout)

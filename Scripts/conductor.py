@@ -1737,14 +1737,6 @@ def request_daemon(paths: Paths, payload: Dict[str, Any], timeout: Optional[floa
     return response.get("payload") or {}
 
 
-def daemon_running(paths: Paths) -> bool:
-    try:
-        payload = request_daemon(paths, {"type": "status"}, timeout=1.0)
-        return payload.get("protocolVersion") == PROTOCOL_VERSION
-    except ConductorError:
-        return False
-
-
 def compatible_daemon_status_or_stop_idle_mismatch(paths: Paths) -> Tuple[Optional[Dict[str, Any]], Optional[ConductorError]]:
     try:
         payload = request_daemon(paths, {"type": "status"}, timeout=1.0)
@@ -1762,7 +1754,13 @@ def compatible_daemon_status_or_stop_idle_mismatch(paths: Paths) -> Tuple[Option
             f"daemon protocol mismatch (daemon={protocol}, client={PROTOCOL_VERSION}) and jobs are active; "
             "run './conductor daemon stop --force' after deciding it is safe"
         )
-    request_daemon(paths, {"type": "stop", "force": True}, timeout=FORCE_STOP_RPC_TIMEOUT_SECONDS)
+    try:
+        request_daemon(paths, {"type": "stop", "force": False}, timeout=FORCE_STOP_RPC_TIMEOUT_SECONDS)
+    except ConductorError as exc:
+        raise ConductorError(
+            f"daemon protocol mismatch (daemon={protocol}, client={PROTOCOL_VERSION}) could not stop without force; "
+            "jobs may have become active. Run './conductor daemon stop --force' after deciding it is safe"
+        ) from exc
     if not wait_until_stopped(paths, timeout=TERMINATE_GRACE_SECONDS + 5.0):
         raise ConductorError(
             f"daemon protocol mismatch (daemon={protocol}, client={PROTOCOL_VERSION}) did not stop cleanly; "
