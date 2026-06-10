@@ -1270,49 +1270,46 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             for relativePath in relativePaths {
                 try write(relativePath, to: root.appendingPathComponent(relativePath))
             }
-            let appliedIndexEvents = await store.appliedIndexEvents()
-            let appliedIndexEventRecorder = AppliedIndexEventRecorder()
-            let appliedIndexConsumer = Task {
-                for await event in appliedIndexEvents {
-                    guard event.rootID == record.id,
-                          event.upsertedFiles.map(\.standardizedRelativePath) == relativePaths
-                    else { continue }
-                    await appliedIndexEventRecorder.record(event)
-                    return
-                }
-            }
-            defer { appliedIndexConsumer.cancel() }
-            try await store.startWatchingRoot(id: record.id)
+            var appliedIndexEvents = await store.appliedIndexEvents().makeAsyncIterator()
 
-            try await store.publishSyntheticFileSystemDeltasForTesting(
+            let sample = try await store.replayFileSystemPublicationForInvalidationDiagnosticsForTesting(
                 rootID: record.id,
                 deltas: relativePaths.map { .fileAdded($0) }
             )
-            _ = await store.awaitAppliedIngressForAllRoots()
 
-            let eventDeadline = ContinuousClock.now + .seconds(2)
-            var appliedIndexEvent = await appliedIndexEventRecorder.snapshot()
-            while appliedIndexEvent == nil, ContinuousClock.now < eventDeadline {
-                await Task.yield()
-                appliedIndexEvent = await appliedIndexEventRecorder.snapshot()
-            }
-            let observedAppliedIndexEvent = try XCTUnwrap(appliedIndexEvent)
-            XCTAssertTrue(observedAppliedIndexEvent.upsertedFolders.isEmpty)
-
-            let rootSnapshots = await store.readSearchRootDiagnosticsSnapshot()
-            let rootSnapshot = try XCTUnwrap(rootSnapshots.first { $0.rootID == record.id })
-            let sample = try XCTUnwrap(rootSnapshot.invalidation.samples.last {
-                $0.preparedDeltaCount == fileCount
-            })
-            XCTAssertGreaterThan(sample.servicePublicationSequence, 0)
+            XCTAssertEqual(sample.servicePublicationSequence, 0)
+            XCTAssertNil(sample.watcherAcceptedWatermark)
+            XCTAssertEqual(sample.preparedDeltaCount, fileCount)
             XCTAssertEqual(sample.topologyInvalidationCount, 1)
+            XCTAssertEqual(sample.catalogGenerationAdvanceCount, 3)
             XCTAssertEqual(sample.searchCatalogCacheClearCount, 1)
             XCTAssertEqual(sample.pathWorkerInvalidationRequestCount, 1)
             XCTAssertEqual(sample.contentInvalidationCount, 0)
             XCTAssertEqual(sample.distinctContentKeyCount, 0)
             XCTAssertEqual(sample.decodedCacheInvalidationRequestCount, 0)
             XCTAssertEqual(sample.codemapInvalidationRequestCount, 0)
-            XCTAssertEqual(sample.appliedIndexEventYieldCount, 1)
+            guard sample.appliedIndexEventYieldCount == 1 else {
+                XCTFail("Expected exactly one applied-index event, got \(sample.appliedIndexEventYieldCount)")
+                return
+            }
+
+            let appliedIndexEvent = await appliedIndexEvents.next()
+            let observedAppliedIndexEvent = try XCTUnwrap(appliedIndexEvent)
+            XCTAssertEqual(observedAppliedIndexEvent.rootID, record.id)
+            XCTAssertEqual(observedAppliedIndexEvent.generation, 1)
+            XCTAssertEqual(observedAppliedIndexEvent.upsertedFiles.map(\.standardizedRelativePath), relativePaths)
+            XCTAssertTrue(observedAppliedIndexEvent.upsertedFolders.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.removedFileIDs.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.removedFolderIDs.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.removedFilePaths.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.removedFolderPaths.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.modifiedFileIDs.isEmpty)
+            XCTAssertTrue(observedAppliedIndexEvent.modifiedFolderIDs.isEmpty)
+
+            let rootSnapshots = await store.readSearchRootDiagnosticsSnapshot()
+            let rootSnapshot = try XCTUnwrap(rootSnapshots.first { $0.rootID == record.id })
+            XCTAssertEqual(rootSnapshot.invalidation.totalObservedPublicationCount, 0)
+            XCTAssertTrue(rootSnapshot.invalidation.samples.isEmpty)
 
             let catalog = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
             XCTAssertEqual(catalog.files.map(\.standardizedRelativePath), relativePaths)
@@ -4605,18 +4602,6 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
     #endif
 
     #if DEBUG
-        private actor AppliedIndexEventRecorder {
-            private var event: WorkspaceAppliedIndexBatchEvent?
-
-            func record(_ event: WorkspaceAppliedIndexBatchEvent) {
-                self.event = event
-            }
-
-            func snapshot() -> WorkspaceAppliedIndexBatchEvent? {
-                event
-            }
-        }
-
         private final class LockedWorkspaceDiagnosticsClock: @unchecked Sendable {
             private let lock = NSLock()
             private var value: UInt64

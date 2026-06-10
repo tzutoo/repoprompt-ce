@@ -445,7 +445,26 @@ actor WorkspaceFileContextStore {
             recorder: PublicationInvalidationRecorder
         ) {
             guard rootStatesByID[rootID] != nil else { return }
-            let sample = PublicationInvalidationDebugSample(
+            let sample = makePublicationInvalidationDebugSample(
+                servicePublicationSequence: servicePublicationSequence,
+                watcherAcceptedWatermark: watcherAcceptedWatermark,
+                recorder: recorder
+            )
+            var history = publicationInvalidationHistoryByRootID[rootID] ?? PublicationInvalidationHistoryState()
+            history.totalObservedPublicationCount += 1
+            history.samples.append(sample)
+            if history.samples.count > Self.publicationInvalidationSampleLimit {
+                history.samples.removeFirst(history.samples.count - Self.publicationInvalidationSampleLimit)
+            }
+            publicationInvalidationHistoryByRootID[rootID] = history
+        }
+
+        private func makePublicationInvalidationDebugSample(
+            servicePublicationSequence: UInt64,
+            watcherAcceptedWatermark: FileSystemWatcherIngressMailbox.Watermark?,
+            recorder: PublicationInvalidationRecorder
+        ) -> PublicationInvalidationDebugSample {
+            PublicationInvalidationDebugSample(
                 servicePublicationSequence: servicePublicationSequence,
                 watcherAcceptedWatermark: watcherAcceptedWatermark?.rawValue,
                 preparedDeltaCount: recorder.preparedDeltaCount,
@@ -459,13 +478,6 @@ actor WorkspaceFileContextStore {
                 codemapInvalidationRequestCount: recorder.codemapInvalidationRequestCount,
                 appliedIndexEventYieldCount: recorder.appliedIndexEventYieldCount
             )
-            var history = publicationInvalidationHistoryByRootID[rootID] ?? PublicationInvalidationHistoryState()
-            history.totalObservedPublicationCount += 1
-            history.samples.append(sample)
-            if history.samples.count > Self.publicationInvalidationSampleLimit {
-                history.samples.removeFirst(history.samples.count - Self.publicationInvalidationSampleLimit)
-            }
-            publicationInvalidationHistoryByRootID[rootID] = history
         }
 
         private static func elapsedMilliseconds(since start: UInt64, now: UInt64) -> UInt64 {
@@ -811,6 +823,23 @@ actor WorkspaceFileContextStore {
     }
 
     #if DEBUG
+        func replayFileSystemPublicationForInvalidationDiagnosticsForTesting(
+            rootID: UUID,
+            deltas: [FileSystemDelta]
+        ) async throws -> PublicationInvalidationDebugSample {
+            let root = try state(for: rootID).root
+            let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: root)
+            let recorder = await applyPreparedIndexDeltasRecordingInvalidations(
+                rootID: rootID,
+                deltas: preparedDeltas
+            )
+            return makePublicationInvalidationDebugSample(
+                servicePublicationSequence: 0,
+                watcherAcceptedWatermark: nil,
+                recorder: recorder
+            )
+        }
+
         func publishSyntheticFileSystemDeltasForTesting(rootID: UUID, deltas: [FileSystemDelta]) async throws {
             let state = try state(for: rootID)
             await state.service.publishFileSystemDeltas(deltas, source: .syntheticMutation)
@@ -877,8 +906,7 @@ actor WorkspaceFileContextStore {
                 delta: delta
             ))
         }
-        let preparedDeltas = FileSystemDeltaPreparation.coalesce(deltas, inRoot: root.standardizedFullPath)
-            .compactMap { FileSystemDeltaPreparation.prepare($0, inRoot: root.standardizedFullPath) }
+        let preparedDeltas = prepareObservedFileSystemDeltas(deltas, root: root)
         #if DEBUG
             await applyPreparedIndexDeltas(
                 rootID: root.id,
@@ -899,6 +927,14 @@ actor WorkspaceFileContextStore {
                 barrierSequence: servicePublicationSequence
             )
         )
+    }
+
+    private func prepareObservedFileSystemDeltas(
+        _ deltas: [FileSystemDelta],
+        root: WorkspaceRootRecord
+    ) -> [PreparedFileSystemDelta] {
+        FileSystemDeltaPreparation.coalesce(deltas, inRoot: root.standardizedFullPath)
+            .compactMap { FileSystemDeltaPreparation.prepare($0, inRoot: root.standardizedFullPath) }
     }
 
     private func isDiscoveryFacingFileSystemDelta(_ delta: FileSystemDelta, rootID: UUID) async -> Bool {
@@ -3478,16 +3514,24 @@ actor WorkspaceFileContextStore {
                 await applyPreparedIndexDeltasBody(rootID: rootID, deltas: deltas)
                 return
             }
-            let recorder = PublicationInvalidationRecorder(preparedDeltaCount: deltas.count)
-            await Self.$activePublicationInvalidationRecorder.withValue(recorder) {
-                await applyPreparedIndexDeltasBody(rootID: rootID, deltas: deltas)
-            }
+            let recorder = await applyPreparedIndexDeltasRecordingInvalidations(rootID: rootID, deltas: deltas)
             recordPublicationInvalidationDiagnostics(
                 rootID: rootID,
                 servicePublicationSequence: servicePublicationSequence,
                 watcherAcceptedWatermark: watcherAcceptedWatermark,
                 recorder: recorder
             )
+        }
+
+        private func applyPreparedIndexDeltasRecordingInvalidations(
+            rootID: UUID,
+            deltas: [PreparedFileSystemDelta]
+        ) async -> PublicationInvalidationRecorder {
+            let recorder = PublicationInvalidationRecorder(preparedDeltaCount: deltas.count)
+            await Self.$activePublicationInvalidationRecorder.withValue(recorder) {
+                await applyPreparedIndexDeltasBody(rootID: rootID, deltas: deltas)
+            }
+            return recorder
         }
     #else
         private func applyPreparedIndexDeltas(rootID: UUID, deltas: [PreparedFileSystemDelta]) async {
