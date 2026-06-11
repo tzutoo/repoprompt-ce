@@ -288,16 +288,22 @@ import XCTest
                     await ordinaryGate.markStartedAndWaitForRelease()
                 }
             }
-            let fileSearchHolder = Task {
-                try await manager.withConnectionCallPermitForTesting(
-                    connectionID: connectionID,
-                    lane: .fileSearch
-                ) {
-                    await fileSearchGate.markStartedAndWaitForRelease()
+            // Saturate the burst-capacity file-search lane so the next call queues.
+            let fileSearchHolders = (0 ..< ServerNetworkManager.fileSearchCallLaneLimit).map { _ in
+                Task {
+                    try await manager.withConnectionCallPermitForTesting(
+                        connectionID: connectionID,
+                        lane: .fileSearch
+                    ) {
+                        await fileSearchGate.markStartedAndWaitForRelease()
+                    }
                 }
             }
             await assertStarted(ordinaryGate, description: "ordinary holder")
             await assertStarted(fileSearchGate, description: "file-search holder")
+            let saturatedSearchSnapshot = await waitForSnapshot(of: fileSearch) {
+                $0.activePermitCount == ServerNetworkManager.fileSearchCallLaneLimit
+            }
 
             let queuedSearch = Task {
                 try await manager.withConnectionCallPermitForTesting(
@@ -310,13 +316,15 @@ import XCTest
             let queuedSearchSnapshot = await waitForSnapshot(of: fileSearch) {
                 $0.waiterCount == 1
             }
-            guard queuedSearchSnapshot != nil else {
-                XCTFail("Timed out waiting for the queued file-search call")
+            guard saturatedSearchSnapshot != nil, queuedSearchSnapshot != nil else {
+                XCTFail("Timed out waiting for the saturated lane and queued file-search call")
                 queuedSearch.cancel()
                 await ordinaryGate.release()
                 await fileSearchGate.release()
                 await assertSuccess(ordinaryHolder)
-                await assertSuccess(fileSearchHolder)
+                for holder in fileSearchHolders {
+                    await assertSuccess(holder)
+                }
                 await assertCancellation(queuedSearch)
                 window.beginClose()
                 await window.tearDown()
@@ -362,7 +370,9 @@ import XCTest
                 await ordinaryGate.release()
                 await fileSearchGate.release()
                 await assertSuccess(ordinaryHolder)
-                await assertSuccess(fileSearchHolder)
+                for holder in fileSearchHolders {
+                    await assertSuccess(holder)
+                }
                 await assertCompletion(stopTask, description: "server stop")
                 await assertCancellation(queuedSearch)
                 window.beginClose()
@@ -379,7 +389,7 @@ import XCTest
             XCTAssertTrue(ordinaryClosed.isClosed)
             XCTAssertTrue(fileSearchClosed.isClosed)
             XCTAssertEqual(ordinaryClosed.activePermitCount, 1)
-            XCTAssertEqual(fileSearchClosed.activePermitCount, 1)
+            XCTAssertEqual(fileSearchClosed.activePermitCount, ServerNetworkManager.fileSearchCallLaneLimit)
             XCTAssertEqual(fileSearchClosed.waiterCount, 0)
             XCTAssertEqual(fileSearchClosed.cancelledWaiterCount, 1)
             await assertCancellation(queuedSearch)
@@ -389,7 +399,9 @@ import XCTest
             await ordinaryGate.release()
             await fileSearchGate.release()
             await assertSuccess(ordinaryHolder)
-            await assertSuccess(fileSearchHolder)
+            for holder in fileSearchHolders {
+                await assertSuccess(holder)
+            }
             await assertCompletion(stopTask, description: "server stop")
 
             let registeredOrdinary = await manager.connectionLimiterSnapshotForTesting(
@@ -3935,7 +3947,7 @@ import XCTest
             file: StaticString = #filePath,
             line: UInt = #line
         ) {
-            XCTAssertEqual(snapshot.permits, 1, file: file, line: line)
+            XCTAssertEqual(snapshot.permits, snapshot.limit, file: file, line: line)
             XCTAssertEqual(snapshot.activePermitCount, 0, file: file, line: line)
             XCTAssertEqual(snapshot.waiterCount, 0, file: file, line: line)
             XCTAssertEqual(snapshot.inFlight, 0, file: file, line: line)

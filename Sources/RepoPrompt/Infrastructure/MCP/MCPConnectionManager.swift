@@ -366,6 +366,11 @@ actor ServerNetworkManager {
         toolName == MCPWindowToolName.search ? .fileSearch : .ordinary
     }
 
+    /// Bounded concurrent `file_search` permits per connection. Sized to the parallel
+    /// read-only tool batches agent clients emit, and aligned with the per-workspace
+    /// broad-search active capacity so one connection's burst cannot exceed it.
+    nonisolated static let fileSearchCallLaneLimit = 4
+
     private static func validatedLiveRunID(
         candidateRunID: UUID,
         connectionID: UUID,
@@ -1037,17 +1042,18 @@ actor ServerNetworkManager {
         #if DEBUG
             init(
                 limit: Int,
+                fileSearchLimit: Int,
                 idleWaitSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
                     try await Task.sleep(for: duration)
                 }
             ) {
                 ordinary = AsyncLimiter(limit: limit, idleWaitSleep: idleWaitSleep)
-                fileSearch = AsyncLimiter(limit: limit, idleWaitSleep: idleWaitSleep)
+                fileSearch = AsyncLimiter(limit: fileSearchLimit, idleWaitSleep: idleWaitSleep)
             }
         #else
-            init(limit: Int) {
+            init(limit: Int, fileSearchLimit: Int) {
                 ordinary = AsyncLimiter(limit: limit)
-                fileSearch = AsyncLimiter(limit: limit)
+                fileSearch = AsyncLimiter(limit: fileSearchLimit)
             }
         #endif
 
@@ -4390,7 +4396,8 @@ actor ServerNetworkManager {
 
         connections[connectionID] = manager
         callLimiters[connectionID] = MCPConnectionCallLimiters(
-            limit: limiterLimit(for: connectionID)
+            limit: limiterLimit(for: connectionID),
+            fileSearchLimit: fileSearchLimiterLimit(for: connectionID)
         )
         connectionLifecycleGenerationByID[connectionID] = lifecycleGeneration
         bindSessionToken(sessionToken, to: connectionID)
@@ -7767,6 +7774,7 @@ actor ServerNetworkManager {
             ) async -> AsyncLimiter {
                 let limiters = MCPConnectionCallLimiters(
                     limit: limiterLimit(for: connectionID),
+                    fileSearchLimit: fileSearchLimiterLimit(for: connectionID),
                     idleWaitSleep: idleWaitSleep
                 )
                 callLimiters[connectionID] = limiters
@@ -7798,7 +7806,8 @@ actor ServerNetworkManager {
                 activeConnectionsByClient[clientID, default: []].insert(connectionID)
                 clientIDByConnection[connectionID] = clientID
                 callLimiters[connectionID] = MCPConnectionCallLimiters(
-                    limit: limiterLimit(for: connectionID)
+                    limit: limiterLimit(for: connectionID),
+                    fileSearchLimit: fileSearchLimiterLimit(for: connectionID)
                 )
                 connectionStats[connectionID] = ConnectionStats(
                     createdAt: createdAt,
@@ -8117,7 +8126,8 @@ actor ServerNetworkManager {
                 bindSessionToken(sessionToken, to: connectionID)
                 if callLimiters[connectionID] == nil {
                     callLimiters[connectionID] = MCPConnectionCallLimiters(
-                        limit: limiterLimit(for: connectionID)
+                        limit: limiterLimit(for: connectionID),
+                        fileSearchLimit: fileSearchLimiterLimit(for: connectionID)
                     )
                 }
             }
@@ -11611,11 +11621,19 @@ actor ServerNetworkManager {
     }
 
     private func limiterLimit(for connectionID: UUID) -> Int {
-        // Serialize RepoPrompt MCP tool calls within each per-connection lane.
-        // Identical calls therefore cannot race and produce duplicate/mis-tracked tool cards,
-        // while file_search may overlap one ordinary call on the same connection.
+        // Serialize ordinary RepoPrompt MCP tool calls within each connection.
+        // Identical calls therefore cannot race and produce duplicate/mis-tracked tool cards.
         _ = connectionID
         return 1
+    }
+
+    private func fileSearchLimiterLimit(for connectionID: UUID) -> Int {
+        // Admit a bounded burst of concurrent file_search calls per connection. Agents batch
+        // read-only searches; running the burst concurrently lets every member share one
+        // workspace ingress freshness flight instead of reconstructing it serially per call.
+        // Per-workspace broad admission still bounds unscoped content searches downstream.
+        _ = connectionID
+        return Self.fileSearchCallLaneLimit
     }
 
     private struct ConnectionCallLimiterResolution {
@@ -11968,7 +11986,10 @@ actor ServerNetworkManager {
         // closeIfIdle() admitted no owners before closing both lanes. Replacing that exact,
         // still-registered bundle is therefore a safe rollback: stale references can only
         // observe cancellation, while all subsequent calls resolve these fresh open lanes.
-        let replacement = MCPConnectionCallLimiters(limit: limiterLimit(for: id))
+        let replacement = MCPConnectionCallLimiters(
+            limit: limiterLimit(for: id),
+            fileSearchLimit: fileSearchLimiterLimit(for: id)
+        )
         callLimiters[id] = replacement
         await closedLimiters.markTentativeCloseRestored(by: replacement)
         return true

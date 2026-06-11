@@ -425,7 +425,11 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
 
             let heldStore = fixture.contextA.window.workspaceFileContextStore
             let baselineConfiguration = await heldStore.searchLaneSnapshotForTesting().configuration
+            // One active lease and two waiter slots: the same-connection burst member and the
+            // separate-connection search both wait in the store queue while the third rejects.
             let liveSweepConfiguration = StoreBackedWorkspaceSearchLane.Configuration(
+                maxActiveLeases: 1,
+                maxQueuedWaiters: 2,
                 maxQueueWait: .seconds(8),
                 retryAfterMilliseconds: 1000
             )
@@ -447,16 +451,18 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                 }
                 outstandingSearchTasks.append(firstHeldSearch)
                 await fulfillment(of: [heldSearchStarted], timeout: 1)
-                let sameConnectionSearchQueued = expectation(description: "second same-connection search queued in limiter")
+                let sameConnectionSearchAdmitted = expectation(
+                    description: "second same-connection search admitted concurrently by the file-search lane"
+                )
                 let observerInstalled = await fixture.networkManager.setConnectionLimiterStateObserverForTesting(
                     connectionID: endpointA.connectionID,
                     lane: .fileSearch
                 ) { snapshot in
-                    if snapshot.permits == 0,
-                       snapshot.waiterCount == 1,
+                    if snapshot.activePermitCount == 2,
+                       snapshot.waiterCount == 0,
                        snapshot.inFlight == 2
                     {
-                        sameConnectionSearchQueued.fulfill()
+                        sameConnectionSearchAdmitted.fulfill()
                     }
                 }
                 XCTAssertTrue(observerInstalled)
@@ -464,19 +470,21 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                     try await endpointA.callTool(name: MCPWindowToolName.search, arguments: Self.searchArguments)
                 }
                 outstandingSearchTasks.append(secondHeldSearch)
-                await fulfillment(of: [sameConnectionSearchQueued], timeout: 1)
+                await fulfillment(of: [sameConnectionSearchAdmitted], timeout: 1)
                 _ = await fixture.networkManager.setConnectionLimiterStateObserverForTesting(
                     connectionID: endpointA.connectionID,
                     lane: .fileSearch,
                     observer: nil
                 )
-                let queuedLimiterState = await fixture.networkManager.connectionLimiterSnapshotForTesting(
+                // The burst member proceeds past the connection lane and waits in the store queue.
+                await Self.waitForSearchLaneWaiter(store: heldStore, expectedCount: 1)
+                let burstLimiterState = await fixture.networkManager.connectionLimiterSnapshotForTesting(
                     connectionID: endpointA.connectionID,
                     lane: .fileSearch
                 )
-                XCTAssertEqual(queuedLimiterState?.permits, 0)
-                XCTAssertEqual(queuedLimiterState?.waiterCount, 1)
-                XCTAssertEqual(queuedLimiterState?.inFlight, 2)
+                XCTAssertEqual(burstLimiterState?.activePermitCount, 2)
+                XCTAssertEqual(burstLimiterState?.waiterCount, 0)
+                XCTAssertEqual(burstLimiterState?.inFlight, 2)
                 let hasHeldSearchInFlight = await fixture.networkManager.hasInFlightCalls(for: endpointA.connectionID)
                 XCTAssertTrue(hasHeldSearchInFlight)
 
@@ -484,12 +492,12 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                     try await endpointAQueued.callTool(name: MCPWindowToolName.search, arguments: Self.searchArguments)
                 }
                 outstandingSearchTasks.append(storeQueuedSearch)
-                await Self.waitForSearchLaneWaiter(store: heldStore, expectedCount: 1)
+                await Self.waitForSearchLaneWaiter(store: heldStore, expectedCount: 2)
                 let heldSearchStartedCount = await gate.startedCountSnapshot()
                 XCTAssertEqual(heldSearchStartedCount, 1)
                 let heldSnapshot = await heldStore.searchLaneSnapshotForTesting()
                 XCTAssertEqual(heldSnapshot.activePermitCount, 1)
-                XCTAssertEqual(heldSnapshot.waiterCount, 1)
+                XCTAssertEqual(heldSnapshot.waiterCount, 2)
 
                 let overflow = try await endpointAOverflow.callTool(name: MCPWindowToolName.search, arguments: Self.searchArguments)
                 try Self.assertSearchBackpressureResult(overflow)
@@ -524,8 +532,8 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                 let runtimePayload = try Self.debugPayload(from: runtimeResponse)
                 let runtime = try XCTUnwrap(runtimePayload["runtime"] as? [String: Any])
                 let aggregateLimiter = try XCTUnwrap(runtime["limiter"] as? [String: Any])
-                XCTAssertEqual((aggregateLimiter["active_permit_count"] as? NSNumber)?.intValue, 2)
-                XCTAssertEqual((aggregateLimiter["waiter_count"] as? NSNumber)?.intValue, 1)
+                XCTAssertEqual((aggregateLimiter["active_permit_count"] as? NSNumber)?.intValue, 3)
+                XCTAssertEqual((aggregateLimiter["waiter_count"] as? NSNumber)?.intValue, 0)
                 XCTAssertEqual((aggregateLimiter["in_flight_count"] as? NSNumber)?.intValue, 3)
                 XCTAssertEqual(aggregateLimiter["is_idle"] as? Bool, false)
                 let limiterLanes = try XCTUnwrap(aggregateLimiter["lanes"] as? [String: Any])
@@ -534,8 +542,8 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                 XCTAssertEqual((diagnosticOrdinaryLane["waiter_count"] as? NSNumber)?.intValue, 0)
                 XCTAssertEqual((diagnosticOrdinaryLane["in_flight_count"] as? NSNumber)?.intValue, 1)
                 let diagnosticSearchLane = try XCTUnwrap(limiterLanes["file_search"] as? [String: Any])
-                XCTAssertEqual((diagnosticSearchLane["active_permit_count"] as? NSNumber)?.intValue, 1)
-                XCTAssertEqual((diagnosticSearchLane["waiter_count"] as? NSNumber)?.intValue, 1)
+                XCTAssertEqual((diagnosticSearchLane["active_permit_count"] as? NSNumber)?.intValue, 2)
+                XCTAssertEqual((diagnosticSearchLane["waiter_count"] as? NSNumber)?.intValue, 0)
                 XCTAssertEqual((diagnosticSearchLane["in_flight_count"] as? NSNumber)?.intValue, 2)
 
                 let exactRead = try await endpointARead.callTool(
@@ -572,8 +580,8 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                     connectionID: endpointA.connectionID,
                     lane: .fileSearch
                 )
-                XCTAssertEqual(limiterStateAfterPeerCalls?.permits, 0)
-                XCTAssertEqual(limiterStateAfterPeerCalls?.waiterCount, 1)
+                XCTAssertEqual(limiterStateAfterPeerCalls?.activePermitCount, 2)
+                XCTAssertEqual(limiterStateAfterPeerCalls?.waiterCount, 0)
                 XCTAssertEqual(limiterStateAfterPeerCalls?.inFlight, 2)
 
                 await gate.release()
@@ -590,7 +598,8 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                     connectionID: endpointA.connectionID,
                     lane: .fileSearch
                 )
-                XCTAssertEqual(settledSearchLimiterState?.permits, 1)
+                XCTAssertEqual(settledSearchLimiterState?.permits, ServerNetworkManager.fileSearchCallLaneLimit)
+                XCTAssertEqual(settledSearchLimiterState?.activePermitCount, 0)
                 XCTAssertEqual(settledSearchLimiterState?.waiterCount, 0)
                 XCTAssertEqual(settledSearchLimiterState?.inFlight, 0)
                 let settledOrdinaryLimiterState = await fixture.networkManager.connectionLimiterSnapshotForTesting(

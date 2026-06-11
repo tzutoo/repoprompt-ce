@@ -96,6 +96,33 @@ import MCP
                 return debugDiagnosticsError(op: op, code: "invalid_params", message: "`retry_after_ms` must be an integer between 0 and 60000.")
             }
 
+            let productionConfiguration = StoreBackedWorkspaceSearchLane.Configuration.production
+            let maxActiveLeases: Int
+            switch debugBoundedInt(
+                arguments,
+                "max_active_leases",
+                defaultValue: productionConfiguration.maxActiveLeases,
+                range: 1 ... 64
+            ) {
+            case let .value(parsed), let .defaulted(parsed):
+                maxActiveLeases = parsed
+            case .invalid:
+                return debugDiagnosticsError(op: op, code: "invalid_params", message: "`max_active_leases` must be an integer between 1 and 64.")
+            }
+
+            let maxQueuedWaiters: Int
+            switch debugBoundedInt(
+                arguments,
+                "max_queued_waiters",
+                defaultValue: productionConfiguration.maxQueuedWaiters,
+                range: 1 ... 64
+            ) {
+            case let .value(parsed), let .defaulted(parsed):
+                maxQueuedWaiters = parsed
+            case .invalid:
+                return debugDiagnosticsError(op: op, code: "invalid_params", message: "`max_queued_waiters` must be an integer between 1 and 64.")
+            }
+
             let targets = await debugSearchLaneTargets(windowID: requestedWindowID)
             guard !targets.isEmpty else {
                 let message = requestedWindowID.map { "No RepoPrompt window matched window_id \($0)." }
@@ -115,6 +142,8 @@ import MCP
             }
 
             let configuration = StoreBackedWorkspaceSearchLane.Configuration(
+                maxActiveLeases: maxActiveLeases,
+                maxQueuedWaiters: maxQueuedWaiters,
                 maxQueueWait: .milliseconds(maxQueueWaitMilliseconds),
                 retryAfterMilliseconds: retryAfterMilliseconds
             )
@@ -499,8 +528,8 @@ import MCP
                     [
                         "window_id": entry.windowID,
                         "configuration": [
-                            "active_capacity": 1,
-                            "max_queued": 1,
+                            "active_capacity": entry.snapshot.configuration.maxActiveLeases,
+                            "max_queued": entry.snapshot.configuration.maxQueuedWaiters,
                             "max_queue_wait_ms": entry.snapshot.configuration.maxQueueWaitMilliseconds,
                             "retry_after_ms": entry.snapshot.configuration.retryAfterMilliseconds
                         ],

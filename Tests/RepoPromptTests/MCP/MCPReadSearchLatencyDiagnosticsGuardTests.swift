@@ -65,8 +65,8 @@
             XCTAssertTrue(configured.isIdle)
 
             let sibling = try? source("Sources/RepoPrompt/Features/Diagnostics/MCP/MCPConnectionManager+DebugDiagnosticsReadSearchLatency.swift")
-            XCTAssertTrue(sibling?.contains("\"active_capacity\": 1") == true)
-            XCTAssertTrue(sibling?.contains("\"max_queued\": 1") == true)
+            XCTAssertTrue(sibling?.contains("\"active_capacity\": entry.snapshot.configuration.maxActiveLeases") == true)
+            XCTAssertTrue(sibling?.contains("\"max_queued\": entry.snapshot.configuration.maxQueuedWaiters") == true)
             XCTAssertTrue(sibling?.contains("range: 100 ... 60000") == true)
             XCTAssertTrue(sibling?.contains("range: 0 ... 60000") == true)
             XCTAssertFalse(sibling?.contains("global_capacity") == true)
@@ -254,12 +254,13 @@
             ] {
                 XCTAssertEqual((autoSelection[key] as? NSNumber)?.intValue, 0, key)
             }
+            let fileSearchLaneLimit = ServerNetworkManager.fileSearchCallLaneLimit
             let limiter = try XCTUnwrap(runtime["limiter"] as? [String: Any])
             XCTAssertEqual(limiter["found"] as? Bool, true)
             XCTAssertEqual(limiter["connection_id"] as? String, connectionID.uuidString)
             XCTAssertEqual((limiter["lane_count"] as? NSNumber)?.intValue, 2)
-            XCTAssertEqual((limiter["limit"] as? NSNumber)?.intValue, 2)
-            XCTAssertEqual((limiter["permits"] as? NSNumber)?.intValue, 2)
+            XCTAssertEqual((limiter["limit"] as? NSNumber)?.intValue, 1 + fileSearchLaneLimit)
+            XCTAssertEqual((limiter["permits"] as? NSNumber)?.intValue, 1 + fileSearchLaneLimit)
             XCTAssertEqual((limiter["active_permit_count"] as? NSNumber)?.intValue, 0)
             XCTAssertEqual((limiter["waiter_count"] as? NSNumber)?.intValue, 0)
             XCTAssertEqual((limiter["in_flight_count"] as? NSNumber)?.intValue, 0)
@@ -267,10 +268,10 @@
             XCTAssertEqual(limiter["is_idle"] as? Bool, true)
             let lanes = try XCTUnwrap(limiter["lanes"] as? [String: Any])
             XCTAssertEqual(Set(lanes.keys), ["ordinary", "file_search"])
-            for laneName in ["ordinary", "file_search"] {
+            for (laneName, laneLimit) in [("ordinary", 1), ("file_search", fileSearchLaneLimit)] {
                 let lane = try XCTUnwrap(lanes[laneName] as? [String: Any])
-                XCTAssertEqual((lane["limit"] as? NSNumber)?.intValue, 1, laneName)
-                XCTAssertEqual((lane["permits"] as? NSNumber)?.intValue, 1, laneName)
+                XCTAssertEqual((lane["limit"] as? NSNumber)?.intValue, laneLimit, laneName)
+                XCTAssertEqual((lane["permits"] as? NSNumber)?.intValue, laneLimit, laneName)
                 XCTAssertEqual((lane["active_permit_count"] as? NSNumber)?.intValue, 0, laneName)
                 XCTAssertEqual((lane["waiter_count"] as? NSNumber)?.intValue, 0, laneName)
                 XCTAssertEqual((lane["in_flight_count"] as? NSNumber)?.intValue, 0, laneName)
@@ -2299,7 +2300,7 @@
             XCTAssertTrue(coordinator.contains("EditFlowPerf.Lifecycle.Search.broadAdmissionOverloaded"))
             XCTAssertTrue(coordinator.contains("EditFlowPerf.Lifecycle.Search.broadAdmissionWaitExpired"))
             XCTAssertTrue(coordinator.contains("EditFlowPerf.Stage.Search.broadAdmissionLeaseHold"))
-            XCTAssertTrue(coordinator.contains("storeCapacity: 1"))
+            XCTAssertTrue(coordinator.contains("storeCapacity: configuration.maxActiveLeases"))
             XCTAssertTrue(coordinator.contains("globalCapacity: 0"))
             XCTAssertTrue(coordinator.contains("storeQueueDepth: metrics.queueDepth"))
             XCTAssertTrue(coordinator.contains("globalQueueDepth: 0"))
@@ -2470,7 +2471,7 @@
             XCTAssertTrue(coordinator.contains("snapshotForTesting"))
             XCTAssertTrue(coordinator.contains("configureForTesting"))
             XCTAssertTrue(coordinator.contains("resetConfigurationForTesting"))
-            XCTAssertTrue(coordinator.contains("activeLeaseID == nil, waiterState == nil"))
+            XCTAssertTrue(coordinator.contains("activeLeaseIDs.isEmpty, waiterStatesByID.isEmpty"))
             XCTAssertTrue(coordinator.contains("let enqueuedAt = clock.now()"))
             XCTAssertTrue(coordinator.contains("maximumActivePermitCount"))
             XCTAssertTrue(coordinator.contains("maximumWaiterCount"))
