@@ -275,7 +275,11 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
             )
         ) { [self] _, args in
             let connectionID = ServerNetworkManager.currentConnectionID
-            return try await Value(executeGitTool(args: args, connectionID: connectionID))
+            let reply = try await executeGitTool(args: args, connectionID: connectionID)
+            return try await MCPProviderProjectionWorker.encode(
+                reply,
+                toolName: MCPWindowToolName.git
+            )
         }
     }
 
@@ -352,90 +356,6 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
         let primaryRepo = repos[0]
         let repoURL = primaryRepo.rootURL
         let isMultiRepo = repos.count > 1
-        // Helper: Build status breakdown from changed files
-        func statusBreakdown(from files: [VCSUncommittedFile]) -> [String: Int]? {
-            var counts: [String: Int] = [:]
-            for file in files {
-                counts[file.status, default: 0] += 1
-            }
-            return counts.isEmpty ? nil : counts
-        }
-
-        func statusBreakdownFromManifest(from files: [GitDiffSnapshotManifest.FileEntry]) -> [String: Int]? {
-            var counts: [String: Int] = [:]
-            for entry in files {
-                guard let status = entry.status, !status.isEmpty else { continue }
-                counts[status, default: 0] += 1
-            }
-            return counts.isEmpty ? nil : counts
-        }
-
-        func summaryDTO(summary: GitDiffSnapshotManifest.Summary, files: [GitDiffSnapshotManifest.FileEntry]) -> Reply.SummaryDTO {
-            Reply.SummaryDTO(
-                files: summary.files,
-                insertions: summary.insertions,
-                deletions: summary.deletions,
-                byStatus: statusBreakdownFromManifest(from: files)
-            )
-        }
-
-        func oneliner(files: Int, insertions: Int, deletions: Int) -> String {
-            "\(files) files (+\(insertions) -\(deletions))"
-        }
-
-        func hunkDTOs(from hunks: [GitDiffPatchParsing.ParsedHunk], nilWhenEmpty: Bool) -> [Reply.DiffHunkDTO]? {
-            if nilWhenEmpty, hunks.isEmpty { return nil }
-            var dtos: [Reply.DiffHunkDTO] = []
-            dtos.reserveCapacity(hunks.count)
-            for hunk in hunks {
-                dtos.append(Reply.DiffHunkDTO(header: hunk.header, oldStart: hunk.oldStart, newStart: hunk.newStart, patch: hunk.content))
-            }
-            return dtos
-        }
-
-        func diffFileDTOsWithoutHunks(from changedFiles: [VCSUncommittedFile]) -> [Reply.DiffFileDTO] {
-            var files: [Reply.DiffFileDTO] = []
-            files.reserveCapacity(changedFiles.count)
-            for file in changedFiles {
-                files.append(Reply.DiffFileDTO(path: file.path, status: file.status, insertions: file.additions, deletions: file.deletions, hunks: nil))
-            }
-            return files
-        }
-
-        func parsedFileHunks(from changedFiles: [VCSUncommittedFile], perFilePatches: [String: String]) -> [GitDiffPatchParsing.ParsedFileHunks] {
-            let state = EditFlowPerf.begin(
-                EditFlowPerf.Stage.Git.hunkParsing,
-                EditFlowPerf.Dimensions(lineCount: changedFiles.count)
-            )
-            var parsedFiles: [GitDiffPatchParsing.ParsedFileHunks] = []
-            parsedFiles.reserveCapacity(changedFiles.count)
-            var patchBytes = 0
-            var hunkCount = 0
-
-            for file in changedFiles {
-                guard let patchText = perFilePatches[file.path] else { continue }
-                if state != nil {
-                    patchBytes += patchText.utf8.count
-                }
-                let hunks = patchText.isEmpty ? [] : GitDiffPatchParsing.parseHunks(from: patchText)
-                hunkCount += hunks.count
-                parsedFiles.append(GitDiffPatchParsing.ParsedFileHunks(
-                    path: file.path,
-                    status: file.status,
-                    insertions: file.additions ?? 0,
-                    deletions: file.deletions ?? 0,
-                    hunks: hunks
-                ))
-            }
-
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.Git.hunkParsing,
-                state,
-                EditFlowPerf.Dimensions(fileBytes: patchBytes, lineCount: changedFiles.count, chunkCount: hunkCount)
-            )
-            return parsedFiles
-        }
-
         func buildWorktreeWarning(from worktree: Reply.WorktreeDTO?) -> String? {
             Self.worktreeWarning(from: worktree)
         }
@@ -443,94 +363,6 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
         func combineWarnings(_ warnings: [String?]) -> String? {
             let merged = warnings.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             return merged.isEmpty ? nil : merged.joined(separator: "\n")
-        }
-
-        // MARK: Multi-root aggregate helpers
-
-        /// Merge multiple byStatus dictionaries into one
-        func mergeByStatus(_ dicts: [[String: Int]?]) -> [String: Int]? {
-            var result: [String: Int] = [:]
-            for dict in dicts.compactMap(\.self) {
-                for (status, count) in dict {
-                    result[status, default: 0] += count
-                }
-            }
-            return result.isEmpty ? nil : result
-        }
-
-        /// Compute aggregate totals from per-repo diff DTOs
-        func aggregateTotals(from diffs: [Reply.DiffDTO]) -> Reply.TotalsDTO {
-            var files = 0, insertions = 0, deletions = 0
-            for diff in diffs {
-                let t = diff.totals
-                files += t.files
-                insertions += t.insertions
-                deletions += t.deletions
-            }
-            return Reply.TotalsDTO(files: files, insertions: insertions, deletions: deletions)
-        }
-
-        /// Build aggregate DTO from per-repo results
-        func aggregateDTO(from repoDiffs: [Reply.DiffDTO], repoCount: Int) -> Reply.AggregateDTO {
-            let totals = aggregateTotals(from: repoDiffs)
-            let byStatus = mergeByStatus(repoDiffs.map(\.byStatus))
-            let onelinerStr = "\(repoCount) repos: \(totals.files) files (+\(totals.insertions) -\(totals.deletions))"
-            return Reply.AggregateDTO(
-                totals: totals,
-                byStatus: byStatus,
-                oneliner: onelinerStr,
-                repoCount: repoCount
-            )
-        }
-
-        func artifactsDTO(snapshotDirURL: URL, manifest: GitDiffSnapshotManifest) -> Reply.ArtifactsDTO {
-            let fm = FileManager.default
-            let changedLinesURL = snapshotDirURL.appendingPathComponent("index/changed_lines.tsv")
-            let allPatchURL = snapshotDirURL.appendingPathComponent("diff/all.patch")
-            let deepHunksURL = snapshotDirURL.appendingPathComponent("deep/hunks.jsonl")
-            let deepChangedLinesURL = snapshotDirURL.appendingPathComponent("deep/changed_lines.tsv")
-            return Reply.ArtifactsDTO(
-                manifest: "manifest.json",
-                map: "MAP.txt",
-                filesTsv: "index/files.tsv",
-                changedLines: fm.fileExists(atPath: changedLinesURL.path) ? "index/changed_lines.tsv" : nil,
-                tree: "index/files.tree.txt",
-                selectionPaths: manifest.requestedPaths == nil ? nil : "index/selection.paths.txt",
-                allPatch: fm.fileExists(atPath: allPatchURL.path) ? "diff/all.patch" : nil,
-                deepHunks: fm.fileExists(atPath: deepHunksURL.path) ? "deep/hunks.jsonl" : nil,
-                deepChangedLines: fm.fileExists(atPath: deepChangedLinesURL.path) ? "deep/changed_lines.tsv" : nil
-            )
-        }
-
-        func primaryArtifactsDTO(
-            snapshotDir: String,
-            artifacts: Reply.ArtifactsDTO,
-            manifest: GitDiffSnapshotManifest,
-            autoSelectedPaths: [String]
-        ) -> Reply.PrimaryArtifactsDTO {
-            let primary = GitDiffSnapshotStore.primaryArtifacts(
-                snapshotDir: snapshotDir,
-                mapRelativePath: artifacts.map,
-                allPatchRelativePath: artifacts.allPatch
-            )
-            let autoSelected = primary.selectionCandidates.filter { autoSelectedPaths.contains($0) }
-            let perFilePatches = GitDiffSnapshotStore.perFilePatchArtifacts(snapshotDir: snapshotDir, files: manifest.files)
-                .map {
-                    Reply.PrimaryArtifactsDTO.PerFilePatchDTO(
-                        jumpIndex: $0.jumpIndex,
-                        gitPath: $0.gitPath,
-                        selectionPath: $0.selectionPath,
-                        status: $0.status,
-                        additions: $0.additions,
-                        deletions: $0.deletions
-                    )
-                }
-            return Reply.PrimaryArtifactsDTO(
-                map: primary.map,
-                allPatch: primary.allPatch,
-                autoSelected: autoSelected.isEmpty ? nil : autoSelected,
-                perFilePatches: perFilePatches.isEmpty ? nil : perFilePatches
-            )
         }
 
         func autoSelectPrimaryGitDiffArtifacts(paths: [String]) async -> [String] {
@@ -548,20 +380,6 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 dependencies.logDebug("Auto-select git artifacts skipped: \(error.localizedDescription)")
                 return []
             }
-        }
-
-        func inlineDTO(snapshotDirURL: URL, inlineMap: Bool, inlineMode: String, inlineMaxLines: Int) -> Reply.InlineDTO? {
-            guard inlineMap else { return nil }
-            let mapURL = snapshotDirURL.appendingPathComponent("MAP.txt")
-            guard let mapText = try? String(contentsOf: mapURL, encoding: .utf8) else { return nil }
-            let sections: [String]? = (inlineMode == "brief") ? ["SNAPSHOT_META", "CHANGED_FILE_TREE"] : nil
-            let excerpt = GitDiffMapBuilder.inlineExcerpt(from: mapText, maxLines: inlineMaxLines, sections: sections)
-            return Reply.InlineDTO(
-                mapExcerpt: excerpt.excerpt,
-                truncated: excerpt.truncated,
-                totalLines: excerpt.totalLines,
-                returnedLines: excerpt.returnedLines
-            )
         }
 
         typealias SnapshotRef = GitDiffSnapshotStore.GitDiffSnapshotRef
@@ -846,18 +664,7 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
             let path = args["path"]?.stringValue.map { lookupContext.translateInputPath($0) }
             let logBackend = await requestContext.backend(for: repoURL)
             let commits = try await logBackend.getLogSummaries(count: count, path: path, at: repoURL)
-            let commitDTOs = commits.map { c in
-                Reply.CommitSummaryDTO(
-                    sha: c.id,
-                    shortSha: c.shortID,
-                    author: c.author,
-                    date: c.dateISO,
-                    message: c.message,
-                    filesChanged: c.filesChanged,
-                    insertions: c.insertions,
-                    deletions: c.deletions
-                )
-            }
+            let logDTO = try await MCPGitToolProjection.makeLogDTO(commits)
             // Warn if multiple repos detected but log only runs on primary
             let primaryWorktree = await requestContext.worktreeDTO(for: repoURL)
             let logWarning: String? = isMultiRepo ? "Multiple repos detected; op 'log' ran against \(primaryRepo.displayName). Provide repo_root to target a specific repo." : nil
@@ -866,7 +673,7 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 op: "log",
                 status: nil,
                 diff: nil,
-                log: Reply.LogDTO(commits: commitDTOs),
+                log: logDTO,
                 show: nil, blame: nil,
                 worktree: primaryWorktree,
                 snapshotId: nil, snapshotDir: nil,
@@ -897,59 +704,23 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 at: repoURL
             )
 
-            let totalFiles = changedFiles.count
-            let totalInsertions = changedFiles.reduce(0) { $0 + ($1.additions ?? 0) }
-            let totalDeletions = changedFiles.reduce(0) { $0 + ($1.deletions ?? 0) }
-
-            var files: [Reply.DiffFileDTO]?
-
-            if detail == "files" || detail == "full" {
-                files = diffFileDTOsWithoutHunks(from: changedFiles)
-            }
-
-            if detail == "full" {
-                let diffText = try await showBackend.getDiffText(
+            let diffText: String? = if detail == "full" {
+                try await showBackend.getDiffText(
                     compare: .revspec(revspec),
                     paths: nil,
                     contextLines: contextLines,
                     detectRenames: detectRenames,
                     at: repoURL
                 )
-                // Split multi-file diff into per-file patches, then parse hunks per file
-                let perFilePatches = GitService.splitUnifiedDiffByFile(diffText)
-
-                // Rebuild files array with hunks attached to each file
-                let state = EditFlowPerf.begin(
-                    EditFlowPerf.Stage.Git.hunkParsing,
-                    EditFlowPerf.Dimensions(lineCount: changedFiles.count)
-                )
-                var parsedPatchBytes = 0
-                var parsedHunkCount = 0
-                var filesWithHunks: [Reply.DiffFileDTO] = []
-                filesWithHunks.reserveCapacity(changedFiles.count)
-                for file in changedFiles {
-                    let patchText = perFilePatches[file.path] ?? ""
-                    if state != nil {
-                        parsedPatchBytes += patchText.utf8.count
-                    }
-                    let parsedHunks = patchText.isEmpty ? [] : GitDiffPatchParsing.parseHunks(from: patchText)
-                    parsedHunkCount += parsedHunks.count
-                    filesWithHunks.append(Reply.DiffFileDTO(
-                        path: file.path,
-                        status: file.status,
-                        insertions: file.additions,
-                        deletions: file.deletions,
-                        hunks: hunkDTOs(from: parsedHunks, nilWhenEmpty: true)
-                    ))
-                }
-                EditFlowPerf.end(
-                    EditFlowPerf.Stage.Git.hunkParsing,
-                    state,
-                    EditFlowPerf.Dimensions(fileBytes: parsedPatchBytes, lineCount: changedFiles.count, chunkCount: parsedHunkCount)
-                )
-                files = filesWithHunks
-                // hunks is now nil at top level since hunks are attached to individual files
+            } else {
+                nil
             }
+            let showDTO = try await MCPGitToolProjection.makeShowDTO(
+                commitInfo: commitInfo,
+                changedFiles: changedFiles,
+                detail: detail,
+                diffText: diffText
+            )
 
             // Warn if multiple repos detected but show only runs on primary
             let primaryWorktree = await requestContext.worktreeDTO(for: repoURL)
@@ -958,16 +729,7 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
             return Reply(
                 op: "show",
                 status: nil, diff: nil, log: nil,
-                show: Reply.ShowDTO(
-                    sha: commitInfo.id,
-                    shortSha: commitInfo.shortID,
-                    author: commitInfo.author,
-                    date: commitInfo.dateISO,
-                    message: commitInfo.message,
-                    files: files,
-                    totals: Reply.TotalsDTO(files: totalFiles, insertions: totalInsertions, deletions: totalDeletions),
-                    hunks: nil
-                ),
+                show: showDTO,
                 blame: nil,
                 worktree: primaryWorktree,
                 snapshotId: nil, snapshotDir: nil,
@@ -1010,13 +772,11 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
             let blameLines = try await blameBackend.blame(path: path, lineRange: lineRange, at: targetRepoURL)
             let blameWorktree = await requestContext.worktreeDTO(for: targetRepoURL)
             let combinedWarning = combineWarnings([blameWarning, buildWorktreeWarning(from: blameWorktree)])
-            let lineDTOs = blameLines.map { l in
-                Reply.BlameLineDTO(num: l.line, sha: l.id, author: l.author, date: l.dateISO, content: l.content)
-            }
+            let blameDTO = try await MCPGitToolProjection.makeBlameDTO(path: path, lines: blameLines)
             return Reply(
                 op: "blame",
                 status: nil, diff: nil, log: nil, show: nil,
-                blame: Reply.BlameDTO(path: path, lines: lineDTOs),
+                blame: blameDTO,
                 worktree: blameWorktree,
                 snapshotId: nil, snapshotDir: nil,
                 artifacts: nil, summary: nil, oneliner: nil, inputs: nil, modeDetails: nil, inline: nil,
@@ -1083,6 +843,7 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                     var collectedDiffs: [Reply.DiffDTO] = []
                     var manifestsBySnapshotDir: [String: GitDiffSnapshotManifest] = [:]
                     var publishedSnapshotPaths: [String] = []
+                    var primaryArtifactCandidates: [String] = []
                     let tabID = dependencies.boundTabID(connectionID)
 
                     // Group selection paths by repo
@@ -1122,50 +883,34 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                             let snapshotDirURL = store.snapshotDir(workspaceDirectory: workspaceDirectory, repoKey: repo.repoKey, snapshotID: snapshotID)
                             let snapshotDirRel = store.snapshotRelativePath(repoKey: repo.repoKey, snapshotID: snapshotID)
                             publishedSnapshotPaths.append(snapshotDirURL.path)
-                            let summary = summaryDTO(summary: manifest.summary, files: manifest.files)
-                            let emptyReason = GitDiffMapBuilder.emptyReason(
-                                summary: manifest.summary,
-                                scope: manifest.scope,
-                                requestedPaths: manifest.requestedPaths,
-                                compareRaw: manifest.compare
+                            let projection = try await MCPGitToolProjection.makeArtifactProjection(
+                                snapshotDirURL: snapshotDirURL,
+                                snapshotDir: snapshotDirRel,
+                                manifest: manifest,
+                                compareDisplay: repoCompare.resolved,
+                                mode: mode,
+                                inlineMap: inlineMap,
+                                inlineMode: inlineMode,
+                                inlineMaxLines: inlineMaxLines
                             )
-
-                            let diffDTO = Reply.DiffDTO(
-                                compare: repoCompare.resolved,
-                                detail: nil,
-                                files: nil,
-                                totals: Reply.TotalsDTO(files: summary.files, insertions: summary.insertions, deletions: summary.deletions),
-                                byStatus: summary.byStatus,
-                                oneliner: oneliner(files: summary.files, insertions: summary.insertions, deletions: summary.deletions),
-                                truncated: nil,
-                                truncationNote: nil
-                            )
-                            collectedDiffs.append(diffDTO)
-
-                            let artifacts = artifactsDTO(snapshotDirURL: snapshotDirURL, manifest: manifest)
+                            collectedDiffs.append(projection.diff)
+                            primaryArtifactCandidates.append(contentsOf: projection.primaryArtifactCandidates)
                             manifestsBySnapshotDir[snapshotDirRel] = manifest
                             perRepoResults.append(Reply.RepoResultDTO(
                                 repoRoot: repo.rootPath,
                                 repoKey: repo.repoKey,
                                 repoName: repo.displayName,
-                                diff: diffDTO,
+                                diff: projection.diff,
                                 worktree: repoWorktree,
                                 snapshotId: snapshotID,
                                 snapshotDir: snapshotDirRel,
-                                artifacts: artifacts,
-                                summary: summary,
-                                oneliner: "\(summary.files) files (+\(summary.insertions) -\(summary.deletions)) | \(snapshotDirRel)",
-                                inputs: Reply.DiffInputsDTO(
-                                    compare: manifest.compare,
-                                    compareInput: manifest.compareInput,
-                                    scope: manifest.scope.rawValue,
-                                    requestedPathsCount: manifest.requestedPaths?.count,
-                                    contextLines: manifest.contextLines,
-                                    detectRenames: manifest.detectRenames
-                                ),
-                                modeDetails: GitDiffMapBuilder.modeDetails(for: mode),
-                                inline: inlineDTO(snapshotDirURL: snapshotDirURL, inlineMap: inlineMap, inlineMode: inlineMode, inlineMaxLines: inlineMaxLines),
-                                emptyReason: emptyReason
+                                artifacts: projection.artifacts,
+                                summary: projection.summary,
+                                oneliner: projection.oneliner,
+                                inputs: projection.inputs,
+                                modeDetails: projection.modeDetails,
+                                inline: projection.inline,
+                                emptyReason: projection.emptyReason
                             ))
                         } catch {
                             perRepoResults.append(Reply.RepoResultDTO(
@@ -1184,52 +929,16 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                             fallbackScope: .visibleWorkspacePlusGitData
                         )
                     }
-                    let primaryArtifactCandidates = perRepoResults.flatMap { repoResult -> [String] in
-                        guard let snapshotDir = repoResult.snapshotDir,
-                              let artifacts = repoResult.artifacts
-                        else {
-                            return []
-                        }
-                        return GitDiffSnapshotStore.primaryArtifacts(
-                            snapshotDir: snapshotDir,
-                            mapRelativePath: artifacts.map,
-                            allPatchRelativePath: artifacts.allPatch
-                        ).selectionCandidates
-                    }
                     let autoSelectedPrimaryArtifacts = await autoSelectPrimaryGitDiffArtifacts(paths: primaryArtifactCandidates)
-                    let decoratedRepoResults = perRepoResults.map { repoResult in
-                        guard let snapshotDir = repoResult.snapshotDir,
-                              let artifacts = repoResult.artifacts,
-                              let manifest = manifestsBySnapshotDir[snapshotDir]
-                        else {
-                            return repoResult
-                        }
-                        return Reply.RepoResultDTO(
-                            repoRoot: repoResult.repoRoot,
-                            repoKey: repoResult.repoKey,
-                            repoName: repoResult.repoName,
-                            status: repoResult.status,
-                            diff: repoResult.diff,
-                            log: repoResult.log,
-                            show: repoResult.show,
-                            blame: repoResult.blame,
-                            worktree: repoResult.worktree,
-                            snapshotId: repoResult.snapshotId,
-                            snapshotDir: snapshotDir,
-                            artifacts: artifacts,
-                            primaryArtifacts: primaryArtifactsDTO(snapshotDir: snapshotDir, artifacts: artifacts, manifest: manifest, autoSelectedPaths: autoSelectedPrimaryArtifacts),
-                            summary: repoResult.summary,
-                            oneliner: repoResult.oneliner,
-                            inputs: repoResult.inputs,
-                            modeDetails: repoResult.modeDetails,
-                            inline: repoResult.inline,
-                            warning: repoResult.warning,
-                            emptyReason: repoResult.emptyReason,
-                            error: repoResult.error
-                        )
-                    }
-
-                    let aggregate = aggregateDTO(from: collectedDiffs, repoCount: repos.count)
+                    let decoratedRepoResults = try await MCPGitToolProjection.decorateArtifactRepoResults(
+                        perRepoResults,
+                        manifestsBySnapshotDir: manifestsBySnapshotDir,
+                        autoSelectedPaths: autoSelectedPrimaryArtifacts
+                    )
+                    let aggregate = try await MCPGitToolProjection.makeAggregateDTO(
+                        from: collectedDiffs,
+                        repoCount: repos.count
+                    )
                     return Reply(op: "diff", repos: decoratedRepoResults, aggregate: aggregate)
                 }
 
@@ -1264,56 +973,45 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                     fallbackScope: .visibleWorkspacePlusGitData
                 )
                 let snapshotDirRel = store.snapshotRelativePath(repoKey: primaryRepo.repoKey, snapshotID: snapshotID)
-                let artifacts = artifactsDTO(snapshotDirURL: snapshotDirURL, manifest: manifest)
-                let primaryArtifacts = GitDiffSnapshotStore.primaryArtifacts(
+                let projection = try await MCPGitToolProjection.makeArtifactProjection(
+                    snapshotDirURL: snapshotDirURL,
                     snapshotDir: snapshotDirRel,
-                    mapRelativePath: artifacts.map,
-                    allPatchRelativePath: artifacts.allPatch
+                    manifest: manifest,
+                    compareDisplay: compare.resolved,
+                    mode: mode,
+                    inlineMap: inlineMap,
+                    inlineMode: inlineMode,
+                    inlineMaxLines: inlineMaxLines
                 )
-                let autoSelectedPrimaryArtifacts = await autoSelectPrimaryGitDiffArtifacts(paths: primaryArtifacts.selectionCandidates)
+                let autoSelectedPrimaryArtifacts = await autoSelectPrimaryGitDiffArtifacts(
+                    paths: projection.primaryArtifactCandidates
+                )
+                let primaryArtifacts = try await MCPGitToolProjection.makePrimaryArtifactsDTO(
+                    snapshotDir: snapshotDirRel,
+                    artifacts: projection.artifacts,
+                    manifest: manifest,
+                    autoSelectedPaths: autoSelectedPrimaryArtifacts
+                )
                 let primaryWorktree = await requestContext.worktreeDTO(for: repoURL)
                 let combinedWarning = combineWarnings([artifactDiffWarning, buildWorktreeWarning(from: primaryWorktree)])
-                let summary = summaryDTO(summary: manifest.summary, files: manifest.files)
-                let emptyReason = GitDiffMapBuilder.emptyReason(
-                    summary: manifest.summary,
-                    scope: manifest.scope,
-                    requestedPaths: manifest.requestedPaths,
-                    compareRaw: manifest.compare
-                )
 
                 return Reply(
                     op: "diff",
                     status: nil,
-                    diff: Reply.DiffDTO(
-                        compare: compare.resolved,
-                        detail: nil,
-                        files: nil,
-                        totals: Reply.TotalsDTO(files: summary.files, insertions: summary.insertions, deletions: summary.deletions),
-                        byStatus: summary.byStatus,
-                        oneliner: oneliner(files: summary.files, insertions: summary.insertions, deletions: summary.deletions),
-                        truncated: nil,
-                        truncationNote: nil
-                    ),
+                    diff: projection.diff,
                     log: nil, show: nil, blame: nil,
                     worktree: primaryWorktree,
                     snapshotId: snapshotID,
                     snapshotDir: snapshotDirRel,
-                    artifacts: artifacts,
-                    primaryArtifacts: primaryArtifactsDTO(snapshotDir: snapshotDirRel, artifacts: artifacts, manifest: manifest, autoSelectedPaths: autoSelectedPrimaryArtifacts),
-                    summary: summary,
-                    oneliner: "\(summary.files) files (+\(summary.insertions) -\(summary.deletions)) | \(snapshotDirRel)",
-                    inputs: Reply.DiffInputsDTO(
-                        compare: manifest.compare,
-                        compareInput: manifest.compareInput,
-                        scope: manifest.scope.rawValue,
-                        requestedPathsCount: manifest.requestedPaths?.count,
-                        contextLines: manifest.contextLines,
-                        detectRenames: manifest.detectRenames
-                    ),
-                    modeDetails: GitDiffMapBuilder.modeDetails(for: mode),
-                    inline: inlineDTO(snapshotDirURL: snapshotDirURL, inlineMap: inlineMap, inlineMode: inlineMode, inlineMaxLines: inlineMaxLines),
+                    artifacts: projection.artifacts,
+                    primaryArtifacts: primaryArtifacts,
+                    summary: projection.summary,
+                    oneliner: projection.oneliner,
+                    inputs: projection.inputs,
+                    modeDetails: projection.modeDetails,
+                    inline: projection.inline,
                     warning: combinedWarning,
-                    emptyReason: emptyReason,
+                    emptyReason: projection.emptyReason,
                     error: nil
                 )
             }
@@ -1341,50 +1039,12 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                             generateDiffText: includesHunks
                         )
 
-                        let totalFiles = buildResult.summary.files
-                        let totalInsertions = buildResult.summary.insertions
-                        let totalDeletions = buildResult.summary.deletions
-                        let byStatus = statusBreakdown(from: buildResult.changedFiles)
-
-                        var files: [Reply.DiffFileDTO]?
-                        var truncated: Bool?
-                        var truncationNote: String?
-
-                        if effectiveDetail == "files" || includesHunks {
-                            files = diffFileDTOsWithoutHunks(from: buildResult.changedFiles)
-                        }
-
-                        if includesHunks, let _ = buildResult.diffText {
-                            let perFile = buildResult.perFile ?? [:]
-                            let parsedFiles = parsedFileHunks(from: buildResult.changedFiles, perFilePatches: perFile)
-
-                            let truncResult = GitDiffPatchParsing.truncatePatches(files: parsedFiles, maxLines: maxLinesForPatches)
-                            truncated = truncResult.truncated
-                            truncationNote = truncResult.note
-
-                            var truncatedFiles: [Reply.DiffFileDTO] = []
-                            truncatedFiles.reserveCapacity(truncResult.files.count)
-                            for file in truncResult.files {
-                                truncatedFiles.append(Reply.DiffFileDTO(
-                                    path: file.path,
-                                    status: file.status,
-                                    insertions: file.insertions,
-                                    deletions: file.deletions,
-                                    hunks: hunkDTOs(from: file.hunks, nilWhenEmpty: false)
-                                ))
-                            }
-                            files = truncatedFiles
-                        }
-
-                        let diffDTO = Reply.DiffDTO(
+                        let diffDTO = try await MCPGitToolProjection.makeDiffDTO(
                             compare: repoCompare.resolved,
                             detail: effectiveDetail,
-                            files: files,
-                            totals: Reply.TotalsDTO(files: totalFiles, insertions: totalInsertions, deletions: totalDeletions),
-                            byStatus: byStatus,
-                            oneliner: oneliner(files: totalFiles, insertions: totalInsertions, deletions: totalDeletions),
-                            truncated: truncated,
-                            truncationNote: truncationNote
+                            changedFiles: buildResult.changedFiles,
+                            perFilePatches: includesHunks ? buildResult.perFile : nil,
+                            maxLinesForPatches: maxLinesForPatches
                         )
                         collectedDiffs.append(diffDTO)
 
@@ -1405,7 +1065,10 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                     }
                 }
 
-                let aggregate = aggregateDTO(from: collectedDiffs, repoCount: repos.count)
+                let aggregate = try await MCPGitToolProjection.makeAggregateDTO(
+                    from: collectedDiffs,
+                    repoCount: repos.count
+                )
                 return Reply(op: "diff", repos: perRepoResults, aggregate: aggregate)
             }
 
@@ -1425,56 +1088,20 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 generateDiffText: includesHunks
             )
 
-            let totalFiles = buildResult.summary.files
-            let totalInsertions = buildResult.summary.insertions
-            let totalDeletions = buildResult.summary.deletions
-            let byStatus = statusBreakdown(from: buildResult.changedFiles)
             let primaryWorktree = await requestContext.worktreeDTO(for: repoURL)
             let combinedWarning = combineWarnings([diffWarning, buildWorktreeWarning(from: primaryWorktree)])
-
-            var files: [Reply.DiffFileDTO]?
-            var truncated: Bool?
-            var truncationNote: String?
-
-            if effectiveDetail == "files" || includesHunks {
-                files = diffFileDTOsWithoutHunks(from: buildResult.changedFiles)
-            }
-
-            if includesHunks, buildResult.diffText != nil {
-                let perFile = buildResult.perFile ?? [:]
-                let parsedFiles = parsedFileHunks(from: buildResult.changedFiles, perFilePatches: perFile)
-
-                let truncResult = GitDiffPatchParsing.truncatePatches(files: parsedFiles, maxLines: maxLinesForPatches)
-                truncated = truncResult.truncated
-                truncationNote = truncResult.note
-
-                var truncatedFiles: [Reply.DiffFileDTO] = []
-                truncatedFiles.reserveCapacity(truncResult.files.count)
-                for file in truncResult.files {
-                    truncatedFiles.append(Reply.DiffFileDTO(
-                        path: file.path,
-                        status: file.status,
-                        insertions: file.insertions,
-                        deletions: file.deletions,
-                        hunks: hunkDTOs(from: file.hunks, nilWhenEmpty: false)
-                    ))
-                }
-                files = truncatedFiles
-            }
+            let diffDTO = try await MCPGitToolProjection.makeDiffDTO(
+                compare: compare.resolved,
+                detail: effectiveDetail,
+                changedFiles: buildResult.changedFiles,
+                perFilePatches: includesHunks ? buildResult.perFile : nil,
+                maxLinesForPatches: maxLinesForPatches
+            )
 
             return Reply(
                 op: "diff",
                 status: nil,
-                diff: Reply.DiffDTO(
-                    compare: compare.resolved,
-                    detail: effectiveDetail,
-                    files: files,
-                    totals: Reply.TotalsDTO(files: totalFiles, insertions: totalInsertions, deletions: totalDeletions),
-                    byStatus: byStatus,
-                    oneliner: oneliner(files: totalFiles, insertions: totalInsertions, deletions: totalDeletions),
-                    truncated: truncated,
-                    truncationNote: truncationNote
-                ),
+                diff: diffDTO,
                 log: nil, show: nil, blame: nil,
                 worktree: primaryWorktree,
                 snapshotId: nil, snapshotDir: nil,

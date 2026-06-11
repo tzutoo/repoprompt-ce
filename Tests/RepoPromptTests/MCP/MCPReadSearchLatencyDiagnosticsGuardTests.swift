@@ -1534,7 +1534,7 @@
             XCTAssertLessThan(conditional.lowerBound, autoSelectCall.lowerBound)
 
             let valueEncoding = try XCTUnwrap(method.range(of: "EditFlowPerf.Stage.ReadFile.providerValueEncoding"))
-            let valueCall = try XCTUnwrap(method.range(of: "Value(readResult.reply)", range: valueEncoding.upperBound ..< method.endIndex))
+            let valueCall = try XCTUnwrap(method.range(of: "MCPProviderProjectionWorker.encode(", range: valueEncoding.upperBound ..< method.endIndex))
             XCTAssertLessThan(valueEncoding.lowerBound, valueCall.lowerBound)
         }
 
@@ -2581,7 +2581,7 @@
                 in: provider,
                 hooks: [
                     "EditFlowPerf.Stage.ReadFile.providerValueEncoding",
-                    "Value(readResult.reply)",
+                    "MCPProviderProjectionWorker.encode(",
                     "EditFlowPerf.Lifecycle.ReadFile.providerResultReady",
                     "return value"
                 ]
@@ -2880,7 +2880,8 @@
             XCTAssertTrue(store.contains("rootLifetimeID: state.lifetimeID"))
 
             let server = try source("Sources/RepoPrompt/Infrastructure/MCP/ViewModels/MCPServerViewModel.swift")
-            XCTAssertTrue(server.contains("WorkspaceInteractiveReadProcessor.sliceOffActor"))
+            XCTAssertTrue(server.contains("MCPReadFileToolProjection.makeBaseReply"))
+            XCTAssertFalse(server.contains("WorkspaceInteractiveReadProcessor.sliceOffActor"))
             XCTAssertFalse(server.contains("String.splitContentPreservingAllLineEndings(full)"))
 
             let tabContext = try source("Sources/RepoPrompt/Infrastructure/MCP/ViewModels/MCPServerViewModel+TabContext.swift")
@@ -3070,6 +3071,156 @@
                 defer { lock.unlock() }
                 return (sinkID, childTaskID)
             }
+        }
+
+        @MainActor
+        func testWI8ProviderProjectionWorkerRunsOffMainActorAndEmitsHandoffTimeline() async throws {
+            _ = startedCapture(label: "wi8-provider-projection", maxSamples: 100)
+            let identity = MCPRequestTimelineIdentity(
+                jsonRPCRequestID: .string("wi8"),
+                connectionID: UUID().uuidString,
+                connectionGeneration: 1,
+                requestOrdinal: 1
+            )
+            let correlation = try XCTUnwrap(
+                EditFlowPerf.makeLifecycleCorrelationIfActive(requestIdentity: identity)
+            )
+
+            let workerRanOnMainThread = try await EditFlowPerf.$currentLifecycleCorrelation.withValue(correlation) {
+                try await MCPProviderProjectionWorker.run(
+                    toolName: MCPWindowToolName.git,
+                    phase: "test_projection"
+                ) {
+                    let ranOnMainThread = Thread.isMainThread
+                    Thread.sleep(forTimeInterval: 0.02)
+                    return ranOnMainThread
+                }
+            }
+            XCTAssertFalse(workerRanOnMainThread)
+
+            let snapshot = EditFlowPerf.debugCaptureSnapshot(finish: true)
+            let handoffEvents = snapshot.lifecycleEvents.filter {
+                $0.sanitizedDimensions.contains("outcome=test_projection")
+            }
+            XCTAssertEqual(handoffEvents.map(\.eventName), [
+                "MCP.ToolCall.MainActorScheduled",
+                "MCP.ToolCall.MainActorEntered",
+                "MCP.ToolCall.MainActorExited",
+                "MCP.ToolCall.MainActorScheduled",
+                "MCP.ToolCall.MainActorEntered",
+                "MCP.ToolCall.MainActorExited"
+            ])
+            XCTAssertTrue(handoffEvents.prefix(3).allSatisfy {
+                $0.sanitizedDimensions.contains("observerType=provider_projection_capture")
+            })
+            XCTAssertTrue(handoffEvents.suffix(3).allSatisfy {
+                $0.sanitizedDimensions.contains("observerType=provider_projection_resume")
+            })
+            let workerStage = try XCTUnwrap(snapshot.stages.first {
+                $0.stageName == "EditFlow.MCPProviderProjection.WorkerBody"
+            })
+            XCTAssertEqual(workerStage.sanitizedDimensions, "tool=git outcome=test_projection")
+            XCTAssertGreaterThanOrEqual(workerStage.p50MS, 10)
+            XCTAssertGreaterThanOrEqual(
+                handoffEvents[3].offsetMS - handoffEvents[2].offsetMS,
+                10,
+                "Worker body time must fall after MainActor exit and before resume scheduling"
+            )
+        }
+
+        @MainActor
+        func testWI8GitAndReadProjectionPreserveDTOContents() async throws {
+            let patch = """
+            diff --git a/Sample.swift b/Sample.swift
+            --- a/Sample.swift
+            +++ b/Sample.swift
+            @@ -1,1 +1,1 @@
+            -old
+            +new
+            """
+            let changedFiles = [
+                VCSUncommittedFile(path: "Sample.swift", status: "M", additions: 1, deletions: 1)
+            ]
+            let diff = try await MCPGitToolProjection.makeDiffDTO(
+                compare: "uncommitted",
+                detail: "patches",
+                changedFiles: changedFiles,
+                perFilePatches: ["Sample.swift": patch],
+                maxLinesForPatches: 100
+            )
+            XCTAssertEqual(diff.totals, .init(files: 1, insertions: 1, deletions: 1))
+            XCTAssertEqual(diff.byStatus, ["M": 1])
+            XCTAssertEqual(diff.files?.first?.path, "Sample.swift")
+            XCTAssertEqual(diff.files?.first?.hunks?.first?.oldStart, 1)
+            XCTAssertEqual(diff.files?.first?.hunks?.first?.newStart, 1)
+            XCTAssertEqual(diff.truncated, false)
+
+            let prepared = WorkspaceInteractiveReadProcessor.prepare("one\r\ntwo\nthree")
+            let read = try await MCPReadFileToolProjection.makeBaseReply(
+                preparedContent: prepared,
+                startLine1Based: 2,
+                lineCount: 1,
+                displayPath: "Sample.txt"
+            )
+            XCTAssertEqual(read.reply.content, "two\n")
+            XCTAssertEqual(read.reply.totalLines, 3)
+            XCTAssertEqual(read.reply.firstLine, 2)
+            XCTAssertEqual(read.reply.lastLine, 2)
+            XCTAssertEqual(read.returnedLineCount, 1)
+        }
+
+        func testWI8ProviderProjectionHeavyWorkStaysOutOfMainActorProviders() throws {
+            let worker = try source("Sources/RepoPrompt/Infrastructure/MCP/WindowTools/MCPProviderProjectionWorker.swift")
+            XCTAssertTrue(worker.contains("Task.detached(priority: priority)"))
+            XCTAssertGreaterThanOrEqual(worker.components(separatedBy: "mainActorScheduled").count - 1, 2)
+            XCTAssertGreaterThanOrEqual(worker.components(separatedBy: "mainActorEntered").count - 1, 2)
+            XCTAssertGreaterThanOrEqual(worker.components(separatedBy: "mainActorExited").count - 1, 2)
+
+            let gitProvider = try source("Sources/RepoPrompt/Infrastructure/MCP/WindowTools/MCPGitToolProvider.swift")
+            for forbidden in [
+                "GitService.splitUnifiedDiffByFile",
+                "GitDiffPatchParsing.parseHunks",
+                "GitDiffPatchParsing.truncatePatches",
+                "String(contentsOf: mapURL",
+                "try Value(executeGitTool"
+            ] {
+                XCTAssertFalse(gitProvider.contains(forbidden), "Git provider retained MainActor work: \(forbidden)")
+            }
+            for handoff in [
+                "MCPGitToolProjection.makeShowDTO",
+                "MCPGitToolProjection.makeDiffDTO",
+                "MCPGitToolProjection.makeArtifactProjection",
+                "MCPGitToolProjection.decorateArtifactRepoResults",
+                "MCPProviderProjectionWorker.encode("
+            ] {
+                XCTAssertTrue(gitProvider.contains(handoff), "Missing Git worker handoff: \(handoff)")
+            }
+
+            let gitProjection = try source("Sources/RepoPrompt/Infrastructure/MCP/WindowTools/MCPGitToolProjection.swift")
+            for workerBody in [
+                "GitService.splitUnifiedDiffByFile",
+                "GitDiffPatchParsing.parseHunks",
+                "GitDiffPatchParsing.truncatePatches",
+                "String(contentsOf: mapURL",
+                "GitDiffMapBuilder.inlineExcerpt"
+            ] {
+                XCTAssertTrue(gitProjection.contains(workerBody), "Missing Git worker computation: \(workerBody)")
+            }
+
+            let fileProvider = try source("Sources/RepoPrompt/Infrastructure/MCP/WindowTools/MCPFileToolProvider.swift")
+            assertSourceOrder(
+                in: fileProvider,
+                hooks: [
+                    "MCPReadFileToolProjection.projectReply",
+                    "await dependencies.enqueueReadFileAutoSelection",
+                    "MCPProviderProjectionWorker.encode("
+                ]
+            )
+            XCTAssertFalse(fileProvider.contains("try Value(readResult.reply)"))
+
+            let server = try source("Sources/RepoPrompt/Infrastructure/MCP/ViewModels/MCPServerViewModel.swift")
+            XCTAssertTrue(server.contains("MCPReadFileToolProjection.makeBaseReply"))
+            XCTAssertFalse(server.contains("WorkspaceInteractiveReadProcessor.sliceOffActor"))
         }
 
         private func assertSourceOrder(

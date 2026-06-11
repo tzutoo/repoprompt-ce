@@ -715,6 +715,12 @@ enum EditFlowPerf {
 
         enum Git {
             static let hunkParsing: StaticString = "EditFlow.Git.HunkParsing"
+            static let mapLoadingExcerpting: StaticString = "EditFlow.Git.MapLoadingExcerpting"
+            static let dtoConstruction: StaticString = "EditFlow.Git.DTOConstruction"
+        }
+
+        enum MCPProviderProjection {
+            static let workerBody: StaticString = "EditFlow.MCPProviderProjection.WorkerBody"
         }
     }
 

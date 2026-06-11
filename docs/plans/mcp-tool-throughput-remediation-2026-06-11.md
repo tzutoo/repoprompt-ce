@@ -63,7 +63,7 @@ Improve MCP throughput across same-connection bursts, parallel agent threads, lo
 - [x] Phase 1 / WI-5 — Git request-scoped context, single artifact build, artifact scope and ingress fixes
 - [x] Phase 1 / WI-6 — long-thread transcript critical path
 - [x] Phase 1 / WI-7 — `read_file` content reuse and freshness narrowing
-- [ ] Phase 2 / WI-8 — off-MainActor provider projection
+- [x] Phase 2 / WI-8 — off-MainActor provider projection
 - [ ] Phase 2 / WI-9 — bounded Git concurrency and command consolidation
 - [ ] Phase 2 / WI-10 — classified, resource-keyed ordinary-tool admission
 - [ ] Phase 3 / WI-11 — immutable per-root catalog shards and scope composition

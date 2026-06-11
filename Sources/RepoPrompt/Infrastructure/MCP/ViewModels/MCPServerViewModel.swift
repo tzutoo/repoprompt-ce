@@ -3685,15 +3685,16 @@ final class MCPServerViewModel: ObservableObject {
             shouldAutoSelect = false
         }
 
-        let slice: WorkspaceInteractiveReadSlice
+        let preparedReply: MCPReadFileToolProjection.PreparedReply
         do {
             let sliceState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.buildSlice)
-            slice = try await WorkspaceInteractiveReadProcessor.sliceOffActor(
-                preparedContent,
+            defer { EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.buildSlice, sliceState) }
+            preparedReply = try await MCPReadFileToolProjection.makeBaseReply(
+                preparedContent: preparedContent,
                 startLine1Based: startLine1Based,
-                lineCount: lineCount
+                lineCount: lineCount,
+                displayPath: displayPath
             )
-            EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.buildSlice, sliceState)
         } catch WorkspaceInteractiveReadRangeError.limitWithNegativeStart {
             throw MCPError.invalidParams("limit parameter is not allowed with negative start_line. Use start_line=-N to read the last N lines.")
         } catch WorkspaceInteractiveReadRangeError.zeroStart {
@@ -3702,23 +3703,11 @@ final class MCPServerViewModel: ObservableObject {
         try Task.checkCancellation()
 
         MCPToolWorkCountDiagnostics.recordReadFileResult(
-            returnedBytes: slice.content.utf8.count,
-            returnedLines: slice.returnedLineCount,
+            returnedBytes: preparedReply.reply.content.utf8.count,
+            returnedLines: preparedReply.returnedLineCount,
             cacheHit: cacheHit
         )
-        return (
-            ToolResultDTOs.ReadFileReply(
-                content: slice.content,
-                totalLines: slice.totalLines,
-                firstLine: slice.firstLine,
-                lastLine: slice.lastLine,
-                message: slice.startExceededFileLength
-                    ? "Requested start_line exceeds file length."
-                    : nil,
-                displayPath: displayPath
-            ),
-            shouldAutoSelect
-        )
+        return (preparedReply.reply, shouldAutoSelect)
     }
 
     /// Performs a file action (create, delete, or move/rename)
