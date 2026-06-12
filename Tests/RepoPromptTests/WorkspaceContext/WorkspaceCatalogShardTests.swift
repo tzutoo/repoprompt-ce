@@ -3,14 +3,20 @@ import XCTest
 
 #if DEBUG
     final class WorkspaceCatalogShardTests: XCTestCase {
+        private var stores: [WorkspaceFileContextStore] = []
         private var temporaryRoots: [URL] = []
 
-        override func tearDownWithError() throws {
+        override func tearDown() async throws {
+            for store in stores {
+                let rootIDs = await store.roots().map(\.id)
+                await store.unloadRoots(ids: rootIDs)
+            }
+            stores.removeAll()
             for url in temporaryRoots {
                 try? FileManager.default.removeItem(at: url)
             }
             temporaryRoots.removeAll()
-            try super.tearDownWithError()
+            try await super.tearDown()
         }
 
         func testTopologyChurnRebuildsOnlyAffectedRootShardsAndShadowMatchesAuthoritativeBytes() async throws {
@@ -25,12 +31,12 @@ import XCTest
             try write("system", to: supplementalURL.appendingPathComponent("System.swift"))
             try write("worktree", to: worktreeURL.appendingPathComponent("Worktree.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let visibleA = try await store.loadRoot(path: visibleAURL.path)
-            let visibleB = try await store.loadRoot(path: visibleBURL.path)
-            let gitData = try await store.loadRoot(path: gitDataURL.path, kind: .workspaceGitData)
-            let supplemental = try await store.loadRoot(path: supplementalURL.path, kind: .supplementalSystem)
-            let worktree = try await store.loadRoot(path: worktreeURL.path, kind: .sessionWorktree)
+            let store = makeStore()
+            let visibleA = try await loadStoppedRoot(in: store, path: visibleAURL.path)
+            let visibleB = try await loadStoppedRoot(in: store, path: visibleBURL.path)
+            let gitData = try await loadStoppedRoot(in: store, path: gitDataURL.path, kind: .workspaceGitData)
+            let supplemental = try await loadStoppedRoot(in: store, path: supplementalURL.path, kind: .supplementalSystem)
+            let worktree = try await loadStoppedRoot(in: store, path: worktreeURL.path, kind: .sessionWorktree)
             let sessionScope = WorkspaceLookupRootScope.sessionBoundWorkspace(
                 logicalRootPaths: [visibleAURL.path],
                 physicalRootPaths: [worktreeURL.path]
@@ -83,7 +89,7 @@ import XCTest
             XCTAssertEqual(buildCount(rootID: supplemental.id, in: diagnostics), 1)
             XCTAssertEqual(buildCount(rootID: worktree.id, in: diagnostics), 1)
 
-            let replacementB = try await store.loadRoot(path: visibleBURL.path)
+            let replacementB = try await loadStoppedRoot(in: store, path: visibleBURL.path)
             let afterReload = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
             XCTAssertNotEqual(replacementB.id, visibleB.id)
             XCTAssertTrue(afterReload.roots.contains { $0.id == replacementB.id })
@@ -101,8 +107,8 @@ import XCTest
             let rootURL = try makeTemporaryRoot(name: "ShardRetention")
             try write("seed", to: rootURL.appendingPathComponent("Seed.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let root = try await store.loadRoot(path: rootURL.path)
+            let store = makeStore()
+            let root = try await loadStoppedRoot(in: store, path: rootURL.path)
             var retainedSnapshots = await [store.searchCatalogSnapshot(rootScope: .visibleWorkspace)]
             let cap = await store.storeWorkDiagnosticsSnapshot().rootCatalogShards.liveGenerationCapPerRoot
             XCTAssertGreaterThan(cap, 1)
@@ -159,8 +165,8 @@ import XCTest
             let seedURL = rootURL.appendingPathComponent("Seed.swift")
             try write("seed", to: seedURL)
 
-            let store = WorkspaceFileContextStore()
-            let root = try await store.loadRoot(path: rootURL.path)
+            let store = makeStore()
+            let root = try await loadStoppedRoot(in: store, path: rootURL.path)
             let initialSnapshot = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
             let initialFolderCount = initialSnapshot.diagnostics.folderCount
 
@@ -206,8 +212,8 @@ import XCTest
             let rootURL = try makeTemporaryRoot(name: "ShardDeltaFallbacks")
             try write("seed", to: rootURL.appendingPathComponent("Seed.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let root = try await store.loadRoot(path: rootURL.path)
+            let store = makeStore()
+            let root = try await loadStoppedRoot(in: store, path: rootURL.path)
             _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
             let lifetimeID = try await store.rootLifetimeIDForTesting(rootID: root.id)
 
@@ -257,9 +263,9 @@ import XCTest
             try write("a", to: rootAURL.appendingPathComponent("SeedA.swift"))
             try write("b", to: rootBURL.appendingPathComponent("SeedB.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let rootA = try await store.loadRoot(path: rootAURL.path)
-            let rootB = try await store.loadRoot(path: rootBURL.path)
+            let store = makeStore()
+            let rootA = try await loadStoppedRoot(in: store, path: rootAURL.path)
+            let rootB = try await loadStoppedRoot(in: store, path: rootBURL.path)
             _ = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
 
             try write("one", to: rootAURL.appendingPathComponent("One.swift"))
@@ -288,8 +294,8 @@ import XCTest
             let rootURL = try makeTemporaryRoot(name: "ShardDirtyRecovery")
             try write("seed", to: rootURL.appendingPathComponent("Seed.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let root = try await store.loadRoot(path: rootURL.path)
+            let store = makeStore()
+            let root = try await loadStoppedRoot(in: store, path: rootURL.path)
             var retainedSnapshots = await [store.searchCatalogSnapshot(rootScope: .visibleWorkspace)]
             let cap = await store.storeWorkDiagnosticsSnapshot().rootCatalogShards.liveGenerationCapPerRoot
 
@@ -330,8 +336,8 @@ import XCTest
             let rootURL = try makeTemporaryRoot(name: "ShardLifetimeReset")
             try write("seed", to: rootURL.appendingPathComponent("Seed.swift"))
 
-            let store = WorkspaceFileContextStore()
-            let originalRoot = try await store.loadRoot(path: rootURL.path)
+            let store = makeStore()
+            let originalRoot = try await loadStoppedRoot(in: store, path: rootURL.path)
             let retainedOriginalSnapshot = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)
             let originalLifetimeID = try await store.rootLifetimeIDForTesting(rootID: originalRoot.id)
 
@@ -341,7 +347,7 @@ import XCTest
             XCTAssertNil(unloadedDiagnostics.publishedTopologyGeneration)
             XCTAssertEqual(unloadedDiagnostics.fallbackReasonCounts["unload"], 1)
 
-            let replacementRoot = try await store.loadRoot(path: rootURL.path)
+            let replacementRoot = try await loadStoppedRoot(in: store, path: rootURL.path)
             let replacementLifetimeID = try await store.rootLifetimeIDForTesting(rootID: replacementRoot.id)
             XCTAssertNotEqual(replacementRoot.id, originalRoot.id)
             XCTAssertNotEqual(replacementLifetimeID, originalLifetimeID)
@@ -366,6 +372,22 @@ import XCTest
             XCTAssertEqual(replacementDiagnostics.lastAppliedIndexGeneration, 1)
             XCTAssertFalse(replacementDiagnostics.deltaStateDirty)
             XCTAssertEqual(diagnostics.shadowMismatchCount, 0)
+        }
+
+        private func makeStore() -> WorkspaceFileContextStore {
+            let store = WorkspaceFileContextStore()
+            stores.append(store)
+            return store
+        }
+
+        private func loadStoppedRoot(
+            in store: WorkspaceFileContextStore,
+            path: String,
+            kind: WorkspaceRootKind? = nil
+        ) async throws -> WorkspaceRootRecord {
+            let root = try await store.loadRoot(path: path, kind: kind)
+            await store.stopWatchingRoot(id: root.id)
+            return root
         }
 
         private func diagnosticsForRoot(
