@@ -269,7 +269,13 @@ final class WorktreeAPISmokeHarnessTests: XCTestCase {
                 exportPath.hasPrefix(standardizedWorktreePath + "/prompt-exports/"),
                 exportPath
             )
-            XCTAssertTrue(exportInstruction.contains(exportPath), exportInstruction)
+            let exportPathLiteral = try XCTUnwrap(
+                String(data: JSONEncoder().encode(exportPath), encoding: .utf8)
+            )
+            XCTAssertTrue(
+                exportInstruction.contains("{\"path\": \(exportPathLiteral)}"),
+                exportInstruction
+            )
             XCTAssertTrue(FileManager.default.fileExists(atPath: exportPath), exportPath)
 
             let relativeExportPath = String(exportPath.dropFirst(standardizedWorktreePath.count))
