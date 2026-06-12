@@ -382,9 +382,31 @@ actor WorkspaceFileContextStore {
             let lastRootCount: Int
         }
 
+        struct RootCatalogShardGenerationDebugSnapshot: Equatable {
+            let rootID: UUID
+            let publishedTopologyGeneration: UInt64?
+            let liveTopologyGenerations: [UInt64]
+            let retainedTopologyGenerations: [UInt64]
+            let buildCount: Int
+            let backstopCount: Int
+            let maxLiveGenerationCount: Int
+        }
+
+        struct RootCatalogShardDebugSnapshot: Equatable {
+            let liveGenerationCapPerRoot: Int
+            let publishedShardCount: Int
+            let totalBuildCount: Int
+            let totalBackstopCount: Int
+            let shadowComparisonCount: Int
+            let shadowMismatchCount: Int
+            let lastShadowByteCount: Int
+            let roots: [RootCatalogShardGenerationDebugSnapshot]
+        }
+
         struct StoreWorkDiagnosticsSnapshot: Equatable {
             let invalidations: [CatalogInvalidationDebugEvent]
             let catalogRebuild: CatalogRebuildDebugSnapshot
+            let rootCatalogShards: RootCatalogShardDebugSnapshot
         }
 
         struct ReadSearchRootDiagnosticsSnapshot: Equatable {
@@ -460,6 +482,12 @@ actor WorkspaceFileContextStore {
         private var catalogRebuildTotalMicroseconds: UInt64 = 0
         private var catalogRebuildLastFileCount = 0
         private var catalogRebuildLastRootCount = 0
+        private var rootCatalogShardBuildCountsByRootID: [UUID: Int] = [:]
+        private var rootCatalogShardBackstopCountsByRootID: [UUID: Int] = [:]
+        private var rootCatalogShardMaxLiveGenerationCountsByRootID: [UUID: Int] = [:]
+        private var rootCatalogShardShadowComparisonCount = 0
+        private var rootCatalogShardShadowMismatchCount = 0
+        private var rootCatalogShardLastShadowByteCount = 0
 
         func setRootLoadWillStartHandler(_ handler: (@Sendable (String) async -> Void)?) {
             rootLoadWillStartHandler = handler
@@ -577,7 +605,8 @@ actor WorkspaceFileContextStore {
                     totalMicroseconds: catalogRebuildTotalMicroseconds,
                     lastFileCount: catalogRebuildLastFileCount,
                     lastRootCount: catalogRebuildLastRootCount
-                )
+                ),
+                rootCatalogShards: rootCatalogShardDebugSnapshot()
             )
         }
 
@@ -615,6 +644,53 @@ actor WorkspaceFileContextStore {
             catalogRebuildTotalMicroseconds &+= totalMicroseconds
             catalogRebuildLastFileCount = fileCount
             catalogRebuildLastRootCount = rootCount
+        }
+
+        private func rootCatalogShardDebugSnapshot() -> RootCatalogShardDebugSnapshot {
+            var trackedRootIDs = Set(rootStatesByID.keys)
+            trackedRootIDs.formUnion(publishedRootCatalogShardsByRootID.keys)
+            trackedRootIDs.formUnion(rootCatalogShardWeakReferencesByRootID.keys)
+
+            let staleDiagnosticRootIDs = Set(rootCatalogShardBuildCountsByRootID.keys).subtracting(trackedRootIDs)
+            for rootID in staleDiagnosticRootIDs {
+                rootCatalogShardBuildCountsByRootID.removeValue(forKey: rootID)
+                rootCatalogShardBackstopCountsByRootID.removeValue(forKey: rootID)
+                rootCatalogShardMaxLiveGenerationCountsByRootID.removeValue(forKey: rootID)
+            }
+
+            let roots = trackedRootIDs.sorted { $0.uuidString < $1.uuidString }.map { rootID in
+                let liveShards = liveRootCatalogShards(rootID: rootID)
+                let publishedShard = publishedRootCatalogShardsByRootID[rootID]
+                let liveGenerations = liveShards.map(\.key.topologyGeneration).sorted()
+                let retainedGenerations = liveShards.compactMap { shard -> UInt64? in
+                    guard let publishedShard else { return shard.key.topologyGeneration }
+                    return shard === publishedShard ? nil : shard.key.topologyGeneration
+                }.sorted()
+                let maxLiveCount = max(
+                    rootCatalogShardMaxLiveGenerationCountsByRootID[rootID] ?? 0,
+                    liveShards.count
+                )
+                rootCatalogShardMaxLiveGenerationCountsByRootID[rootID] = maxLiveCount
+                return RootCatalogShardGenerationDebugSnapshot(
+                    rootID: rootID,
+                    publishedTopologyGeneration: publishedShard?.key.topologyGeneration,
+                    liveTopologyGenerations: liveGenerations,
+                    retainedTopologyGenerations: retainedGenerations,
+                    buildCount: rootCatalogShardBuildCountsByRootID[rootID] ?? 0,
+                    backstopCount: rootCatalogShardBackstopCountsByRootID[rootID] ?? 0,
+                    maxLiveGenerationCount: maxLiveCount
+                )
+            }
+            return RootCatalogShardDebugSnapshot(
+                liveGenerationCapPerRoot: Self.maxLiveRootCatalogShardGenerationsPerRoot,
+                publishedShardCount: publishedRootCatalogShardsByRootID.count,
+                totalBuildCount: rootCatalogShardBuildCountsByRootID.values.reduce(0, +),
+                totalBackstopCount: rootCatalogShardBackstopCountsByRootID.values.reduce(0, +),
+                shadowComparisonCount: rootCatalogShardShadowComparisonCount,
+                shadowMismatchCount: rootCatalogShardShadowMismatchCount,
+                lastShadowByteCount: rootCatalogShardLastShadowByteCount,
+                roots: roots
+            )
         }
 
         private static func rootKindDiagnosticLabel(_ kind: WorkspaceRootKind) -> String {
@@ -822,6 +898,59 @@ actor WorkspaceFileContextStore {
         var fileIDsByStandardizedFullPath: [String: UUID] = [:]
     }
 
+    private struct RootCatalogCanonicalConfigurationIdentity: Hashable {
+        let canonicalPath: String
+        let loadConfiguration: RootLoadConfiguration
+    }
+
+    private struct RootCatalogShardKey: Hashable {
+        let canonicalConfigurationIdentity: RootCatalogCanonicalConfigurationIdentity
+        let rootID: UUID
+        let lifetimeID: UUID
+        let topologyGeneration: UInt64
+    }
+
+    private final class RootCatalogShard: @unchecked Sendable {
+        let key: RootCatalogShardKey
+        let root: WorkspaceRootRecord
+        let files: [WorkspaceFileRecord]
+        let entries: [WorkspaceSearchCatalogEntry]
+        let folderCount: Int
+
+        init(
+            key: RootCatalogShardKey,
+            root: WorkspaceRootRecord,
+            files: [WorkspaceFileRecord],
+            entries: [WorkspaceSearchCatalogEntry],
+            folderCount: Int
+        ) {
+            self.key = key
+            self.root = root
+            self.files = files
+            self.entries = entries
+            self.folderCount = folderCount
+        }
+    }
+
+    private final class WeakRootCatalogShardReference {
+        weak var shard: RootCatalogShard?
+
+        init(_ shard: RootCatalogShard) {
+            self.shard = shard
+        }
+    }
+
+    private struct RootCatalogMergeCursor {
+        let shardIndex: Int
+        let elementIndex: Int
+    }
+
+    private struct AuthoritativeCatalogComponents {
+        let files: [WorkspaceFileRecord]
+        let entries: [WorkspaceSearchCatalogEntry]
+        let folderCount: Int
+    }
+
     private struct SearchCatalogRootDependency: Hashable {
         let canonicalIdentity: String
         let rootID: UUID
@@ -872,6 +1001,8 @@ actor WorkspaceFileContextStore {
     private var nextSessionCatalogGeneration: UInt64 = 0
     private var searchCatalogSnapshotsByScope: [WorkspaceLookupRootScope: SearchCatalogSnapshotCacheEntry] = [:]
     private var nextSearchCatalogSnapshotAccessSequence: UInt64 = 0
+    private var publishedRootCatalogShardsByRootID: [UUID: RootCatalogShard] = [:]
+    private var rootCatalogShardWeakReferencesByRootID: [UUID: [WeakRootCatalogShardReference]] = [:]
     private var pathMatchSnapshotIdentitiesByScope: [WorkspaceLookupRootScope: PathMatchCacheIdentity] = [:]
     private let storeBackedSearchLane: StoreBackedWorkspaceSearchLane
     private let searchDecodedContentCache = WorkspaceSearchDecodedContentCache()
@@ -885,6 +1016,9 @@ actor WorkspaceFileContextStore {
     private var nextSearchContentInvalidationEpoch: UInt64 = 0
     private var activePublicationInvalidationBatch: PublicationInvalidationBatch?
     private static let maxCachedSearchCatalogSnapshotScopes = 16
+    // Covers overlapping readers/index builds while bounding retained full-root arrays. At the cap,
+    // callers receive an authoritative uncached rebuild until older ARC leases drain.
+    private static let maxLiveRootCatalogShardGenerationsPerRoot = 8
     private static let defaultMaxPendingDeltasPerRoot = 10000
     private let pathMatchWorker = PathMatchWorker()
     private let codeScanActor = CodeScanActor()
@@ -1455,59 +1589,54 @@ actor WorkspaceFileContextStore {
         }
         #if DEBUG
             let rebuildStart = DispatchTime.now().uptimeNanoseconds
-            let filterStart = rebuildStart
         #endif
         let roots = rootsForPathLookup(scope: rootScope)
-        let rootsByID = Dictionary(uniqueKeysWithValues: roots.map { ($0.id, $0) })
-        let allowedRootIDs = Set(rootsByID.keys)
-        let filteredFiles = filesByID.values
-            .filter { allowedRootIDs.contains($0.rootID) && isDiscoverableFileID($0.id) }
-        #if DEBUG
-            let filterEnd = DispatchTime.now().uptimeNanoseconds
-            let sortStart = filterEnd
-        #endif
-        let files = filteredFiles.sorted {
-            if $0.standardizedFullPath == $1.standardizedFullPath {
-                return $0.id.uuidString < $1.id.uuidString
-            }
-            return $0.standardizedFullPath < $1.standardizedFullPath
+        let generation = scopedSnapshotGeneration(scope: rootScope)
+        var shouldCacheSnapshot = false
+        let snapshot: WorkspaceSearchCatalogSnapshot
+        if let shards = prepareAndPublishRootCatalogShardBatch(for: roots) {
+            var composedSnapshot = composeSearchCatalogSnapshot(
+                rootScope: rootScope,
+                generation: generation,
+                roots: roots,
+                shards: shards
+            )
+            shouldCacheSnapshot = true
+            #if DEBUG
+                let authoritativeSnapshot = buildAuthoritativeSearchCatalogSnapshot(
+                    rootScope: rootScope,
+                    generation: generation,
+                    roots: roots
+                )
+                let composedBytes = catalogShadowBytes(composedSnapshot)
+                let authoritativeBytes = catalogShadowBytes(authoritativeSnapshot)
+                let shadowMatches = composedBytes == authoritativeBytes
+                recordRootCatalogShardShadowComparison(
+                    matched: shadowMatches,
+                    byteCount: authoritativeBytes.count
+                )
+                if !shadowMatches {
+                    assertionFailure("Root catalog shard composition diverged from the authoritative full rebuild")
+                    composedSnapshot = authoritativeSnapshot
+                    shouldCacheSnapshot = false
+                }
+            #endif
+            snapshot = composedSnapshot
+        } else {
+            snapshot = buildAuthoritativeSearchCatalogSnapshot(
+                rootScope: rootScope,
+                generation: generation,
+                roots: roots
+            )
         }
         #if DEBUG
-            let sortEnd = DispatchTime.now().uptimeNanoseconds
-            let materializationStart = sortEnd
-        #endif
-        let entries = files.compactMap { file -> WorkspaceSearchCatalogEntry? in
-            guard let root = rootsByID[file.rootID] else { return nil }
-            return WorkspaceSearchCatalogEntry(file: file, root: root)
-        }
-        let diagnostics = WorkspaceCatalogDiagnostics(
-            generation: scopedSnapshotGeneration(scope: rootScope),
-            rootScope: rootScope,
-            rootCount: roots.count,
-            folderCount: foldersByID.values.reduce(into: 0) { count, folder in
-                if allowedRootIDs.contains(folder.rootID), isDiscoverableFolderID(folder.id) { count += 1 }
-            },
-            fileCount: files.count
-        )
-        let snapshot = WorkspaceSearchCatalogSnapshot(
-            generation: diagnostics.generation,
-            rootScope: rootScope,
-            roots: roots,
-            files: files,
-            entries: entries,
-            diagnostics: diagnostics
-        )
-        #if DEBUG
-            let materializationEnd = DispatchTime.now().uptimeNanoseconds
+            let rebuildEnd = DispatchTime.now().uptimeNanoseconds
             recordCatalogRebuild(
-                filterMicroseconds: Self.debugElapsedMicroseconds(since: filterStart, through: filterEnd),
-                sortMicroseconds: Self.debugElapsedMicroseconds(since: sortStart, through: sortEnd),
-                materializationMicroseconds: Self.debugElapsedMicroseconds(
-                    since: materializationStart,
-                    through: materializationEnd
-                ),
-                totalMicroseconds: Self.debugElapsedMicroseconds(since: rebuildStart, through: materializationEnd),
-                fileCount: files.count,
+                filterMicroseconds: 0,
+                sortMicroseconds: 0,
+                materializationMicroseconds: 0,
+                totalMicroseconds: Self.debugElapsedMicroseconds(since: rebuildStart, through: rebuildEnd),
+                fileCount: snapshot.files.count,
                 rootCount: roots.count
             )
         #endif
@@ -1515,15 +1644,334 @@ actor WorkspaceFileContextStore {
             EditFlowPerf.Stage.Search.catalogSnapshot,
             catalogSnapshotState,
             EditFlowPerf.Dimensions(
-                fileCount: diagnostics.fileCount,
+                fileCount: snapshot.diagnostics.fileCount,
                 cacheHit: false,
-                rootCount: diagnostics.rootCount,
-                folderCount: diagnostics.folderCount
+                rootCount: snapshot.diagnostics.rootCount,
+                folderCount: snapshot.diagnostics.folderCount
             )
         )
-        cacheSearchCatalogSnapshot(snapshot, validationToken: validationToken, scope: rootScope)
+        if shouldCacheSnapshot {
+            cacheSearchCatalogSnapshot(snapshot, validationToken: validationToken, scope: rootScope)
+        }
         return snapshot
     }
+
+    private func prepareAndPublishRootCatalogShardBatch(
+        for roots: [WorkspaceRootRecord]
+    ) -> [RootCatalogShard]? {
+        var keysByRootID: [UUID: RootCatalogShardKey] = [:]
+        keysByRootID.reserveCapacity(roots.count)
+        var rootsNeedingBuild: [(root: WorkspaceRootRecord, key: RootCatalogShardKey)] = []
+        rootsNeedingBuild.reserveCapacity(roots.count)
+
+        for root in roots {
+            guard let key = rootCatalogShardKey(for: root) else { return nil }
+            keysByRootID[root.id] = key
+            if publishedRootCatalogShardsByRootID[root.id]?.key != key {
+                rootsNeedingBuild.append((root, key))
+            }
+        }
+
+        for candidate in rootsNeedingBuild {
+            let liveGenerations = liveRootCatalogShards(rootID: candidate.root.id)
+            guard liveGenerations.count < Self.maxLiveRootCatalogShardGenerationsPerRoot else {
+                #if DEBUG
+                    rootCatalogShardBackstopCountsByRootID[candidate.root.id, default: 0] += 1
+                    rootCatalogShardMaxLiveGenerationCountsByRootID[candidate.root.id] = max(
+                        rootCatalogShardMaxLiveGenerationCountsByRootID[candidate.root.id] ?? 0,
+                        liveGenerations.count
+                    )
+                #endif
+                return nil
+            }
+        }
+
+        // Build the complete replacement batch privately; the actor publishes it with one assignment below.
+        var newlyBuiltShardsByRootID: [UUID: RootCatalogShard] = [:]
+        newlyBuiltShardsByRootID.reserveCapacity(rootsNeedingBuild.count)
+        for candidate in rootsNeedingBuild {
+            let components = buildAuthoritativeCatalogComponents(roots: [candidate.root])
+            newlyBuiltShardsByRootID[candidate.root.id] = RootCatalogShard(
+                key: candidate.key,
+                root: candidate.root,
+                files: components.files,
+                entries: components.entries,
+                folderCount: components.folderCount
+            )
+        }
+
+        var publication = publishedRootCatalogShardsByRootID
+        publication.reserveCapacity(max(publication.count, roots.count))
+        for root in roots {
+            guard let key = keysByRootID[root.id] else { return nil }
+            if let newlyBuilt = newlyBuiltShardsByRootID[root.id] {
+                publication[root.id] = newlyBuilt
+            } else if let retained = publishedRootCatalogShardsByRootID[root.id], retained.key == key {
+                publication[root.id] = retained
+            } else {
+                return nil
+            }
+        }
+
+        publishedRootCatalogShardsByRootID = publication
+        for shard in newlyBuiltShardsByRootID.values {
+            registerPublishedRootCatalogShard(shard)
+        }
+        return roots.compactMap { publication[$0.id] }
+    }
+
+    private func rootCatalogShardKey(for root: WorkspaceRootRecord) -> RootCatalogShardKey? {
+        guard let state = rootStatesByID[root.id],
+              let loadConfiguration = rootLoadConfigurationsByPath[root.standardizedFullPath]
+        else { return nil }
+        return RootCatalogShardKey(
+            canonicalConfigurationIdentity: RootCatalogCanonicalConfigurationIdentity(
+                canonicalPath: root.standardizedFullPath,
+                loadConfiguration: loadConfiguration
+            ),
+            rootID: root.id,
+            lifetimeID: state.lifetimeID,
+            topologyGeneration: catalogGenerationsByRootID[root.id] ?? 0
+        )
+    }
+
+    private func registerPublishedRootCatalogShard(_ shard: RootCatalogShard) {
+        rootCatalogShardWeakReferencesByRootID[shard.key.rootID, default: []]
+            .append(WeakRootCatalogShardReference(shard))
+        #if DEBUG
+            rootCatalogShardBuildCountsByRootID[shard.key.rootID, default: 0] += 1
+            let liveCount = liveRootCatalogShards(rootID: shard.key.rootID).count
+            rootCatalogShardMaxLiveGenerationCountsByRootID[shard.key.rootID] = max(
+                rootCatalogShardMaxLiveGenerationCountsByRootID[shard.key.rootID] ?? 0,
+                liveCount
+            )
+        #endif
+    }
+
+    private func liveRootCatalogShards(rootID: UUID) -> [RootCatalogShard] {
+        let live = (rootCatalogShardWeakReferencesByRootID[rootID] ?? []).compactMap(\.shard)
+        if live.isEmpty {
+            rootCatalogShardWeakReferencesByRootID.removeValue(forKey: rootID)
+        } else {
+            rootCatalogShardWeakReferencesByRootID[rootID] = live.map(WeakRootCatalogShardReference.init)
+        }
+        return live
+    }
+
+    private func prunePublishedRootCatalogShardsToCurrentTopology() {
+        publishedRootCatalogShardsByRootID = publishedRootCatalogShardsByRootID.filter { rootID, shard in
+            guard let root = rootStatesByID[rootID]?.root else { return false }
+            return rootCatalogShardKey(for: root) == shard.key
+        }
+    }
+
+    private func buildAuthoritativeCatalogComponents(
+        roots: [WorkspaceRootRecord]
+    ) -> AuthoritativeCatalogComponents {
+        let rootsByID = Dictionary(uniqueKeysWithValues: roots.map { ($0.id, $0) })
+        let allowedRootIDs = Set(rootsByID.keys)
+        let files = filesByID.values
+            .filter { allowedRootIDs.contains($0.rootID) && isDiscoverableFileID($0.id) }
+            .sorted(by: Self.searchCatalogFilePrecedes)
+        let entries = files.compactMap { file -> WorkspaceSearchCatalogEntry? in
+            guard let root = rootsByID[file.rootID] else { return nil }
+            return WorkspaceSearchCatalogEntry(file: file, root: root)
+        }
+        let folderCount = foldersByID.values.reduce(into: 0) { count, folder in
+            if allowedRootIDs.contains(folder.rootID), isDiscoverableFolderID(folder.id) { count += 1 }
+        }
+        return AuthoritativeCatalogComponents(files: files, entries: entries, folderCount: folderCount)
+    }
+
+    private func buildAuthoritativeSearchCatalogSnapshot(
+        rootScope: WorkspaceLookupRootScope,
+        generation: UInt64,
+        roots: [WorkspaceRootRecord]
+    ) -> WorkspaceSearchCatalogSnapshot {
+        let components = buildAuthoritativeCatalogComponents(roots: roots)
+        let diagnostics = WorkspaceCatalogDiagnostics(
+            generation: generation,
+            rootScope: rootScope,
+            rootCount: roots.count,
+            folderCount: components.folderCount,
+            fileCount: components.files.count
+        )
+        return WorkspaceSearchCatalogSnapshot(
+            generation: generation,
+            rootScope: rootScope,
+            roots: roots,
+            files: components.files,
+            entries: components.entries,
+            diagnostics: diagnostics
+        )
+    }
+
+    private func composeSearchCatalogSnapshot(
+        rootScope: WorkspaceLookupRootScope,
+        generation: UInt64,
+        roots: [WorkspaceRootRecord],
+        shards: [RootCatalogShard]
+    ) -> WorkspaceSearchCatalogSnapshot {
+        let merged = mergeRootCatalogShards(shards)
+        let diagnostics = WorkspaceCatalogDiagnostics(
+            generation: generation,
+            rootScope: rootScope,
+            rootCount: roots.count,
+            folderCount: shards.reduce(0) { $0 + $1.folderCount },
+            fileCount: merged.files.count
+        )
+        return WorkspaceSearchCatalogSnapshot(
+            generation: generation,
+            rootScope: rootScope,
+            roots: roots,
+            files: merged.files,
+            entries: merged.entries,
+            diagnostics: diagnostics,
+            generationLease: WorkspaceSearchCatalogGenerationLease(
+                retaining: shards.map { $0 as AnyObject }
+            )
+        )
+    }
+
+    private func mergeRootCatalogShards(
+        _ shards: [RootCatalogShard]
+    ) -> (files: [WorkspaceFileRecord], entries: [WorkspaceSearchCatalogEntry]) {
+        let totalFileCount = shards.reduce(0) { $0 + $1.files.count }
+        var files: [WorkspaceFileRecord] = []
+        var entries: [WorkspaceSearchCatalogEntry] = []
+        files.reserveCapacity(totalFileCount)
+        entries.reserveCapacity(totalFileCount)
+        var heap: [RootCatalogMergeCursor] = []
+        heap.reserveCapacity(shards.count)
+
+        func cursorPrecedes(_ lhs: RootCatalogMergeCursor, _ rhs: RootCatalogMergeCursor) -> Bool {
+            let lhsFile = shards[lhs.shardIndex].files[lhs.elementIndex]
+            let rhsFile = shards[rhs.shardIndex].files[rhs.elementIndex]
+            if Self.searchCatalogFilePrecedes(lhsFile, rhsFile) { return true }
+            if Self.searchCatalogFilePrecedes(rhsFile, lhsFile) { return false }
+            if lhs.shardIndex == rhs.shardIndex { return lhs.elementIndex < rhs.elementIndex }
+            return lhs.shardIndex < rhs.shardIndex
+        }
+
+        func push(_ cursor: RootCatalogMergeCursor) {
+            heap.append(cursor)
+            var index = heap.count - 1
+            while index > 0 {
+                let parent = (index - 1) / 2
+                guard cursorPrecedes(heap[index], heap[parent]) else { break }
+                heap.swapAt(index, parent)
+                index = parent
+            }
+        }
+
+        func pop() -> RootCatalogMergeCursor? {
+            guard !heap.isEmpty else { return nil }
+            if heap.count == 1 { return heap.removeLast() }
+            let first = heap[0]
+            heap[0] = heap.removeLast()
+            var index = 0
+            while true {
+                let left = index * 2 + 1
+                guard left < heap.count else { break }
+                let right = left + 1
+                let next = right < heap.count && cursorPrecedes(heap[right], heap[left]) ? right : left
+                guard cursorPrecedes(heap[next], heap[index]) else { break }
+                heap.swapAt(index, next)
+                index = next
+            }
+            return first
+        }
+
+        for shardIndex in shards.indices where !shards[shardIndex].files.isEmpty {
+            push(RootCatalogMergeCursor(shardIndex: shardIndex, elementIndex: 0))
+        }
+        while let cursor = pop() {
+            let shard = shards[cursor.shardIndex]
+            files.append(shard.files[cursor.elementIndex])
+            entries.append(shard.entries[cursor.elementIndex])
+            let nextElementIndex = cursor.elementIndex + 1
+            if nextElementIndex < shard.files.count {
+                push(RootCatalogMergeCursor(shardIndex: cursor.shardIndex, elementIndex: nextElementIndex))
+            }
+        }
+        return (files, entries)
+    }
+
+    private static func searchCatalogFilePrecedes(_ lhs: WorkspaceFileRecord, _ rhs: WorkspaceFileRecord) -> Bool {
+        if lhs.standardizedFullPath == rhs.standardizedFullPath {
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        return lhs.standardizedFullPath < rhs.standardizedFullPath
+    }
+
+    #if DEBUG
+        private func recordRootCatalogShardShadowComparison(matched: Bool, byteCount: Int) {
+            rootCatalogShardShadowComparisonCount += 1
+            rootCatalogShardLastShadowByteCount = byteCount
+            if !matched {
+                rootCatalogShardShadowMismatchCount += 1
+            }
+        }
+
+        private func catalogShadowBytes(_ snapshot: WorkspaceSearchCatalogSnapshot) -> Data {
+            let null = NSNull()
+            let roots: [[String: Any]] = snapshot.roots.map { root in
+                [
+                    "id": root.id.uuidString,
+                    "name": root.name,
+                    "full_path": root.fullPath,
+                    "standardized_full_path": root.standardizedFullPath,
+                    "is_system_root": root.isSystemRoot,
+                    "kind": Self.rootKindDiagnosticLabel(root.kind)
+                ]
+            }
+            let files: [[String: Any]] = snapshot.files.map { file in
+                [
+                    "id": file.id.uuidString,
+                    "root_id": file.rootID.uuidString,
+                    "name": file.name,
+                    "relative_path": file.relativePath,
+                    "standardized_relative_path": file.standardizedRelativePath,
+                    "full_path": file.fullPath,
+                    "standardized_full_path": file.standardizedFullPath,
+                    "parent_folder_id": file.parentFolderID.map { $0.uuidString as Any } ?? null,
+                    "modification_date_bits": file.modificationDate.map {
+                        String($0.timeIntervalSinceReferenceDate.bitPattern) as Any
+                    } ?? null
+                ]
+            }
+            let entries: [[String: Any]] = snapshot.entries.map { entry in
+                [
+                    "id": entry.id.uuidString,
+                    "root_id": entry.rootID.uuidString,
+                    "root_path": entry.rootPath,
+                    "root_name": entry.rootName,
+                    "name": entry.name,
+                    "relative_path": entry.relativePath,
+                    "standardized_relative_path": entry.standardizedRelativePath,
+                    "full_path": entry.fullPath,
+                    "standardized_full_path": entry.standardizedFullPath,
+                    "display_path": entry.displayPath
+                ]
+            }
+            let object: [String: Any] = [
+                "generation": String(snapshot.generation),
+                "root_scope": Self.scopeDiagnosticLabel(snapshot.rootScope),
+                "roots": roots,
+                "files": files,
+                "entries": entries,
+                "diagnostics": [
+                    "generation": String(snapshot.diagnostics.generation),
+                    "root_scope": Self.scopeDiagnosticLabel(snapshot.diagnostics.rootScope),
+                    "root_count": snapshot.diagnostics.rootCount,
+                    "folder_count": snapshot.diagnostics.folderCount,
+                    "file_count": snapshot.diagnostics.fileCount,
+                    "total_item_count": snapshot.diagnostics.totalItemCount
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+    #endif
 
     func directFolderChildren(
         rootID: UUID,
@@ -5352,6 +5800,7 @@ actor WorkspaceFileContextStore {
             affectedRootKinds: affectedRootKinds,
             affectedRootIDs: affectedRootIDs
         )
+        prunePublishedRootCatalogShardsToCurrentTopology()
         evictInvalidSearchCatalogSnapshots(
             reasons: reasons,
             affectedRootIDs: affectedRootIDs,

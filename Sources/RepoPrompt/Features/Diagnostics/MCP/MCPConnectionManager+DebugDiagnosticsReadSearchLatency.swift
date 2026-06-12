@@ -394,6 +394,26 @@ import RepoPromptShared
                     "total_us": snapshot.catalogRebuild.totalMicroseconds,
                     "last_file_count": snapshot.catalogRebuild.lastFileCount,
                     "last_root_count": snapshot.catalogRebuild.lastRootCount
+                ],
+                "root_catalog_shards": [
+                    "live_generation_cap_per_root": snapshot.rootCatalogShards.liveGenerationCapPerRoot,
+                    "published_shard_count": snapshot.rootCatalogShards.publishedShardCount,
+                    "total_build_count": snapshot.rootCatalogShards.totalBuildCount,
+                    "total_backstop_count": snapshot.rootCatalogShards.totalBackstopCount,
+                    "shadow_comparison_count": snapshot.rootCatalogShards.shadowComparisonCount,
+                    "shadow_mismatch_count": snapshot.rootCatalogShards.shadowMismatchCount,
+                    "last_shadow_byte_count": snapshot.rootCatalogShards.lastShadowByteCount,
+                    "roots": snapshot.rootCatalogShards.roots.map { root in
+                        [
+                            "root_id": root.rootID.uuidString,
+                            "published_topology_generation": root.publishedTopologyGeneration.map { $0 as Any } ?? NSNull(),
+                            "live_topology_generations": root.liveTopologyGenerations,
+                            "retained_topology_generations": root.retainedTopologyGenerations,
+                            "build_count": root.buildCount,
+                            "backstop_count": root.backstopCount,
+                            "max_live_generation_count": root.maxLiveGenerationCount
+                        ]
+                    }
                 ]
             ]
         }

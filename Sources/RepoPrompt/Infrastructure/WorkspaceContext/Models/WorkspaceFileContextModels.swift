@@ -126,6 +126,15 @@ struct WorkspaceSearchCatalogEntry: Identifiable, Equatable, Hashable {
     }
 }
 
+/// Opaque ARC lease keeping immutable catalog generations alive for snapshot readers.
+final class WorkspaceSearchCatalogGenerationLease: @unchecked Sendable {
+    private let retainedObjects: [AnyObject]
+
+    init(retaining retainedObjects: [AnyObject]) {
+        self.retainedObjects = retainedObjects
+    }
+}
+
 struct WorkspaceSearchCatalogSnapshot: Equatable {
     let generation: UInt64
     let rootScope: WorkspaceLookupRootScope
@@ -133,6 +142,34 @@ struct WorkspaceSearchCatalogSnapshot: Equatable {
     let files: [WorkspaceFileRecord]
     let entries: [WorkspaceSearchCatalogEntry]
     let diagnostics: WorkspaceCatalogDiagnostics
+    private let generationLease: WorkspaceSearchCatalogGenerationLease?
+
+    init(
+        generation: UInt64,
+        rootScope: WorkspaceLookupRootScope,
+        roots: [WorkspaceRootRecord],
+        files: [WorkspaceFileRecord],
+        entries: [WorkspaceSearchCatalogEntry],
+        diagnostics: WorkspaceCatalogDiagnostics,
+        generationLease: WorkspaceSearchCatalogGenerationLease? = nil
+    ) {
+        self.generation = generation
+        self.rootScope = rootScope
+        self.roots = roots
+        self.files = files
+        self.entries = entries
+        self.diagnostics = diagnostics
+        self.generationLease = generationLease
+    }
+
+    static func == (lhs: WorkspaceSearchCatalogSnapshot, rhs: WorkspaceSearchCatalogSnapshot) -> Bool {
+        lhs.generation == rhs.generation
+            && lhs.rootScope == rhs.rootScope
+            && lhs.roots == rhs.roots
+            && lhs.files == rhs.files
+            && lhs.entries == rhs.entries
+            && lhs.diagnostics == rhs.diagnostics
+    }
 }
 
 struct WorkspaceDirectFolderChildrenSnapshot: Equatable {
