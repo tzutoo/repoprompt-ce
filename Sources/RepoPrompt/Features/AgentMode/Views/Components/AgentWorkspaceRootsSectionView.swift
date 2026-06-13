@@ -460,7 +460,7 @@ struct AgentWorkspaceRootsSectionView: View {
         }
 
         if let branch = copyableRootBranch(for: row) {
-            Button("Copy Root Branch") {
+            Button("Copy Root Checkout") {
                 copyToPasteboard(branch)
             }
         }
@@ -472,12 +472,12 @@ struct AgentWorkspaceRootsSectionView: View {
                 copyToPasteboard(worktree.worktreeRootPath)
             }
 
-            Button("Copy Active Worktree Name") {
+            Button("Copy Bound Worktree Name") {
                 copyToPasteboard(copyableWorktreeName(for: worktree))
             }
 
             if let branch = copyableActiveWorktreeBranch(for: worktree) {
-                Button("Copy Active Worktree Branch") {
+                Button("Copy Bound Worktree Branch") {
                     copyToPasteboard(branch)
                 }
             }
