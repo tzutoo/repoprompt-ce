@@ -10,6 +10,7 @@ struct MCPWindowToolDependencies {
         let tabID: UUID
         let workspaceID: UUID?
         let bindCaller: Bool
+        let lookupContext: WorkspaceLookupContext
     }
 
     typealias ExecuteTool = @Sendable (_ args: [String: Value]) async throws -> Value
@@ -60,7 +61,8 @@ struct MCPWindowToolDependencies {
     typealias MakeOracleExportDestination = @MainActor @Sendable (
         _ workspace: WorkspaceModel?,
         _ windowID: Int,
-        _ tabID: UUID?
+        _ tabID: UUID?,
+        _ lookupContext: WorkspaceLookupContext
     ) throws -> OracleExportDestination
     typealias ResolveDefaultOracleExportPath = @MainActor @Sendable (
         _ mode: String,

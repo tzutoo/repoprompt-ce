@@ -200,15 +200,6 @@ final class MCPContextBuilderToolProvider: MCPWindowToolProviding {
             connectionID
         )
         let finalTabID = tabResolution.tabID
-        let capturedOracleExportDestination: OracleExportDestination? = if exportResponse {
-            try dependencies.makeOracleExportDestination(
-                workspace,
-                targetWindow.windowID,
-                finalTabID
-            )
-        } else {
-            nil
-        }
 
         if tabResolution.bindCaller, let connectionID {
             let clientName = await ServerNetworkManager.shared.clientIdentifier(forConnection: connectionID)
@@ -220,6 +211,22 @@ final class MCPContextBuilderToolProvider: MCPWindowToolProviding {
                 targetWindow.windowID
             )
         }
+
+        // swiftformat:disable conditionalAssignment
+        let capturedOracleExportDestination: OracleExportDestination?
+        if exportResponse {
+            // Export into the exact root scope selected by Context Builder's final tab resolution.
+            // Ambient request metadata may still describe a different active tab.
+            capturedOracleExportDestination = try dependencies.makeOracleExportDestination(
+                workspace,
+                targetWindow.windowID,
+                finalTabID,
+                tabResolution.lookupContext
+            )
+        } else {
+            capturedOracleExportDestination = nil
+        }
+        // swiftformat:enable conditionalAssignment
 
         let contextBuilderVM = targetWindow.contextBuilderAgentViewModel
         let tabIDForCleanup = finalTabID

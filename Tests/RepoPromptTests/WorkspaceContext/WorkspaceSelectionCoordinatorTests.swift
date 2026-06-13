@@ -266,6 +266,39 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
         return harness.manager.mirrorCompletedSelections.count == count
     }
 
+    func testMCPActiveSelectionFencesStaleUISnapshotBeforeMirrorBegins() async {
+        let initial = StoredSelection()
+        let canonical = StoredSelection(selectedPaths: ["/tmp/canonical.swift"], codemapAutoEnabled: false)
+        let staleUI = StoredSelection()
+        let harness = CoordinatorHarness(initialSelection: initial)
+        harness.manager.pendingUISelection = staleUI
+        let coordinator = WorkspaceSelectionCoordinator(workspaceManager: harness.manager, store: harness.store)
+        harness.manager.activeUISnapshotResolver = { selection, tabID in
+            coordinator.selectionForActiveUISnapshot(selection, tabID: tabID)
+        }
+        harness.manager.presentationHandler = {
+            _ = coordinator.activeSelectionSnapshot(flushPendingUI: true)
+        }
+
+        _ = await coordinator.persistActiveSelection(canonical, source: .mcpTabContext)
+
+        XCTAssertEqual(harness.manager.publishSnapshotCallCount, 1)
+        XCTAssertEqual(harness.manager.composeTab(for: harness.identity)?.selection, canonical)
+        XCTAssertEqual(harness.manager.mirrorStartedSelections, [canonical])
+        XCTAssertEqual(harness.manager.mirrorCompletedSelections, [canonical])
+        XCTAssertEqual(harness.manager.mirroredSelection, canonical)
+
+        // The fence is not ownership by value: a genuinely newer UI revision must still win.
+        let newerUI = StoredSelection(selectedPaths: ["/tmp/newer-ui.swift"])
+        harness.manager.presentationHandler = nil
+        harness.manager.pendingUISelection = newerUI
+        harness.manager.advanceLiveUISelectionRevision()
+        XCTAssertEqual(
+            coordinator.activeSelectionSnapshot(flushPendingUI: true).selection,
+            newerUI
+        )
+    }
+
     func testMCPActiveSelectionCanDeferMirrorToReadFileAutoSelectionLane() async {
         let initial = StoredSelection(selectedPaths: ["/tmp/initial.swift"])
         let next = StoredSelection(selectedPaths: ["/tmp/next.swift"])
@@ -290,6 +323,194 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
         ])
     }
 
+    func testDeferredMCPSelectionFencesQueuedUISnapshotUntilNewUIRevision() async {
+        let initial = StoredSelection()
+        let canonical = StoredSelection(selectedPaths: ["/tmp/worktree-only.swift"], codemapAutoEnabled: false)
+        let staleUI = StoredSelection()
+        let harness = CoordinatorHarness(initialSelection: initial)
+        harness.manager.advanceLiveUISelectionRevision()
+        let coordinator = WorkspaceSelectionCoordinator(workspaceManager: harness.manager, store: harness.store)
+
+        _ = await coordinator.persistActiveSelection(
+            canonical,
+            source: .mcpTabContext,
+            mirrorToUI: false
+        )
+
+        XCTAssertEqual(harness.manager.presentedSelection, canonical)
+        XCTAssertEqual(coordinator.selectionForActiveUISnapshot(staleUI, tabID: harness.tabID), canonical)
+
+        // Programmatic tab restore may mutate the UI owner; refreshing the fence keeps its
+        // delayed publisher from looking like a manual edit.
+        harness.manager.advanceLiveUISelectionRevision()
+        coordinator.refreshDeferredUISelectionFence(forTabID: harness.tabID)
+        XCTAssertEqual(coordinator.selectionForActiveUISnapshot(staleUI, tabID: harness.tabID), canonical)
+
+        // A later UI mutation wins even if its value returns to the pre-MCP baseline (ABA).
+        harness.manager.advanceLiveUISelectionRevision()
+        XCTAssertEqual(coordinator.selectionForActiveUISnapshot(staleUI, tabID: harness.tabID), staleUI)
+    }
+
+    func testTwoSourceWindowsRejectDelayedOlderPropagationAfterNewerLocalMutation() async {
+        let initial = StoredSelection(selectedPaths: ["/tmp/initial.swift"])
+        let older = StoredSelection(selectedPaths: ["/tmp/older.swift"])
+        let newer = StoredSelection(selectedPaths: ["/tmp/newer.swift"])
+        let workspaceID = UUID()
+        let tabID = UUID()
+        let revisionLedger = FakeMCPSelectionRevisionLedger()
+        let firstWindow = CoordinatorHarness(
+            initialSelection: initial,
+            workspaceID: workspaceID,
+            tabID: tabID,
+            propagationRevisionLedger: revisionLedger
+        )
+        let secondWindow = CoordinatorHarness(
+            initialSelection: initial,
+            workspaceID: workspaceID,
+            tabID: tabID,
+            propagationRevisionLedger: revisionLedger
+        )
+        let firstCoordinator = WorkspaceSelectionCoordinator(
+            workspaceManager: firstWindow.manager,
+            store: firstWindow.store
+        )
+        let secondCoordinator = WorkspaceSelectionCoordinator(
+            workspaceManager: secondWindow.manager,
+            store: secondWindow.store
+        )
+        let olderPropagationGate = SelectionMirrorGate()
+
+        firstWindow.manager.propagationHandler = { propagation in
+            if propagation.selection == older {
+                await olderPropagationGate.markStartedAndWaitForRelease()
+            }
+            _ = await secondCoordinator.persistSelection(
+                propagation.selection,
+                for: secondWindow.identity,
+                source: .mcpPeerContext,
+                mirrorToUIIfActive: false,
+                peerSourceRevision: propagation.sourceRevision,
+                peerMutationFence: MCPSelectionPeerMutationFence(
+                    hostID: secondWindow.manager.mcpSelectionPropagationHostID
+                )
+            )
+        }
+        secondWindow.manager.propagationHandler = { propagation in
+            _ = await firstCoordinator.persistSelection(
+                propagation.selection,
+                for: firstWindow.identity,
+                source: .mcpPeerContext,
+                mirrorToUIIfActive: false,
+                peerSourceRevision: propagation.sourceRevision,
+                peerMutationFence: MCPSelectionPeerMutationFence(
+                    hostID: firstWindow.manager.mcpSelectionPropagationHostID
+                )
+            )
+        }
+
+        let olderTask = Task { @MainActor in
+            await firstCoordinator.persistActiveSelection(
+                older,
+                source: .mcpTabContext,
+                mirrorToUI: false
+            )
+        }
+        let olderPropagationStarted = await olderPropagationGate.waitUntilStarted()
+        XCTAssertTrue(olderPropagationStarted)
+        guard olderPropagationStarted else { return }
+
+        _ = await secondCoordinator.persistActiveSelection(
+            newer,
+            source: .mcpTabContext,
+            mirrorToUI: false
+        )
+        XCTAssertEqual(firstWindow.manager.composeTab(for: firstWindow.identity)?.selection, newer)
+        XCTAssertEqual(secondWindow.manager.composeTab(for: secondWindow.identity)?.selection, newer)
+
+        await olderPropagationGate.release()
+        _ = await olderTask.value
+
+        XCTAssertEqual(firstWindow.manager.composeTab(for: firstWindow.identity)?.selection, newer)
+        XCTAssertEqual(secondWindow.manager.composeTab(for: secondWindow.identity)?.selection, newer)
+        XCTAssertEqual(firstWindow.manager.registeredSourceRevisions, [1])
+        XCTAssertEqual(firstWindow.manager.acceptedPeerSourceRevisions, [2])
+        XCTAssertEqual(secondWindow.manager.registeredSourceRevisions, [2])
+        XCTAssertEqual(secondWindow.manager.rejectedPeerSourceRevisions, [1])
+        XCTAssertEqual(firstWindow.manager.propagatedSelections, [older])
+        XCTAssertEqual(secondWindow.manager.propagatedSelections, [newer])
+    }
+
+    func testPeerPropagationQueuedMirrorDoesNotApplyAfterPeerCloses() async {
+        let peerCanonical = StoredSelection(selectedPaths: ["/tmp/peer-canonical.swift"])
+        let propagated = StoredSelection(selectedPaths: ["/tmp/propagated.swift"])
+        let workspaceID = UUID()
+        let tabID = UUID()
+        let revisionLedger = FakeMCPSelectionRevisionLedger()
+        let source = CoordinatorHarness(
+            initialSelection: StoredSelection(selectedPaths: ["/tmp/source.swift"]),
+            workspaceID: workspaceID,
+            tabID: tabID,
+            propagationRevisionLedger: revisionLedger
+        )
+        let peer = CoordinatorHarness(
+            initialSelection: peerCanonical,
+            workspaceID: workspaceID,
+            tabID: tabID,
+            propagationRevisionLedger: revisionLedger
+        )
+        let sourceCoordinator = WorkspaceSelectionCoordinator(
+            workspaceManager: source.manager,
+            store: source.store
+        )
+        let peerCoordinator = WorkspaceSelectionCoordinator(
+            workspaceManager: peer.manager,
+            store: peer.store
+        )
+        let predecessorGate = SelectionMirrorGate()
+        peer.manager.mirroredSelection = peerCanonical
+        peer.manager.firstMirrorGate = predecessorGate
+        source.manager.propagationPeerHostIDs = [peer.manager.mcpSelectionPropagationHostID]
+        source.manager.propagationHandler = { propagation in
+            _ = await peerCoordinator.persistSelection(
+                propagation.selection,
+                for: peer.identity,
+                source: .mcpPeerContext,
+                mirrorToUIIfActive: true,
+                peerSourceRevision: propagation.sourceRevision,
+                peerMutationFence: MCPSelectionPeerMutationFence(
+                    hostID: peer.manager.mcpSelectionPropagationHostID
+                )
+            )
+        }
+
+        let predecessorTask = Task { @MainActor in
+            await peerCoordinator.persistActiveSelection(peerCanonical, source: .mcpTabContext)
+        }
+        let predecessorStarted = await predecessorGate.waitUntilStarted()
+        XCTAssertTrue(predecessorStarted)
+        guard predecessorStarted else { return }
+
+        let propagationTask = Task { @MainActor in
+            await sourceCoordinator.persistActiveSelection(propagated, source: .mcpTabContext)
+        }
+        await waitForSelection(propagated, in: peer)
+        XCTAssertEqual(peer.manager.acceptedPeerSourceRevisions, [2])
+        XCTAssertEqual(peer.manager.updateStoredOnlyCallCount, 1)
+        XCTAssertEqual(peer.manager.mirrorStartedSelections, [peerCanonical])
+
+        peer.manager.mcpSelectionPropagationHostIsLive = false
+        let storedUpdateCountAtClose = peer.manager.updateStoredOnlyCallCount
+        await predecessorGate.release()
+        _ = await predecessorTask.value
+        _ = await propagationTask.value
+
+        XCTAssertEqual(peer.manager.composeTab(for: peer.identity)?.selection, propagated)
+        XCTAssertEqual(peer.manager.updateStoredOnlyCallCount, storedUpdateCountAtClose)
+        XCTAssertEqual(peer.manager.mirrorStartedSelections, [peerCanonical])
+        XCTAssertEqual(peer.manager.mirrorCompletedSelections, [peerCanonical])
+        XCTAssertEqual(peer.manager.mirroredSelection, peerCanonical)
+    }
+
     func testPersistActiveSelectionNoOpsWhenSelectionIsUnchanged() async {
         let initial = StoredSelection(selectedPaths: ["/tmp/initial.swift"])
         let harness = CoordinatorHarness(initialSelection: initial)
@@ -308,7 +529,7 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isApplyingSelectionMirror)
     }
 
-    func testPersistVirtualSelectionStoresImmediatelyAndEmitsVirtualChange() {
+    func testPersistVirtualSelectionStoresImmediatelyAndEmitsVirtualChange() async {
         let initial = StoredSelection(selectedPaths: ["/tmp/initial.swift"])
         let next = StoredSelection(
             selectedPaths: ["/tmp/virtual.swift"],
@@ -322,7 +543,7 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
             .sink { changes.append($0) }
             .store(in: &cancellables)
 
-        let persisted = coordinator.persistVirtualSelection(next, for: harness.tabID)
+        let persisted = await coordinator.persistVirtualSelection(next, for: harness.identity)
 
         XCTAssertEqual(persisted, next)
         XCTAssertEqual(harness.manager.composeTab(with: harness.tabID)?.selection, next)
@@ -330,7 +551,7 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(changes.last, .init(tabID: harness.tabID, selection: next, source: .virtual))
     }
 
-    func testPersistVirtualSelectionNoOpsWhenSelectionIsUnchanged() {
+    func testPersistVirtualSelectionNoOpsWhenSelectionIsUnchanged() async {
         let initial = StoredSelection(selectedPaths: ["/tmp/initial.swift"])
         let harness = CoordinatorHarness(initialSelection: initial)
         let coordinator = WorkspaceSelectionCoordinator(workspaceManager: harness.manager, store: harness.store)
@@ -339,7 +560,7 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
             .sink { changes.append($0) }
             .store(in: &cancellables)
 
-        let persisted = coordinator.persistVirtualSelection(initial, for: harness.tabID)
+        let persisted = await coordinator.persistVirtualSelection(initial, for: harness.identity)
 
         XCTAssertEqual(persisted, initial)
         XCTAssertEqual(harness.manager.composeTab(with: harness.tabID)?.selection, initial)
@@ -364,12 +585,17 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
             .sink { changes.append($0) }
             .store(in: &cancellables)
 
-        let persisted = await coordinator.persistSelection(next, for: inactiveTabID, source: .mcpTabContext)
+        let persisted = await coordinator.persistSelection(
+            next,
+            for: WorkspaceSelectionIdentity(workspaceID: harness.workspaceID, tabID: inactiveTabID),
+            source: .mcpTabContext
+        )
 
         XCTAssertEqual(persisted, next)
         XCTAssertEqual(harness.manager.composeTab(with: inactiveTabID)?.selection, next)
         XCTAssertEqual(harness.manager.composeTab(with: harness.tabID)?.selection, initial)
         XCTAssertEqual(harness.manager.updateStoredOnlyCallCount, 1)
+        XCTAssertEqual(harness.manager.presentedSelection, next)
         XCTAssertEqual(changes.last, .init(tabID: inactiveTabID, selection: next, source: .mcpTabContext))
     }
 
@@ -482,18 +708,47 @@ final class WorkspaceSelectionCoordinatorTests: XCTestCase {
 private final class CoordinatorHarness {
     let store = WorkspaceFileContextStore()
     let fileManager = WorkspaceFilesViewModel(workspaceFileContextStore: WorkspaceFileContextStore())
-    let tabID = UUID()
+    let tabID: UUID
     let manager: FakeWorkspaceSelectionManager
 
-    init(initialSelection: StoredSelection) {
+    var workspaceID: UUID {
+        manager.activeWorkspace!.id
+    }
+
+    var identity: WorkspaceSelectionIdentity {
+        WorkspaceSelectionIdentity(workspaceID: workspaceID, tabID: tabID)
+    }
+
+    init(
+        initialSelection: StoredSelection,
+        workspaceID: UUID = UUID(),
+        tabID: UUID = UUID(),
+        propagationRevisionLedger: FakeMCPSelectionRevisionLedger? = nil
+    ) {
+        self.tabID = tabID
         let tab = ComposeTabState(id: tabID, name: "Test", selection: initialSelection)
         let workspace = WorkspaceModel(
+            id: workspaceID,
             name: "Test Workspace",
             repoPaths: [],
             composeTabs: [tab],
             activeComposeTabID: tabID
         )
-        manager = FakeWorkspaceSelectionManager(workspace: workspace, fileManager: fileManager)
+        manager = FakeWorkspaceSelectionManager(
+            workspace: workspace,
+            fileManager: fileManager,
+            propagationRevisionLedger: propagationRevisionLedger ?? FakeMCPSelectionRevisionLedger()
+        )
+    }
+}
+
+@MainActor
+private final class FakeMCPSelectionRevisionLedger {
+    private var nextRevision: UInt64 = 1
+
+    func allocate() -> UInt64 {
+        defer { nextRevision &+= 1 }
+        return nextRevision
     }
 }
 
@@ -547,8 +802,11 @@ private actor SelectionMirrorCompletion {
 private final class FakeWorkspaceSelectionManager: WorkspaceSelectionHost {
     var activeWorkspace: WorkspaceModel?
     private(set) var selectionMirrorContextRevision: UInt64 = 0
+    private(set) var liveUISelectionRevision: UInt64 = 0
     let fileManager: WorkspaceFilesViewModel
     var pendingUISelection: StoredSelection?
+    var activeUISnapshotResolver: ((StoredSelection, UUID) -> StoredSelection)?
+    var presentationHandler: (() -> Void)?
     private(set) var publishSnapshotCallCount = 0
     private(set) var updateStoredOnlyCallCount = 0
     var firstMirrorGate: SelectionMirrorGate?
@@ -556,14 +814,35 @@ private final class FakeWorkspaceSelectionManager: WorkspaceSelectionHost {
     private(set) var mirrorStartedSelections: [StoredSelection] = []
     private(set) var mirrorCompletedSelections: [StoredSelection] = []
     var mirroredSelection: StoredSelection?
+    private(set) var presentedSelection: StoredSelection?
+    let mcpSelectionPropagationHostID = UUID()
+    var mcpSelectionPropagationHostIsLive = true
+    var propagationPeerHostIDs: Set<UUID> = []
+    var propagationHandler: ((MCPSelectionPeerPropagation) async -> Void)?
+    private let propagationRevisionLedger: FakeMCPSelectionRevisionLedger
+    private var latestMCPSelectionRevisionByIdentity: [WorkspaceSelectionIdentity: UInt64] = [:]
+    private(set) var registeredSourceRevisions: [UInt64] = []
+    private(set) var acceptedPeerSourceRevisions: [UInt64] = []
+    private(set) var rejectedPeerSourceRevisions: [UInt64] = []
+    private(set) var propagatedSelections: [StoredSelection] = []
 
-    init(workspace: WorkspaceModel, fileManager: WorkspaceFilesViewModel) {
+    init(
+        workspace: WorkspaceModel,
+        fileManager: WorkspaceFilesViewModel,
+        propagationRevisionLedger: FakeMCPSelectionRevisionLedger
+    ) {
         activeWorkspace = workspace
         self.fileManager = fileManager
+        self.propagationRevisionLedger = propagationRevisionLedger
     }
 
     func composeTab(with id: UUID) -> ComposeTabState? {
         activeWorkspace?.composeTabs.first(where: { $0.id == id })
+    }
+
+    func composeTab(for identity: WorkspaceSelectionIdentity) -> ComposeTabState? {
+        guard activeWorkspace?.id == identity.workspaceID else { return nil }
+        return activeWorkspace?.composeTabs.first(where: { $0.id == identity.tabID })
     }
 
     func publishActiveComposeTabSnapshot(commitToMemory: Bool, touchModified: Bool) {
@@ -574,7 +853,7 @@ private final class FakeWorkspaceSelectionManager: WorkspaceSelectionHost {
               let activeID = workspace.activeComposeTabID,
               let index = workspace.composeTabs.firstIndex(where: { $0.id == activeID })
         else { return }
-        workspace.composeTabs[index].selection = pendingUISelection
+        workspace.composeTabs[index].selection = activeUISnapshotResolver?(pendingUISelection, activeID) ?? pendingUISelection
         if touchModified {
             workspace.composeTabs[index].lastModified = Date()
         }
@@ -616,12 +895,61 @@ private final class FakeWorkspaceSelectionManager: WorkspaceSelectionHost {
         selectionMirrorContextRevision &+= 1
     }
 
-    func updateComposeTabStoredOnly(_ tab: ComposeTabState) {
+    func updateComposeTabSelectionPresentation(
+        _ selection: StoredSelection,
+        for identity: WorkspaceSelectionIdentity
+    ) {
+        guard activeWorkspace?.id == identity.workspaceID else { return }
+        presentedSelection = selection
+        presentationHandler?()
+    }
+
+    func registerMCPSelectionSourceMutation(
+        for identity: WorkspaceSelectionIdentity
+    ) -> MCPSelectionPropagationRegistration {
+        let revision = propagationRevisionLedger.allocate()
+        latestMCPSelectionRevisionByIdentity[identity] = revision
+        registeredSourceRevisions.append(revision)
+        return MCPSelectionPropagationRegistration(
+            sourceRevision: revision,
+            peerHostIDs: propagationPeerHostIDs
+        )
+    }
+
+    func acceptMCPPeerSelectionRevision(
+        _ revision: UInt64,
+        for identity: WorkspaceSelectionIdentity
+    ) -> Bool {
+        guard revision > latestMCPSelectionRevisionByIdentity[identity, default: 0] else {
+            rejectedPeerSourceRevisions.append(revision)
+            return false
+        }
+        latestMCPSelectionRevisionByIdentity[identity] = revision
+        acceptedPeerSourceRevisions.append(revision)
+        return true
+    }
+
+    func canCommitMCPSelectionPeerMutation(_ fence: MCPSelectionPeerMutationFence) -> Bool {
+        mcpSelectionPropagationHostIsLive && fence.hostID == mcpSelectionPropagationHostID
+    }
+
+    func propagateMCPSelectionToPeerHosts(_ propagation: MCPSelectionPeerPropagation) async {
+        propagatedSelections.append(propagation.selection)
+        await propagationHandler?(propagation)
+    }
+
+    func advanceLiveUISelectionRevision() {
+        liveUISelectionRevision &+= 1
+    }
+
+    func updateComposeTabStoredOnly(_ tab: ComposeTabState, inWorkspaceID workspaceID: UUID) -> Bool {
         updateStoredOnlyCallCount += 1
         guard var workspace = activeWorkspace,
+              workspace.id == workspaceID,
               let index = workspace.composeTabs.firstIndex(where: { $0.id == tab.id })
-        else { return }
+        else { return false }
         workspace.composeTabs[index] = tab
         activeWorkspace = workspace
+        return true
     }
 }

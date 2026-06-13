@@ -608,7 +608,8 @@ final class MCPServerViewModel: ObservableObject {
             return MCPWindowToolDependencies.ContextBuilderTabResolution(
                 tabID: resolution.tabID,
                 workspaceID: resolution.workspaceID,
-                bindCaller: resolution.bindCaller
+                bindCaller: resolution.bindCaller,
+                lookupContext: resolution.lookupContext
             )
         },
         bindTabForConnection: { [weak self] connectionID, clientName, tabID, workspaceID, windowID in
@@ -634,11 +635,12 @@ final class MCPServerViewModel: ObservableObject {
             guard let self else { return }
             await sendStageProgress(connectionID: connectionID, tool: tool, stage: stage, message: message)
         },
-        makeOracleExportDestination: { workspace, windowID, tabID in
+        makeOracleExportDestination: { workspace, windowID, tabID, lookupContext in
             try MCPServerViewModel.makeOracleExportDestination(
                 workspace: workspace,
                 windowID: windowID,
-                tabID: tabID
+                tabID: tabID,
+                lookupContext: lookupContext
             )
         },
         resolveDefaultOracleExportPath: { [weak self] mode, chatID, destination in
@@ -911,11 +913,30 @@ final class MCPServerViewModel: ObservableObject {
             return await applyReadFileAutoSelectionBatch(batch, for: key)
         },
         applyMirror: { [weak self] key in
-            await self?.workspaceManager?.applyStoredSelectionMirrorForReadFileAutoSelection(tabID: key.tabID)
+            await self?.applyReadFileAutoSelectionMirror(for: key)
         }
     )
     @MainActor
+    private func applyReadFileAutoSelectionMirror(
+        for key: MCPReadFileAutoSelectionCoordinator.TabMirrorKey
+    ) async {
+        if let sessionID = workspaceManager?.activeAgentSessionID(
+            forTabID: key.tabID,
+            inWorkspaceID: key.workspaceID
+        ),
+            agentWorktreeBindingsProvider?(sessionID, key.tabID).isEmpty == false
+        {
+            // Worktree-only paths cannot be represented by the logical base file tree. Their
+            // canonical selection and badge presentation are already updated by persistence.
+            return
+        }
+        await workspaceManager?.applyStoredSelectionMirrorForReadFileAutoSelection(tabID: key.tabID)
+    }
+
+    @MainActor
     var tabContextByConnectionID: [UUID: TabScopedContext] = [:]
+    @MainActor
+    var readFileAutoSelectionHandoverLineageByConnectionID: [UUID: ReadFileAutoSelectionHandoverLineage] = [:]
     @MainActor
     var nextReadFileAutoSelectionBindingGeneration: UInt64 = 0
     #if DEBUG
@@ -2673,7 +2694,7 @@ final class MCPServerViewModel: ObservableObject {
         args: [String: Value],
         targetWindow: WindowState,
         connectionID: UUID?
-    ) async throws -> (tabID: UUID, workspaceID: UUID?, bindCaller: Bool) {
+    ) async throws -> (tabID: UUID, workspaceID: UUID?, bindCaller: Bool, lookupContext: WorkspaceLookupContext) {
         let purpose: MCPRunPurpose = if let connectionID {
             await ServerNetworkManager.shared.runPurpose(for: connectionID)
         } else {
@@ -2717,7 +2738,11 @@ final class MCPServerViewModel: ObservableObject {
                 throw MCPError.invalidParams("Tab context '\(context.tabID.uuidString)' is not available in window \(targetWindow.windowID).")
             }
             let shouldBindCaller = source == .explicitHint && purpose != .agentModeRun && connectionID != nil
-            return (context.tabID, context.workspaceID, shouldBindCaller)
+            let lookupContext = try await targetWindow.mcpServer.resolveFileToolLookupContext(
+                tabID: context.tabID,
+                workspaceID: context.workspaceID
+            )
+            return (context.tabID, context.workspaceID, shouldBindCaller, lookupContext)
         } catch {
             if explicitHint != nil || existingBinding != nil {
                 throw error
@@ -2737,7 +2762,7 @@ final class MCPServerViewModel: ObservableObject {
         ) else {
             throw MCPError.internalError("Failed to create compose tab.")
         }
-        return (createdTab.id, targetWindow.workspaceManager.activeWorkspace?.id, true)
+        return (createdTab.id, targetWindow.workspaceManager.activeWorkspace?.id, true, .visibleWorkspace)
     }
 
     /// Runs an async operation with periodic heartbeat emissions to prevent agent timeouts.
@@ -2975,10 +3000,11 @@ final class MCPServerViewModel: ObservableObject {
             )
             return
         }
+        let hasVirtualContext = !resolvedContext.usesActiveTabCompatibility
         let shouldApply = AutoSliceSelection.shouldApply(
             purpose: purpose,
-            hasVirtualContext: !resolvedContext.usesActiveTabCompatibility
-        )
+            hasVirtualContext: hasVirtualContext
+        ) || (purpose == .unknown && hasVirtualContext)
         EditFlowPerf.end(
             EditFlowPerf.Stage.ReadFile.AutoSelect.eligibilityResolution,
             eligibilityResolution,
@@ -3012,7 +3038,13 @@ final class MCPServerViewModel: ObservableObject {
             }())
         )
         let key = readFileAutoSelectionContextKey(resolvedContext: resolvedContext, metadata: metadata)
-        _ = readFileAutoSelectionCoordinator.enqueue(intent: intent, for: key)
+        let accepted = readFileAutoSelectionCoordinator.enqueue(intent: intent, for: key)
+        if accepted, purpose == .unknown {
+            // Interactive CLI requests have no run policy and commonly disconnect after one call.
+            // Make the successful read response their selection durability boundary while preserving
+            // Agent Mode's asynchronous response path.
+            _ = await readFileAutoSelectionCoordinator.drain(.mirroredSelectionAndMetrics, for: key)
+        }
     }
 
     @MainActor
@@ -3026,10 +3058,57 @@ final class MCPServerViewModel: ObservableObject {
             policy: .allowLegacyImplicitRouting
         ) else { return Task.isCancelled ? .cancelled : .completed }
         let key = readFileAutoSelectionContextKey(resolvedContext: resolvedContext, metadata: metadata)
+        for predecessorKey in readFileAutoSelectionPredecessorContextKeys(
+            metadata: metadata,
+            successorKey: key
+        ) {
+            let predecessorResult = await readFileAutoSelectionCoordinator.drain(
+                requirement,
+                for: predecessorKey,
+                onCanonicalWaiterRegistered: readFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerForTesting
+            )
+            guard predecessorResult == .completed else { return predecessorResult }
+        }
         return await readFileAutoSelectionCoordinator.drain(requirement, for: key)
     }
 
+    @MainActor
+    private func readFileAutoSelectionPredecessorContextKeys(
+        metadata: RequestMetadata,
+        successorKey: MCPReadFileAutoSelectionCoordinator.ContextKey
+    ) -> [MCPReadFileAutoSelectionCoordinator.ContextKey] {
+        guard let connectionID = metadata.connectionID,
+              let lineage = readFileAutoSelectionHandoverLineageByConnectionID[connectionID],
+              lineage.successorKey == successorKey,
+              case let .bound(successorConnectionID, successorRunID) = successorKey.route,
+              successorConnectionID == connectionID,
+              let successorRunID,
+              connectionIDByRunID[successorRunID] == connectionID,
+              connectionIDToRunID[connectionID] == successorRunID
+        else { return [] }
+        return lineage.predecessorKeys
+    }
+
+    @MainActor
+    private var readFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerForTesting: (() -> Void)? {
+        #if DEBUG
+            readFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerStorageForTesting
+        #else
+            nil
+        #endif
+    }
+
     #if DEBUG
+        @MainActor
+        var readFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerStorageForTesting: (() -> Void)?
+
+        @MainActor
+        func setReadFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerForTesting(
+            _ handler: (() -> Void)?
+        ) {
+            readFileAutoSelectionPredecessorDrainWaiterRegisteredHandlerStorageForTesting = handler
+        }
+
         @MainActor
         func setReadFileAutoSelectionCanonicalApplyGateForTesting(_ gate: (() async -> Void)?) {
             readFileAutoSelectionCoordinator.setCanonicalApplyGateForTesting(gate)
@@ -3621,136 +3700,53 @@ final class MCPServerViewModel: ObservableObject {
         lineCount: Int? = nil,
         lookupRootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async throws -> (reply: ToolResultDTOs.ReadFileReply, shouldAutoSelect: Bool) {
+        try await MCPToolWorkCountDiagnostics.withReadFileInvocation { [self] in
+            try await readFileBody(
+                path: path,
+                startLine1Based: startLine1Based,
+                lineCount: lineCount,
+                lookupRootScope: lookupRootScope
+            )
+        }
+    }
+
+    private func readFileBody(
+        path: String,
+        startLine1Based: Int? = nil,
+        lineCount: Int? = nil,
+        lookupRootScope: WorkspaceLookupRootScope = .visibleWorkspace
+    ) async throws -> (reply: ToolResultDTOs.ReadFileReply, shouldAutoSelect: Bool) {
         try Task.checkCancellation()
         let store = promptVM.workspaceFileContextStore
         let readableService = WorkspaceReadableFileService(store: store)
-        try await readableService.awaitFreshnessForExplicitRequest(path, fallbackScope: lookupRootScope)
+
+        let rootRefsLookup = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.rootRefsLookup)
+        let roots = await store.rootRefs(scope: lookupRootScope)
         try Task.checkCancellation()
-        let (roots, readableFile): ([WorkspaceRootRef], WorkspaceReadableFileHandle?) = try await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.resolveReadableFile) {
-            let exactPathIssueDetection = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.exactPathIssueDetection)
-            let exactPathIssue = await store.exactPathResolutionIssue(for: path, kind: .either, rootScope: lookupRootScope)
-            try Task.checkCancellation()
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.ReadFile.exactPathIssueDetection,
-                exactPathIssueDetection,
-                EditFlowPerf.Dimensions(outcome: exactPathIssue == nil ? "noIssue" : "issue")
-            )
-            if let issue = exactPathIssue {
-                throw MCPError.invalidParams(PathResolutionIssueRenderer.message(for: issue))
-            }
+        EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.rootRefsLookup, rootRefsLookup)
 
-            let rootRefsLookup = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.rootRefsLookup)
-            let roots = await store.rootRefs(scope: lookupRootScope)
-            try Task.checkCancellation()
-            EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.rootRefsLookup, rootRefsLookup)
+        try await readableService.awaitFreshnessForExplicitRequest(path, rootRefs: roots)
+        try Task.checkCancellation()
 
-            let exactCatalogShortcutState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.exactCatalogShortcut)
-            let exactCatalogHit = await readableService.resolveExactWorkspaceCatalogHit(path, rootScope: lookupRootScope)
-            try Task.checkCancellation()
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.ReadFile.exactCatalogShortcut,
-                exactCatalogShortcutState,
-                EditFlowPerf.Dimensions(outcome: exactCatalogHit == nil ? "miss" : "matched")
+        let resolution = await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.resolveReadableFile) {
+            await readableService.resolveReadFileRequest(
+                path,
+                profile: .mcpRead,
+                rootScope: lookupRootScope,
+                rootRefs: roots
             )
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.ReadFile.exactCatalogShortcutResolved,
-                EditFlowPerf.Dimensions(outcome: exactCatalogHit == nil ? "miss" : "matched")
-            )
-            if let exactCatalogHit {
-                return (roots, WorkspaceReadableFileHandle.workspace(exactCatalogHit))
-            }
-
-            let folderResolutionStage = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.folderResolution)
-            let folderResolution = await store.resolveFolderInput(path, rootScope: lookupRootScope, profile: .mcpRead)
-            try Task.checkCancellation()
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.ReadFile.folderResolution,
-                folderResolutionStage,
-                EditFlowPerf.Dimensions(outcome: folderResolution.folder == nil ? "noFolder" : "folder")
-            )
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.ReadFile.folderResolutionReturned,
-                EditFlowPerf.Dimensions(outcome: folderResolution.folder == nil ? "noFolder" : "folder")
-            )
-            if let folder = folderResolution.folder {
-                let displayPath = folderResolution.displayPath ?? ClientPathFormatter.displayAbsolutePath(fullPath: folder.standardizedFullPath, visibleRoots: roots)
-                throw MCPError.invalidParams("'\(displayPath)' is a folder; read_file requires a file path. Use get_file_tree or file_search to find specific files.")
-            }
-
-            let externalFolderGuard = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.externalFolderGuard)
-            let externalFolderPath = readableService.resolveAlwaysReadableExternalFolderDisplayPath(path)
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.ReadFile.externalFolderGuard,
-                externalFolderGuard,
-                EditFlowPerf.Dimensions(outcome: externalFolderPath == nil ? "noFolder" : "folder")
-            )
-            if let externalFolderPath {
-                throw MCPError.invalidParams("'\(externalFolderPath)' is a folder; read_file requires a file path. Use get_file_tree or file_search to find specific files.")
-            }
-
-            let readableServiceResolution = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.readableServiceResolution)
-            let readableFile = await readableService.resolveReadableFile(path, profile: .mcpRead, rootScope: lookupRootScope)
-            try Task.checkCancellation()
-            EditFlowPerf.end(
-                EditFlowPerf.Stage.ReadFile.readableServiceResolution,
-                readableServiceResolution,
-                EditFlowPerf.Dimensions(outcome: {
-                    switch readableFile {
-                    case .some(.workspace):
-                        "workspace"
-                    case .some(.external):
-                        "external"
-                    case .none:
-                        "noCandidate"
-                    }
-                }())
-            )
-            EditFlowPerf.lifecycleEvent(
-                EditFlowPerf.Lifecycle.ReadFile.readableServiceResolutionReturned,
-                EditFlowPerf.Dimensions(outcome: {
-                    switch readableFile {
-                    case .some(.workspace):
-                        "workspace"
-                    case .some(.external):
-                        "external"
-                    case .none:
-                        "noCandidate"
-                    }
-                }())
-            )
-            return (roots, readableFile)
         }
         try Task.checkCancellation()
-        let full: String
-        let displayPath: String
-        let shouldAutoSelect: Bool
-        switch readableFile {
-        case let .workspace(file):
-            guard let workspaceContent = try await EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.workspaceContentLoad, operation: {
-                try await store.readContent(
-                    rootID: file.rootID,
-                    relativePath: file.standardizedRelativePath,
-                    workloadClass: .interactiveRead
-                )
-            }) else {
-                throw MCPError.internalError("content unavailable")
-            }
-            try Task.checkCancellation()
-            full = workspaceContent
-            displayPath = ClientPathFormatter.displayAbsolutePath(fullPath: file.standardizedFullPath, visibleRoots: roots)
-            shouldAutoSelect = true
-        case let .external(externalFile):
-            do {
-                full = try await readableService.readAlwaysReadableExternalFile(externalFile)
-                try Task.checkCancellation()
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw MCPError.invalidParams("Cannot read '\(externalFile.displayPath)': \(error.localizedDescription)")
-            }
-            displayPath = externalFile.displayPath
-            shouldAutoSelect = false
-        case nil:
+
+        let readableFile: WorkspaceReadableFileHandle
+        switch resolution {
+        case let .readable(handle):
+            readableFile = handle
+        case let .folder(displayPath):
+            throw MCPError.invalidParams("'\(displayPath)' is a folder; read_file requires a file path. Use get_file_tree or file_search to find specific files.")
+        case let .issue(issue):
+            throw MCPError.invalidParams(PathResolutionIssueRenderer.message(for: issue))
+        case .noCandidate:
             if readableService.isAlwaysReadableExternalPath(path) {
                 throw MCPError.invalidParams("File not found: '\(readableService.displayPath(forExternalPath: path))'.")
             }
@@ -3758,81 +3754,69 @@ final class MCPServerViewModel: ObservableObject {
             throw MCPError.invalidParams("Cannot read '\(path)'. \(msg)")
         }
 
-        try Task.checkCancellation()
-        // Preserve original line endings and total line count
-        let pairs = EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.splitPreservingLineEndings) {
-            String.splitContentPreservingAllLineEndings(full)
-        }
-        let total = pairs.count
-
-        // Validate parameter combinations
-        if let s1 = startLine1Based {
-            // Check for invalid parameter combinations
-            if s1 < 0, lineCount != nil {
-                throw MCPError.invalidParams("limit parameter is not allowed with negative start_line. Use start_line=-N to read the last N lines.")
+        let preparedContent: WorkspaceInteractiveReadPreparedContent
+        let displayPath: String
+        let shouldAutoSelect: Bool
+        let cacheHit: Bool
+        switch readableFile {
+        case let .workspace(file):
+            guard let snapshot = try await EditFlowPerf.measure(
+                EditFlowPerf.Stage.ReadFile.workspaceContentLoad,
+                operation: {
+                    try await store.interactiveReadSnapshot(for: file)
+                }
+            ) else {
+                throw MCPError.internalError("content unavailable")
             }
-            if s1 == 0 {
-                throw MCPError.invalidParams("start_line must be positive (1-based) or negative (tail-like behavior)")
-            }
-        }
-
-        // Determine slice range
-        let (first, lastExclusive): (Int, Int) = {
-            // Handle negative start_line (tail-like behavior)
-            if let s1 = startLine1Based, s1 < 0 {
-                // Negative start_line means "last N lines" (like tail -n)
-                let linesToRead = abs(s1)
-                let start = max(0, total - linesToRead)
-                return (start, total)
-            }
-
-            // Handle positive 1-based start line (default to 1 if only limit provided)
-            let s1 = startLine1Based ?? 1
-            let start0 = max(0, s1 - 1)
-            let end = (lineCount != nil && lineCount! >= 0)
-                ? min(total, start0 + lineCount!)
-                : total
-            return (start0, end)
-        }()
-
-        // If start is beyond file end, return empty content with a helpful message
-        if !(first < total || total == 0) {
-            return (
-                ToolResultDTOs.ReadFileReply(
-                    content: "",
-                    totalLines: total,
-                    firstLine: max(1, first + 1),
-                    lastLine: total,
-                    message: "Requested start_line exceeds file length.",
-                    displayPath: displayPath
-                ),
-                shouldAutoSelect
+            try Task.checkCancellation()
+            preparedContent = snapshot.preparedContent
+            cacheHit = snapshot.cacheHit
+            displayPath = ClientPathFormatter.displayAbsolutePath(
+                fullPath: file.standardizedFullPath,
+                visibleRoots: roots
             )
+            shouldAutoSelect = true
+        case let .external(externalFile):
+            do {
+                let full = try await readableService.readAlwaysReadableExternalFile(externalFile)
+                try Task.checkCancellation()
+                let splitState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.splitPreservingLineEndings)
+                preparedContent = await WorkspaceInteractiveReadProcessor.prepareOffActor(full)
+                EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.splitPreservingLineEndings, splitState)
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw MCPError.invalidParams("Cannot read '\(externalFile.displayPath)': \(error.localizedDescription)")
+            }
+            cacheHit = false
+            displayPath = externalFile.displayPath
+            shouldAutoSelect = false
         }
 
-        try Task.checkCancellation()
-        let contentSlice = EditFlowPerf.measure(EditFlowPerf.Stage.ReadFile.buildSlice) {
-            if total == 0 { return "" }
-            let slice = pairs[first ..< lastExclusive]
-            return slice.map { $0.line + $0.ending }.joined()
-        }
-
-        try Task.checkCancellation()
-        // Prepare metadata for the displayed slice
-        let shownFirst = total == 0 ? 0 : (first + 1)
-        let shownLast = total == 0 ? 0 : lastExclusive
-
-        return (
-            ToolResultDTOs.ReadFileReply(
-                content: contentSlice,
-                totalLines: total,
-                firstLine: shownFirst,
-                lastLine: shownLast,
-                message: nil,
+        let preparedReply: MCPReadFileToolProjection.PreparedReply
+        do {
+            let sliceState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.buildSlice)
+            defer { EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.buildSlice, sliceState) }
+            preparedReply = try await MCPReadFileToolProjection.makeBaseReply(
+                preparedContent: preparedContent,
+                startLine1Based: startLine1Based,
+                lineCount: lineCount,
                 displayPath: displayPath
-            ),
-            shouldAutoSelect
+            )
+        } catch WorkspaceInteractiveReadRangeError.limitWithNegativeStart {
+            throw MCPError.invalidParams("limit parameter is not allowed with negative start_line. Use start_line=-N to read the last N lines.")
+        } catch WorkspaceInteractiveReadRangeError.zeroStart {
+            throw MCPError.invalidParams("start_line must be positive (1-based) or negative (tail-like behavior)")
+        }
+        try Task.checkCancellation()
+
+        MCPToolWorkCountDiagnostics.recordReadFileResult(
+            returnedBytes: preparedReply.reply.content.utf8.count,
+            returnedLines: preparedReply.returnedLineCount,
+            cacheHit: cacheHit
         )
+        return (preparedReply.reply, shouldAutoSelect)
     }
 
     /// Performs a file action (create, delete, or move/rename)
@@ -4053,7 +4037,8 @@ final class MCPServerViewModel: ObservableObject {
     static func makeOracleExportDestination(
         workspace: WorkspaceModel?,
         windowID: Int,
-        tabID: UUID?
+        tabID: UUID?,
+        lookupContext: WorkspaceLookupContext = .visibleWorkspace
     ) throws -> OracleExportDestination {
         guard let workspace else {
             throw MCPError.invalidParams("Cannot create generated Oracle export: no active workspace is available.")
@@ -4069,12 +4054,17 @@ final class MCPServerViewModel: ObservableObject {
         }
         let standardizedRoot = (expandedRoot as NSString).standardizingPath
         try validateOracleExportPrimaryRoot(standardizedRoot)
+        // Generated handoff files must live in the same effective root that read_file uses
+        // for this context; otherwise the returned logical path is remapped to a missing file.
+        let effectiveRoot = StandardizedPath.absolute(lookupContext.translateInputPath(standardizedRoot))
+        try validateOracleExportPrimaryRoot(effectiveRoot)
 
         return OracleExportDestination(
             workspaceID: workspace.id,
             windowID: windowID,
             tabID: tabID,
-            primaryRootPath: standardizedRoot
+            primaryRootPath: effectiveRoot,
+            rootScope: lookupContext.rootScope
         )
     }
 
