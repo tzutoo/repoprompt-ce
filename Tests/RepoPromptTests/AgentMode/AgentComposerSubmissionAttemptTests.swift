@@ -4,6 +4,23 @@ import XCTest
 
 @MainActor
 final class AgentComposerSubmissionAttemptTests: XCTestCase {
+    func testComposerRenderIdentityChangesWhenLiveTabChangesBeforePropsCatchUp() {
+        let sourceTabID = UUID()
+        let destinationTabID = UUID()
+        let sourceIdentity = AgentComposerRenderIdentity(
+            props: .empty,
+            placeholderText: "Send a message...",
+            currentTabID: sourceTabID
+        )
+        let destinationIdentity = AgentComposerRenderIdentity(
+            props: .empty,
+            placeholderText: "Send a message...",
+            currentTabID: destinationTabID
+        )
+
+        XCTAssertNotEqual(sourceIdentity, destinationIdentity)
+    }
+
     func testLatchSuppressesRapidSameTabCallbacksButAllowsAnotherTab() throws {
         var latch = AgentComposerSubmissionLatch()
         let firstSession = AgentModeViewModel.TabSession(tabID: UUID())
