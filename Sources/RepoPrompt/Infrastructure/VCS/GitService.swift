@@ -49,7 +49,17 @@ actor GitService {
 
     private let worktreeMutationCoordinator = GitWorktreeMutationCoordinator()
     private let inheritedProcessEnvironment = ProcessInfo.processInfo.environment
+    private let gitExecutableURL: URL
+    private let processAdmissionController: GitProcessAdmissionController
     private var preparedBaseProcessEnvironment: [String: String]?
+
+    init(
+        gitExecutableURL: URL = URL(fileURLWithPath: "/usr/bin/git"),
+        processAdmissionController: GitProcessAdmissionController = .shared
+    ) {
+        self.gitExecutableURL = gitExecutableURL
+        self.processAdmissionController = processAdmissionController
+    }
 
     struct UncommittedFile: Equatable {
         let path: String
@@ -2344,7 +2354,7 @@ actor GitService {
         let budgetURL = budgetRepoURL ?? repoURL
         let repositoryKey = getLayout(for: budgetURL)?.commonDir.standardizedFileURL.path
             ?? budgetURL.standardizedFileURL.path
-        let lease = try await GitProcessAdmissionController.shared.acquire(repositoryKey: repositoryKey)
+        let lease = try await processAdmissionController.acquire(repositoryKey: repositoryKey)
         do {
             try Task.checkCancellation()
             let result = try await runAdmittedGit(
@@ -2355,10 +2365,10 @@ actor GitService {
                 diagnosticRepositoryPath: budgetURL.standardizedFileURL.path,
                 processQueueWaitMicroseconds: lease.queueWaitMicroseconds
             )
-            await GitProcessAdmissionController.shared.release(lease)
+            await processAdmissionController.release(lease)
             return result
         } catch {
-            await GitProcessAdmissionController.shared.release(lease)
+            await processAdmissionController.release(lease)
             throw error
         }
     }
@@ -2374,7 +2384,7 @@ actor GitService {
         let process = Process()
         let timeoutController = GitProcessTimeoutController()
         let commandRecorder = MCPToolWorkCountDiagnostics.gitCommandRecorder()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.executableURL = gitExecutableURL
         process.arguments = args
         process.currentDirectoryURL = repoURL
         process.environment = environment
@@ -2520,15 +2530,12 @@ actor GitService {
             }
         }, onCancel: {
             timeoutController.cancel()
-            // Stop callbacks and terminate before waiting on a drain lock. A callback may be
-            // blocked in FileHandle.availableData until the child closes its pipe.
-            outPipe.fileHandleForReading.readabilityHandler = nil
-            errPipe.fileHandleForReading.readabilityHandler = nil
+            // Keep stdout/stderr drains active until termination. A child may flush more than
+            // pipe capacity while handling SIGTERM; closing the drains here can block that
+            // flush forever and prevent the termination handler from reaping the process.
             if process.isRunning {
                 process.terminate()
             }
-            outDrain.cancel()
-            errDrain.cancel()
         })
     }
 
