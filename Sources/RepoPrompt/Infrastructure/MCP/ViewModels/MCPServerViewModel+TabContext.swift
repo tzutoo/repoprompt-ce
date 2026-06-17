@@ -472,6 +472,10 @@ extension MCPServerViewModel {
                     serverIdentity: serverIdentity,
                     contextKey: key
                 )
+                await MCPApplyEditsRebaseProbeRegistry.shared.cancel(
+                    serverIdentity: serverIdentity,
+                    contextKey: key
+                )
             }
         #endif
         readFileAutoSelectionCoordinator.invalidate(context: key)
@@ -2800,6 +2804,10 @@ extension MCPServerViewModel {
         #if DEBUG
             readFileAutoSelectionForcedAuthoritativeProbeIDsByContext.removeValue(forKey: key)
             await MCPReadFileAutoSelectionProbeRegistry.shared.cancel(
+                serverIdentity: ObjectIdentifier(self),
+                contextKey: key
+            )
+            await MCPApplyEditsRebaseProbeRegistry.shared.cancel(
                 serverIdentity: ObjectIdentifier(self),
                 contextKey: key
             )
