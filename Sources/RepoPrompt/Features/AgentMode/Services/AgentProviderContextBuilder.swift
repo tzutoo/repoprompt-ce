@@ -45,7 +45,7 @@ enum AgentProviderContextBuilder {
         let accounting = await accountingService.calculatePromptStats(request: request, store: store)
         let entries = accounting.resolvedEntries
         let selectionTokens = accounting.tokenResult.totalTokenCountFilesOnly
-        let codemapSnapshots = await store.codemapSnapshotDictionary()
+        let codemapSnapshots = accounting.codemapSnapshotsUsed
 
         if selectionTokens > tokenCap {
             if let summary = await overTokenCapSummaryProvider?(logicalSelection, lookupContext),
@@ -56,8 +56,11 @@ enum AgentProviderContextBuilder {
             return "<selection_summary>\(entries.count) files, ~\(selectionTokens) tokens (contents omitted, exceeds \(tokenCap) token cap)</selection_summary>"
         }
 
-        let blocks = PromptPackagingService.generateFileContents(
-            entries,
+        let renderableEntries = entries.filter { entry in
+            !entry.isCodemap || codemapSnapshots[entry.file.id]?.fileAPI != nil
+        }
+        let (codemapBlocks, contentBlocks) = PromptPackagingService.generatePartitionedFileBlocks(
+            renderableEntries,
             filePathDisplay: .relative,
             codemapSnapshots: codemapSnapshots,
             displayPathResolver: { entry in
@@ -67,11 +70,24 @@ enum AgentProviderContextBuilder {
                 )
             }
         )
-        guard !blocks.isEmpty else { return "" }
-        return """
-        <file_contents>
-        \(blocks.joined(separator: "\n\n"))
-        </file_contents>
-        """
+        var sections: [String] = []
+        if let fileMap = PromptPackagingService.combinedFileMapContent(
+            fileTreeContent: nil,
+            codemapBlocks: codemapBlocks
+        ) {
+            sections.append("""
+            <file_map>
+            \(fileMap)
+            </file_map>
+            """)
+        }
+        if !contentBlocks.isEmpty {
+            sections.append("""
+            <file_contents>
+            \(contentBlocks.joined(separator: "\n\n"))
+            </file_contents>
+            """)
+        }
+        return sections.joined(separator: "\n\n")
     }
 }

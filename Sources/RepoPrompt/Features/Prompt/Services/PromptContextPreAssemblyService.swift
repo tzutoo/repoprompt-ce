@@ -18,6 +18,8 @@ struct PromptContextPreAssemblyRequest {
     let entryResolutionProfile: PathLocateProfile
     let selectedGitDiffFolderPolicy: SelectedGitDiffFolderPolicy
     let selectedGitDiffLookupProfile: PathLocateProfile
+    /// Compatibility input retained for callers that previously requested hidden local-definition discovery.
+    /// Canonical codemap inclusion is now controlled exclusively by `selection.autoCodemapPaths`.
     let includeLocalDefinitionsInFileTree: Bool
     let selectedGitDiffArtifactPolicy: SelectedGitDiffArtifactPolicy
     let selectedGitDiffProvider: ([String]) async -> String?
@@ -93,9 +95,7 @@ enum PromptContextPreAssemblyService {
         let codemapSnapshots = await request.store.codemapSnapshotDictionary()
         let fileTreeContent = await resolveFileTreeContent(
             request: request,
-            physicalSelection: physicalSelection,
-            entries: resolution.entries,
-            codemapSnapshots: codemapSnapshots
+            physicalSelection: physicalSelection
         )
         let gitDiff = await resolveGitDiff(request: request, physicalSelection: physicalSelection, entries: resolution.entries)
         let packagingEntries = entriesForPackaging(request: request, entries: resolution.entries)
@@ -115,9 +115,7 @@ enum PromptContextPreAssemblyService {
 
     private static func resolveFileTreeContent(
         request: PromptContextPreAssemblyRequest,
-        physicalSelection: StoredSelection,
-        entries: [ResolvedPromptFileEntry],
-        codemapSnapshots: [UUID: WorkspaceCodemapSnapshot]
+        physicalSelection: StoredSelection
     ) async -> String? {
         guard request.cfg.rendersFileTree else { return nil }
 
@@ -135,41 +133,7 @@ enum PromptContextPreAssemblyService {
         )
         let fileTreeSnapshot = request.lookupContext.bindingProjection?.logicalizeFileTreeSnapshot(rawFileTreeSnapshot) ?? rawFileTreeSnapshot
         let tree = CodeMapExtractor.generateFileTree(using: fileTreeSnapshot)
-        let localDefinitions = await resolveLocalDefinitionBlock(
-            request: request,
-            entries: entries,
-            codemapSnapshots: codemapSnapshots,
-            fileTreeSnapshot: fileTreeSnapshot
-        )
-        let combined = [tree, localDefinitions].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        return combined.isEmpty ? nil : combined
-    }
-
-    private static func resolveLocalDefinitionBlock(
-        request: PromptContextPreAssemblyRequest,
-        entries: [ResolvedPromptFileEntry],
-        codemapSnapshots: [UUID: WorkspaceCodemapSnapshot],
-        fileTreeSnapshot: FileTreeSelectionSnapshot
-    ) async -> String {
-        guard request.includeLocalDefinitionsInFileTree else { return "" }
-        let (_, codeEntries) = PromptPackagingService.partitionPromptEntriesForGitDiff(entries)
-        let hasCodemapEntries = codeEntries.contains { $0.isCodemap && codemapSnapshots[$0.file.id]?.fileAPI != nil }
-        guard !hasCodemapEntries else { return "" }
-
-        let rootInfos = fileTreeSnapshot.roots.map {
-            CodeMapExtractor.RootInfo(
-                standardizedRootFullPath: $0.standardizedRootPath,
-                displayName: $0.name
-            )
-        }
-        let allFileAPIs = await request.store.allCodemapFileAPIs()
-        return CodeMapExtractor.buildLocalDefinitionBlockIfNeeded(
-            codeMapUsage: request.codeMapUsage,
-            selectedFiles: codeEntries.filter { !$0.isCodemap }.map(\.file),
-            allFileAPIs: allFileAPIs,
-            filePathDisplay: request.filePathDisplay,
-            roots: rootInfos
-        ).text
+        return tree.isEmpty ? nil : tree
     }
 
     private static func entriesForPackaging(

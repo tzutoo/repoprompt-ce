@@ -1204,6 +1204,7 @@ actor WorkspaceFileContextStore {
     private var initializingSessionWorktreeCodemapRootIDs = Set<UUID>()
     private var initializedSessionWorktreeCodemapRootIDs = Set<UUID>()
     private var cachedCodemapFileAPIAggregate: WorkspaceCodemapFileAPIAggregate?
+    private var cachedCodemapFileAPIAggregatesByScope: [WorkspaceLookupRootScope: WorkspaceCodemapFileAPIAggregate] = [:]
     private var codemapUpdateContinuations: [UUID: AsyncStream<WorkspaceCodemapUpdateEvent>.Continuation] = [:]
     private var fileSystemDeltaContinuations: [UUID: AsyncStream<WorkspaceFileSystemDeltaEvent>.Continuation] = [:]
     private var appliedIndexContinuations: [UUID: AsyncStream<WorkspaceAppliedIndexBatchEvent>.Continuation] = [:]
@@ -3651,6 +3652,33 @@ actor WorkspaceFileContextStore {
         #else
             let APIs = allCodemapSnapshots().compactMap(\.fileAPI)
         #endif
+        let aggregate = makeCodemapFileAPIAggregate(APIs)
+        #if DEBUG || EDIT_FLOW_PERF
+            EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.AutoSelect.AllCodemapFileAPIs.materialization, materialization)
+        #endif
+        cachedCodemapFileAPIAggregate = aggregate
+        return aggregate
+    }
+
+    func codemapFileAPIAggregate(rootScope: WorkspaceLookupRootScope) -> WorkspaceCodemapFileAPIAggregate {
+        if rootScope == .allLoaded {
+            return codemapFileAPIAggregate()
+        }
+        if let cached = cachedCodemapFileAPIAggregatesByScope[rootScope] {
+            return cached
+        }
+
+        let allowedRootIDs = Set(rootsForPathLookup(scope: rootScope).map(\.id))
+        let APIs = codemapSnapshotsByFileID.values
+            .filter { allowedRootIDs.contains($0.rootID) && isDiscoverableFileID($0.fileID) }
+            .sorted { $0.fullPath < $1.fullPath }
+            .compactMap(\.fileAPI)
+        let aggregate = makeCodemapFileAPIAggregate(APIs)
+        cachedCodemapFileAPIAggregatesByScope[rootScope] = aggregate
+        return aggregate
+    }
+
+    private func makeCodemapFileAPIAggregate(_ APIs: [FileAPI]) -> WorkspaceCodemapFileAPIAggregate {
         var firstFileAPIByStandardizedNestedPath: [String: FileAPI] = [:]
         firstFileAPIByStandardizedNestedPath.reserveCapacity(APIs.count)
         for api in APIs {
@@ -3659,15 +3687,10 @@ actor WorkspaceFileContextStore {
                 firstFileAPIByStandardizedNestedPath[standardizedNestedPath] = api
             }
         }
-        let aggregate = WorkspaceCodemapFileAPIAggregate(
+        return WorkspaceCodemapFileAPIAggregate(
             orderedFileAPIs: APIs,
             firstFileAPIByStandardizedNestedPath: firstFileAPIByStandardizedNestedPath
         )
-        #if DEBUG || EDIT_FLOW_PERF
-            EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.AutoSelect.AllCodemapFileAPIs.materialization, materialization)
-        #endif
-        cachedCodemapFileAPIAggregate = aggregate
-        return aggregate
     }
 
     func codemapSnapshotDictionary() -> [UUID: WorkspaceCodemapSnapshot] {
@@ -7727,6 +7750,7 @@ actor WorkspaceFileContextStore {
 
     private func invalidateAllCodemapFileAPIsCache() {
         cachedCodemapFileAPIAggregate = nil
+        cachedCodemapFileAPIAggregatesByScope.removeAll(keepingCapacity: true)
     }
 
     private func isDiscoverableFileID(_ fileID: UUID) -> Bool {

@@ -44,6 +44,52 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         XCTAssertFalse(block.contains(fixture.worktreeRoot.path), block)
     }
 
+    func testForkFileContentsBlockIncludesCanonicalWorktreeCodemapExactlyOnce() async throws {
+        let fixture = try await makeBoundFixture()
+        let lookupContext = await makeLookupContext(fixture: fixture)
+        let logicalCodemapURL = fixture.logicalRoot.appendingPathComponent("Sources/BranchOnly.swift")
+        let worktreeCodemapURL = fixture.worktreeRoot.appendingPathComponent("Sources/BranchOnly.swift")
+        let missingSnapshotBlock = await AgentProviderContextBuilder.forkFileContentsBlock(
+            selection: StoredSelection(
+                selectedPaths: [],
+                autoCodemapPaths: [logicalCodemapURL.path],
+                codemapAutoEnabled: true
+            ),
+            tokenCap: 10000,
+            store: fixture.store,
+            lookupContext: lookupContext
+        )
+        XCTAssertFalse(missingSnapshotBlock.contains("let branchOnly = true"), missingSnapshotBlock)
+        XCTAssertFalse(missingSnapshotBlock.contains("<file_map>"), missingSnapshotBlock)
+
+        await fixture.store.applyObservedCodemapResults([
+            WorkspaceObservedCodemapResult(
+                fullPath: worktreeCodemapURL.path,
+                modificationDate: Date(),
+                fileAPI: makeFileAPI(path: worktreeCodemapURL.path, symbolName: "branchOnlyCodemapSymbol")
+            )
+        ])
+
+        let block = await AgentProviderContextBuilder.forkFileContentsBlock(
+            selection: StoredSelection(
+                selectedPaths: [fixture.logicalRoot.appendingPathComponent("Sources/App.swift").path],
+                autoCodemapPaths: [logicalCodemapURL.path],
+                codemapAutoEnabled: true
+            ),
+            tokenCap: 10000,
+            store: fixture.store,
+            lookupContext: lookupContext
+        )
+
+        XCTAssertTrue(block.contains("<file_map>"), block)
+        XCTAssertEqual(block.components(separatedBy: "branchOnlyCodemapSymbol").count - 1, 1, block)
+        XCTAssertTrue(block.contains("File: Sources/BranchOnly.swift"), block)
+        XCTAssertTrue(block.contains("<file_contents>"), block)
+        XCTAssertTrue(block.contains("let origin = \"worktree\""), block)
+        XCTAssertFalse(block.contains("let branchOnly = true"), block)
+        XCTAssertFalse(block.contains(fixture.worktreeRoot.path), block)
+    }
+
     func testNonWorktreeForkFileContentsPreservesVisibleWorkspaceBehavior() async throws {
         let fixture = try await makeBoundFixture()
         _ = await makeLookupContext(fixture: fixture) // Keep the hidden session worktree loaded.
@@ -129,5 +175,26 @@ final class AgentProviderContextBuilderTests: XCTestCase {
     private func write(_ content: String, to url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func makeFileAPI(path: String, symbolName: String) -> FileAPI {
+        FileAPI(
+            filePath: path,
+            imports: [],
+            classes: [],
+            functions: [
+                FunctionInfo(
+                    name: symbolName,
+                    parameters: [],
+                    returnType: nil,
+                    definitionLine: "func \(symbolName)()",
+                    lineNumber: 1
+                )
+            ],
+            enums: [],
+            globalVars: [],
+            macros: [],
+            referencedTypes: []
+        )
     }
 }

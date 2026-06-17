@@ -613,7 +613,13 @@ extension MCPServerViewModel {
         ) async -> ToolResultDTOs.SelectionReply {
             var blocks: [String]? = nil
             if includeBlocks {
-                let generated = await generateBlocks(selected: collections.selected, display: display, projection: pathProjection)
+                let generated = generateBlocks(
+                    selected: collections.selected,
+                    codemap: collections.codemap,
+                    codemapSnapshots: collections.codemapSnapshots,
+                    display: display,
+                    projection: pathProjection
+                )
                 blocks = generated
             }
 
@@ -674,6 +680,32 @@ extension MCPServerViewModel {
                     projection?.projectedLogicalDisplayPath(forPhysicalPath: entry.file.standardizedFullPath, display: display)
                 }
             )
+        }
+
+        static func generateBlocks(
+            selected: [SelectedEntry],
+            codemap: [CodemapEntry],
+            codemapSnapshots: [UUID: WorkspaceCodemapSnapshot],
+            display: FilePathDisplay,
+            projection: WorkspaceRootBindingProjection? = nil
+        ) -> [String] {
+            let renderableCodemaps = codemap.compactMap { item -> ResolvedPromptFileEntry? in
+                if item.origin == .selectedMode || codemapSnapshots[item.file.id]?.fileAPI != nil {
+                    return item.entry
+                }
+                return nil
+            }
+            let entries = selected.map(\.entry) + renderableCodemaps
+            guard !entries.isEmpty else { return [] }
+            let (codemapBlocks, contentBlocks) = PromptPackagingService.generatePartitionedFileBlocks(
+                entries,
+                filePathDisplay: display,
+                codemapSnapshots: codemapSnapshots,
+                displayPathResolver: { entry in
+                    projection?.projectedLogicalDisplayPath(forPhysicalPath: entry.file.standardizedFullPath, display: display)
+                }
+            )
+            return contentBlocks + codemapBlocks
         }
 
         /// Builds lightweight FileSliceDTO array from collections without token calculations.

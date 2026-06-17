@@ -11448,10 +11448,10 @@ extension WorkspaceFilesViewModel {
 
     @MainActor
     func clearAutoCodemapFiles(disableAuto: Bool = true) {
-        guard !autoCodemapFiles.isEmpty else { return }
-        if disableAuto, codemapAutoEnabled {
-            codemapAutoEnabled = false
+        if disableAuto {
+            enterManualCodemapMode()
         }
+        guard !autoCodemapFiles.isEmpty else { return }
         resetAutoCodemapFiles([])
     }
 
@@ -11757,11 +11757,6 @@ extension WorkspaceFilesViewModel {
 
     @MainActor
     func setFileAsFullContent(_ file: FileViewModel) {
-        // If switching from codemap to full content, disable auto mode
-        if isAutoCodemapFile(file) {
-            codemapAutoEnabled = false
-        }
-
         performSelectionBatch {
             if !file.isChecked {
                 file.setIsChecked(true)
@@ -11769,7 +11764,7 @@ extension WorkspaceFilesViewModel {
         }
 
         selectionSlicesByFileID.removeValue(forKey: file.id)
-        removeAutoCodemapFile(file)
+        removeCodemapFile(file)
         requestSelectionSliceSnapshotRebuild(reason: "selection.slicesSnapshot")
     }
 
@@ -11796,24 +11791,20 @@ extension WorkspaceFilesViewModel {
 
     @MainActor
     func removeCodemapFile(_ file: FileViewModel) {
+        guard isAutoCodemapFile(file) else { return }
+        enterManualCodemapMode()
         removeAutoCodemapFile(file)
     }
 
     @MainActor
     func removeFileFromAllSelections(_ file: FileViewModel) {
-        // If auto-mode is on and the user is removing an auto-added file,
-        // interpret this as a switch to manual mode.
-        if codemapAutoEnabled, isAutoCodemapFile(file) {
-            codemapAutoEnabled = false
-        }
+        removeCodemapFile(file)
 
         performSelectionBatch {
             // Remove from selected files if present
             if file.isChecked {
                 file.setIsChecked(false)
             }
-            // Remove from auto-codemap files
-            removeAutoCodemapFile(file)
             // Remove any slices for this file
             selectionSlicesByFileID.removeValue(forKey: file.id)
         }

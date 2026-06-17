@@ -294,6 +294,17 @@ enum PromptPackagingService {
         return contentBlocks
     }
 
+    static func combinedFileMapContent(
+        fileTreeContent: String?,
+        codemapBlocks: [String]
+    ) -> String? {
+        let codemapContent = codemapBlocks.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        let combined = [fileTreeContent ?? "", codemapContent]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return combined.isEmpty ? nil : combined
+    }
+
     static func generatePartitionedFileBlocks(
         _ files: [ResolvedPromptFileEntry],
         filePathDisplay: FilePathDisplay,
@@ -453,15 +464,10 @@ enum PromptPackagingService {
         let (diffEntries, codeEntries) = partitionPromptEntriesForGitDiff(files)
         let (codemapBlocks, contentBlocks) = await generatePartitionedFileBlocks(codeEntries, filePathDisplay: filePathDisplay)
 
-        // File Map Snippet - CRITICAL: Check for codemaps OR tree
-        let codemapJoined = codemapBlocks.joined(separator: "\n\n")
-        let hasTree = fileTreeContent != nil && !fileTreeContent!.isEmpty
-        let hasCodemaps = !codemapJoined.isEmpty
-
-        if hasTree || hasCodemaps {
-            let combinedMap = [fileTreeContent ?? "", codemapJoined]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n\n")
+        if let combinedMap = combinedFileMapContent(
+            fileTreeContent: fileTreeContent,
+            codemapBlocks: codemapBlocks
+        ) {
             snippets[.fileMap] = """
             <file_map>
             \(combinedMap)
@@ -565,15 +571,10 @@ enum PromptPackagingService {
         let (diffEntries, codeEntries) = partitionPromptEntriesForGitDiff(files)
         let (codemapBlocks, contentBlocks) = await generatePartitionedFileBlocks(codeEntries, filePathDisplay: filePathDisplay)
 
-        // File Map Snippet - CRITICAL: Check for codemaps OR tree
-        let codemapJoined = codemapBlocks.joined(separator: "\n\n")
-        let hasTree = fileTreeContent != nil && !fileTreeContent!.isEmpty
-        let hasCodemaps = !codemapJoined.isEmpty
-
-        if hasTree || hasCodemaps {
-            let combinedMap = [fileTreeContent ?? "", codemapJoined]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n\n")
+        if let combinedMap = combinedFileMapContent(
+            fileTreeContent: fileTreeContent,
+            codemapBlocks: codemapBlocks
+        ) {
             snippets[.fileMap] = """
             <file_map>
             \(combinedMap)
@@ -675,14 +676,10 @@ enum PromptPackagingService {
         let (diffEntries, codeEntries) = partitionPromptEntriesForGitDiff(files)
         let (codemapBlocks, contentBlocks) = generatePartitionedFileBlocks(codeEntries, filePathDisplay: filePathDisplay, codemapSnapshots: codemapSnapshots, displayPathResolver: displayPathResolver)
 
-        let codemapJoined = codemapBlocks.joined(separator: "\n\n")
-        let hasTree = fileTreeContent != nil && !fileTreeContent!.isEmpty
-        let hasCodemaps = !codemapJoined.isEmpty
-
-        if hasTree || hasCodemaps {
-            let combinedMap = [fileTreeContent ?? "", codemapJoined]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n\n")
+        if let combinedMap = combinedFileMapContent(
+            fileTreeContent: fileTreeContent,
+            codemapBlocks: codemapBlocks
+        ) {
             snippets[.fileMap] = """
             <file_map>
             \(combinedMap)
