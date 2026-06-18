@@ -25,7 +25,7 @@ import XCTest
             try write("a", to: rootAURL.appendingPathComponent("A.swift"))
             try write("b", to: rootBURL.appendingPathComponent("B.swift"))
 
-            let store = WorkspaceFileContextStore()
+            let store = WorkspaceFileContextStore(enableCatalogShardShadowValidation: false)
             stores.append(store)
             let rootA = try await loadStoppedRoot(in: store, path: rootAURL.path)
             let singleRootSnapshot = await store.searchCatalogSnapshot(rootScope: .visibleWorkspace)

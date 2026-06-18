@@ -37,7 +37,8 @@ enum WindowStateCompositionFactory {
         codexModelPollingService: CodexModelPollingService = .shared
     ) -> WindowStateComposition {
         // 1) Workspace file context store + visible file-tree UI adapter
-        let workspaceFileContextStore = injectedWorkspaceFileContextStore ?? WorkspaceFileContextStore()
+        let workspaceFileContextStore = injectedWorkspaceFileContextStore
+            ?? WorkspaceFileContextStore(enableCatalogShardShadowValidation: false)
         let workspaceSearchService = WorkspaceSearchService()
         let workspaceFilesViewModel = WorkspaceFilesViewModel(workspaceFileContextStore: workspaceFileContextStore)
 
