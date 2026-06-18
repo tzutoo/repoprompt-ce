@@ -233,6 +233,44 @@ import XCTest
             XCTAssertEqual(newRequestCount, 1)
         }
 
+        func testInteractiveREPLCatalogCommandsRefreshAcknowledgedDirtyCatalog() async throws {
+            let fixture = try await makeToolCatalogFixture()
+            defer { Task { await fixture.cleanup() } }
+            let repl = InteractiveREPL(session: fixture.session, options: InteractiveOptions())
+
+            _ = try await fixture.session.cachedToolsOrRefresh()
+
+            await fixture.session.test_markToolsDirty()
+            await fixture.session.acknowledgeToolsChanged()
+            try await repl.test_printToolList()
+            var toolsDirty = await fixture.session.toolsDirty
+            var noticePending = await fixture.session.toolsChangeNoticePending
+            var requestCount = await fixture.listCounter.count()
+            XCTAssertFalse(toolsDirty)
+            XCTAssertFalse(noticePending)
+            XCTAssertEqual(requestCount, 2)
+
+            await fixture.session.test_markToolsDirty()
+            await fixture.session.acknowledgeToolsChanged()
+            try await repl.test_printToolsSchemaJSON()
+            toolsDirty = await fixture.session.toolsDirty
+            noticePending = await fixture.session.toolsChangeNoticePending
+            requestCount = await fixture.listCounter.count()
+            XCTAssertFalse(toolsDirty)
+            XCTAssertFalse(noticePending)
+            XCTAssertEqual(requestCount, 3)
+
+            await fixture.session.test_markToolsDirty()
+            await fixture.session.acknowledgeToolsChanged()
+            try await repl.test_describeTool("tool_4")
+            toolsDirty = await fixture.session.toolsDirty
+            noticePending = await fixture.session.toolsChangeNoticePending
+            requestCount = await fixture.listCounter.count()
+            XCTAssertFalse(toolsDirty)
+            XCTAssertFalse(noticePending)
+            XCTAssertEqual(requestCount, 4)
+        }
+
         private func makeUnconnectedSession() -> InteractiveMCPClientSession {
             InteractiveMCPClientSession(
                 sessionToken: "timeout-contract-test",
