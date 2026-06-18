@@ -169,6 +169,9 @@ actor InteractiveMCPClientSession {
     private var requestSendBarrier: MCPRequestSendBarrier?
     private var cachedTools: [MCP.Tool] = []
     private var toolListFetched = false
+    private var toolCatalogEpoch: UInt64 = 0
+    private var toolListInvalidationGeneration: UInt64 = 0
+    private var toolListRequestGeneration: UInt64 = 0
     private var defaultToolCallTimeout: ToolCallTimeoutPolicy = .default
     private(set) var toolsDirty = false
     private(set) var toolsChangeNoticePending = false
@@ -233,10 +236,7 @@ actor InteractiveMCPClientSession {
     /// Connects to the RepoPrompt app via bootstrap socket and initializes MCP.
     func connect(fetchInitialTools: Bool = true) async throws {
         logger.debug("InteractiveMCPClientSession connecting...")
-        cachedTools = []
-        toolListFetched = false
-        toolsDirty = false
-        toolsChangeNoticePending = false
+        resetToolCatalogForConnectionBoundary()
 
         // Perform bootstrap handshake and get connected FD
         let connectedFD = try await performBootstrapHandshake()
@@ -308,10 +308,7 @@ actor InteractiveMCPClientSession {
             self.client = nil
             self.transport = nil
             self.requestSendBarrier = nil
-            cachedTools = []
-            toolListFetched = false
-            toolsDirty = false
-            toolsChangeNoticePending = false
+            resetToolCatalogForConnectionBoundary()
             serverName = nil
             serverVersion = nil
             throw error
@@ -389,11 +386,16 @@ actor InteractiveMCPClientSession {
         client = nil
         transport = nil
         requestSendBarrier = nil
+        resetToolCatalogForConnectionBoundary()
+        logger.debug("Disconnected from MCP server")
+    }
+
+    private func resetToolCatalogForConnectionBoundary() {
+        toolCatalogEpoch &+= 1
         cachedTools = []
         toolListFetched = false
         toolsDirty = false
         toolsChangeNoticePending = false
-        logger.debug("Disconnected from MCP server")
     }
 
     // MARK: - Tools
@@ -405,14 +407,33 @@ actor InteractiveMCPClientSession {
             throw InteractiveSessionError.notConnected
         }
 
-        let result = try await client.listTools()
-        cachedTools = result.tools
-        toolListFetched = true
-        toolsDirty = false
-        toolsChangeNoticePending = false
+        while true {
+            toolListRequestGeneration &+= 1
+            let requestGeneration = toolListRequestGeneration
+            let observedCatalogEpoch = toolCatalogEpoch
+            let observedInvalidationGeneration = toolListInvalidationGeneration
+            let result = try await client.listTools()
+            guard requestGeneration == toolListRequestGeneration else {
+                logger.debug("Ignoring superseded tool list response")
+                return cachedTools
+            }
+            guard observedCatalogEpoch == toolCatalogEpoch else {
+                logger.debug("Ignoring tool list response from previous connection epoch")
+                return cachedTools
+            }
+            guard observedInvalidationGeneration == toolListInvalidationGeneration else {
+                logger.debug("Retrying tool list refresh after concurrent invalidation")
+                continue
+            }
 
-        logger.debug("Refreshed tools: \(cachedTools.count) available")
-        return cachedTools
+            cachedTools = result.tools
+            toolListFetched = true
+            toolsDirty = false
+            toolsChangeNoticePending = false
+
+            logger.debug("Refreshed tools: \(cachedTools.count) available")
+            return cachedTools
+        }
     }
 
     /// Returns the cached tool list.
@@ -436,6 +457,7 @@ actor InteractiveMCPClientSession {
 
     /// Marks the tool list as potentially stale.
     private func markToolsDirty() {
+        toolListInvalidationGeneration &+= 1
         toolsDirty = true
         toolsChangeNoticePending = true
         logger.debug("Tool list marked dirty (server sent notification)")
@@ -727,6 +749,16 @@ actor InteractiveMCPClientSession {
 
         func test_markToolsDirty() {
             markToolsDirty()
+        }
+
+        func test_replaceConnectedClient(
+            _ client: MCP.Client,
+            requestSendBarrier: MCPRequestSendBarrier
+        ) {
+            self.client = client
+            transport = nil
+            self.requestSendBarrier = requestSendBarrier
+            resetToolCatalogForConnectionBoundary()
         }
     #endif
 

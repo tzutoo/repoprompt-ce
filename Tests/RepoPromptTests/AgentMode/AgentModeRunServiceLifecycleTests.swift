@@ -415,6 +415,125 @@ final class AgentModeRunServiceLifecycleTests: XCTestCase {
         }
     }
 
+    func testQueuedClaudeSteeringRecreatesControllerBeforeSendWhenPermissionsTighten() async {
+        let recorder = LifecycleRecorder()
+        let oldController = LifecycleFakeNativeController(
+            recorder: recorder,
+            label: "old",
+            hasTurnInFlight: true
+        )
+        let newController = LifecycleFakeNativeController(
+            recorder: recorder,
+            label: "new",
+            hasTurnInFlight: false
+        )
+        let harness = makeHarness(
+            recorder: recorder,
+            idleWaiter: { _ in recorder.record("idle") },
+            claudeControllerFactory: { _, _, _, _, _, allowNativeBashTool, permissionMode, mcpStrictMode in
+                recorder.record("factory:claude:\(permissionMode ?? "nil"):\(String(describing: allowNativeBashTool)):\(String(describing: mcpStrictMode))")
+                return newController
+            }
+        )
+        let session = makeRunningClaudeSession(controller: oldController)
+        session.permissionProfile = .mcpSafeDefaults
+        session.claudeControllerRuntimeVariant = .standard
+        session.claudeControllerWorkspacePath = FileManager.default.currentDirectoryPath
+        session.claudeControllerPermissionMode = ClaudeAgentToolPreferences.PermissionLevel.fullAccess.permissionMode
+        session.claudeControllerAllowNativeBashTool = true
+        session.claudeControllerMCPStrictMode = false
+        session.pendingClaudeSteeringInstructions = [makeClaudeSteeringInstruction(session: session, text: "tighten before send")]
+
+        let queueStarted = await harness.service.submitQueuedClaudeSteeringIfSupported(session: session)
+        XCTAssertTrue(queueStarted)
+        await session.claudeSteeringFlushTask?.value
+
+        XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+        XCTAssertEqual(session.claudeControllerPermissionMode, ClaudeAgentToolPreferences.PermissionLevel.requireApproval.permissionMode)
+        XCTAssertEqual(session.claudeControllerAllowNativeBashTool, false)
+        XCTAssertEqual(session.claudeControllerMCPStrictMode, true)
+        XCTAssertFalse(recorder.contains("old:send"))
+        assertOrderedEvents([
+            "idle",
+            "old:interrupt:interrupt",
+            "old:shutdown",
+            "factory:claude:default:Optional(false):Optional(true)",
+            "new:start",
+            "new:send",
+            "delivered"
+        ], in: recorder)
+    }
+
+    func testQueuedClaudeSteeringRecycleDoesNotClearReplacementControllerAfterAwait() async {
+        let recorder = LifecycleRecorder()
+        let currentSessionRefGate = LifecycleAsyncGate()
+        let oldController = LifecycleFakeNativeController(
+            recorder: recorder,
+            label: "old",
+            hasTurnInFlight: true,
+            currentSessionRefGate: currentSessionRefGate
+        )
+        let replacementController = LifecycleFakeNativeController(
+            recorder: recorder,
+            label: "replacement",
+            hasTurnInFlight: false
+        )
+        let fallbackController = LifecycleFakeNativeController(
+            recorder: recorder,
+            label: "fallback",
+            hasTurnInFlight: false
+        )
+        let harness = makeHarness(
+            recorder: recorder,
+            idleWaiter: { _ in recorder.record("idle") },
+            claudeControllerFactory: { _, _, _, _, _, _, _, _ in
+                recorder.record("factory:unexpected")
+                return fallbackController
+            }
+        )
+        let session = makeRunningClaudeSession(controller: oldController)
+        session.permissionProfile = .mcpSafeDefaults
+        session.claudeControllerRuntimeVariant = .standard
+        session.claudeControllerWorkspacePath = FileManager.default.currentDirectoryPath
+        session.claudeControllerPermissionMode = ClaudeAgentToolPreferences.PermissionLevel.fullAccess.permissionMode
+        session.claudeControllerAllowNativeBashTool = true
+        session.claudeControllerMCPStrictMode = false
+        session.pendingClaudeSteeringInstructions = [makeClaudeSteeringInstruction(session: session, text: "replace while recycling")]
+
+        let queueStarted = await harness.service.submitQueuedClaudeSteeringIfSupported(session: session)
+        XCTAssertTrue(queueStarted)
+        await currentSessionRefGate.waitUntilArrived()
+        session.claudeController = replacementController
+        session.claudeControllerRuntimeVariant = .standard
+        session.claudeControllerWorkspacePath = FileManager.default.currentDirectoryPath
+        session.claudeControllerPermissionMode = ClaudeAgentToolPreferences.PermissionLevel.requireApproval.permissionMode
+        session.claudeControllerAllowNativeBashTool = false
+        session.claudeControllerMCPStrictMode = true
+        await currentSessionRefGate.release()
+        await session.claudeSteeringFlushTask?.value
+
+        guard let finalController = session.claudeController else {
+            XCTFail("Expected replacement controller to remain installed")
+            return
+        }
+        XCTAssertEqual(
+            ObjectIdentifier(finalController as AnyObject),
+            ObjectIdentifier(replacementController as AnyObject)
+        )
+        XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+        XCTAssertFalse(recorder.contains("factory:unexpected"))
+        XCTAssertFalse(recorder.contains("old:send"))
+        assertOrderedEvents([
+            "idle",
+            "old:interrupt:interrupt",
+            "old:current-ref",
+            "old:shutdown",
+            "replacement:start",
+            "replacement:send",
+            "delivered"
+        ], in: recorder)
+    }
+
     func testQueuedACPSteeringWaitsForMCPIdleThenInterruptsPromptsOrRestoresFollowUp() async throws {
         do {
             let recorder = LifecycleRecorder()
@@ -1387,6 +1506,7 @@ final class AgentModeRunServiceLifecycleTests: XCTestCase {
         cancelMCPTools: @escaping (_ runID: UUID, _ reason: String) -> Void = { _, _ in },
         codexController: LifecycleNoopCodexController? = nil,
         claudeController: LifecycleFakeNativeController? = nil,
+        claudeControllerFactory: AgentModeViewModel.ClaudeControllerFactory? = nil,
         headlessProviderFactory: AgentModeViewModel.HeadlessProviderFactory? = nil,
         acpProviderFactory: AgentModeViewModel.ACPProviderFactory? = nil,
         acpControllerFactory: AgentModeViewModel.ACPControllerFactory? = nil,
@@ -1424,7 +1544,7 @@ final class AgentModeRunServiceLifecycleTests: XCTestCase {
             testWindowID: 1,
             testWorkspacePath: FileManager.default.currentDirectoryPath,
             codexControllerFactory: { _, _, _, _, _, _ in codexController },
-            claudeControllerFactory: { _, _, _, _, _, _, _, _ in
+            claudeControllerFactory: claudeControllerFactory ?? { _, _, _, _, _, _, _, _ in
                 recorder.record("factory:claude")
                 return claudeController
             },
@@ -1919,6 +2039,43 @@ private actor LifecyclePublicationGate {
     }
 }
 
+private actor LifecycleAsyncGate {
+    private var arrived = false
+    private var released = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func arriveAndWait() async {
+        arrived = true
+        let arrivalWaiters = arrivalWaiters
+        self.arrivalWaiters.removeAll()
+        for waiter in arrivalWaiters {
+            waiter.resume()
+        }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilArrived() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { continuation in
+            arrivalWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard !released else { return }
+        released = true
+        let releaseWaiters = releaseWaiters
+        self.releaseWaiters.removeAll()
+        for waiter in releaseWaiters {
+            waiter.resume()
+        }
+    }
+}
+
 private actor LifecycleTimeoutGate<Value: Sendable> {
     private var continuation: CheckedContinuation<Value, Error>?
 
@@ -2181,19 +2338,25 @@ private final class LifecycleNoopCodexController: CodexSessionControlling {
 
 private actor LifecycleFakeNativeController: NativeAgentRuntimeControlling {
     private let recorder: LifecycleRecorder
+    private let label: String
     private let turnInFlight: Bool
     private let failSend: Bool
+    private let currentSessionRefGate: LifecycleAsyncGate?
     private let sessionRef = NativeAgentRuntimeSessionRef(sessionID: "lifecycle-claude-session")
     private let stream: AsyncStream<NativeAgentRuntimeEvent>
 
     init(
         recorder: LifecycleRecorder,
+        label: String = "claude",
         hasTurnInFlight: Bool = false,
-        failSend: Bool = false
+        failSend: Bool = false,
+        currentSessionRefGate: LifecycleAsyncGate? = nil
     ) {
         self.recorder = recorder
+        self.label = label
         turnInFlight = hasTurnInFlight
         self.failSend = failSend
+        self.currentSessionRefGate = currentSessionRefGate
         stream = AsyncStream { _ in }
     }
 
@@ -2218,18 +2381,22 @@ private actor LifecycleFakeNativeController: NativeAgentRuntimeControlling {
         effortLevel: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride: String?
     ) async throws -> NativeAgentRuntimeSessionRef {
-        recorder.record("claude:start")
+        recorder.record("\(label):start")
         return sessionRef
     }
 
     func currentSessionRef() async -> NativeAgentRuntimeSessionRef {
-        sessionRef
+        if let currentSessionRefGate {
+            recorder.record("\(label):current-ref")
+            await currentSessionRefGate.arriveAndWait()
+        }
+        return sessionRef
     }
 
     func applyModelAndEffort(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws {}
 
     func sendUserMessage(_ text: String) async throws -> UUID {
-        recorder.record("claude:send")
+        recorder.record("\(label):send")
         if failSend {
             throw LifecycleTestError.expectedClaudeSendFailure
         }
@@ -2237,12 +2404,12 @@ private actor LifecycleFakeNativeController: NativeAgentRuntimeControlling {
     }
 
     func interruptTurn(reason: String) async -> NativeAgentRuntimeInterruptOutcome {
-        recorder.record("claude:interrupt:\(reason)")
+        recorder.record("\(label):interrupt:\(reason)")
         return .noTurnInFlight
     }
 
     func shutdown() async {
-        recorder.record("claude:shutdown")
+        recorder.record("\(label):shutdown")
     }
 
     func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) async {}
