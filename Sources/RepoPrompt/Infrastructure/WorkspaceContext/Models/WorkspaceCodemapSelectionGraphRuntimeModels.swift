@@ -157,9 +157,38 @@ struct WorkspaceCodemapSelectionGraphRuntimeQuerySource: Hashable {
     let requestGeneration: UInt64
 }
 
+struct WorkspaceCodemapSelectionGraphRuntimeQueryOutputBudget: Hashable {
+    static let unbounded = Self(
+        maximumResolvedTargetCount: .max,
+        maximumResolutionCount: .max,
+        maximumReferenceFailureCount: .max
+    )
+
+    let maximumResolvedTargetCount: Int
+    let maximumResolutionCount: Int
+    let maximumReferenceFailureCount: Int
+}
+
+enum WorkspaceCodemapSelectionGraphRuntimeQueryOutputBudgetDimension: Hashable {
+    case resolvedTargets
+    case resolutions
+    case referenceFailures
+}
+
 struct WorkspaceCodemapSelectionGraphRuntimeQuery: Hashable {
     let key: WorkspaceCodemapSelectionGraphRuntimeKey
     let selectedSources: [WorkspaceCodemapSelectionGraphRuntimeQuerySource]
+    let outputBudget: WorkspaceCodemapSelectionGraphRuntimeQueryOutputBudget
+
+    init(
+        key: WorkspaceCodemapSelectionGraphRuntimeKey,
+        selectedSources: [WorkspaceCodemapSelectionGraphRuntimeQuerySource],
+        outputBudget: WorkspaceCodemapSelectionGraphRuntimeQueryOutputBudget = .unbounded
+    ) {
+        self.key = key
+        self.selectedSources = selectedSources
+        self.outputBudget = outputBudget
+    }
 }
 
 struct WorkspaceCodemapSelectionGraphRuntimeEndpoint: Hashable {
@@ -203,6 +232,7 @@ enum WorkspaceCodemapSelectionGraphRuntimeQueryUnavailableReason: Hashable {
     case processAdmissionRejected(CodeMapSelectionGraphAdmissionBusyReason)
     case cancelled
     case budgetExceeded
+    case outputBudgetExceeded(WorkspaceCodemapSelectionGraphRuntimeQueryOutputBudgetDimension)
     case invalidSnapshot
     case explicitRootUnavailable(WorkspaceCodemapSelectionGraphRuntimeExternalUnavailableReason)
     case invalidQuery
@@ -244,4 +274,5 @@ struct WorkspaceCodemapSelectionGraphRuntimeAccounting: Equatable {
     let budgetRejectedCount: UInt64
     let invalidSnapshotCount: UInt64
     let supersededPublicationCount: UInt64
+    let materializedQueryResultCount: UInt64
 }

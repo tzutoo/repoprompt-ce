@@ -26,6 +26,7 @@ actor WorkspaceCodemapSelectionGraph {
     private var budgetRejectedCount: UInt64 = 0
     private var invalidSnapshotCount: UInt64 = 0
     private var supersededPublicationCount: UInt64 = 0
+    private var materializedQueryResultCount: UInt64 = 0
 
     init(
         rootEpoch: WorkspaceCodemapRootEpoch,
@@ -276,7 +277,8 @@ actor WorkspaceCodemapSelectionGraph {
             cancelledCount: cancelledCount,
             budgetRejectedCount: budgetRejectedCount,
             invalidSnapshotCount: invalidSnapshotCount,
-            supersededPublicationCount: supersededPublicationCount
+            supersededPublicationCount: supersededPublicationCount,
+            materializedQueryResultCount: materializedQueryResultCount
         )
     }
 
@@ -326,6 +328,12 @@ actor WorkspaceCodemapSelectionGraph {
 
             for targetIndex in shard.adjacency[sourceIndex, default: []] {
                 guard shard.nodes.indices.contains(targetIndex) else {
+                    guard failures.count < policy.maximumReferenceFailureCountPerQuery else {
+                        return .unavailable(.budgetExceeded)
+                    }
+                    guard failures.count < query.outputBudget.maximumReferenceFailureCount else {
+                        return .unavailable(.outputBudgetExceeded(.referenceFailures))
+                    }
                     failures.append(.init(
                         sourceIndex: sourceIndex,
                         record: .init(
@@ -334,16 +342,21 @@ actor WorkspaceCodemapSelectionGraph {
                             failure: .staleTarget
                         )
                     ))
-                    guard failures.count <= policy.maximumReferenceFailureCountPerQuery else {
-                        return .unavailable(.budgetExceeded)
-                    }
                     continue
                 }
                 let targetNode = shard.nodes[targetIndex]
                 guard !selectedFileIDs.contains(targetNode.fileID) else { continue }
-                let insertedTarget = targetIndices.insert(targetIndex).inserted
-                guard !insertedTarget || targetIndices.count <= policy.maximumResolvedTargetCountPerQuery else {
-                    return .unavailable(.budgetExceeded)
+                if !targetIndices.contains(targetIndex) {
+                    guard targetIndices.count < policy.maximumResolvedTargetCountPerQuery else {
+                        return .unavailable(.budgetExceeded)
+                    }
+                    guard targetIndices.count < query.outputBudget.maximumResolvedTargetCount else {
+                        return .unavailable(.outputBudgetExceeded(.resolvedTargets))
+                    }
+                    targetIndices.insert(targetIndex)
+                }
+                guard resolutions.count < query.outputBudget.maximumResolutionCount else {
+                    return .unavailable(.outputBudgetExceeded(.resolutions))
                 }
                 resolutions.append(.init(
                     sourceIndex: sourceIndex,
@@ -352,6 +365,12 @@ actor WorkspaceCodemapSelectionGraph {
                 ))
             }
             for failure in shard.referenceFailures[sourceIndex, default: []] {
+                guard failures.count < policy.maximumReferenceFailureCountPerQuery else {
+                    return .unavailable(.budgetExceeded)
+                }
+                guard failures.count < query.outputBudget.maximumReferenceFailureCount else {
+                    return .unavailable(.outputBudgetExceeded(.referenceFailures))
+                }
                 failures.append(.init(
                     sourceIndex: sourceIndex,
                     record: .init(
@@ -360,9 +379,6 @@ actor WorkspaceCodemapSelectionGraph {
                         failure: failure.failure
                     )
                 ))
-                guard failures.count <= policy.maximumReferenceFailureCountPerQuery else {
-                    return .unavailable(.budgetExceeded)
-                }
             }
         }
 
@@ -375,6 +391,7 @@ actor WorkspaceCodemapSelectionGraph {
             return utf8Precedes($0.record.referencedName, $1.record.referencedName)
         }
         let targets = targetIndices.sorted().map(shard.endpoint(at:))
+        increment(&materializedQueryResultCount)
         return .readyPartial(.init(
             key: shard.key,
             selectedSources: selectedSources,

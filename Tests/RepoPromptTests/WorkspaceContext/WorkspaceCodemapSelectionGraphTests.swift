@@ -936,11 +936,20 @@ final class WorkspaceCodemapSelectionGraphTests: XCTestCase {
             gate.release(generation: 3)
             return XCTFail("Third rebuild did not reach the publication gate.")
         }
+        gate.release(generation: 3)
+        try await requirePublished(thirdTask.value)
+        let afterLatestPublication = await actor.accounting()
+        XCTAssertEqual(afterLatestPublication.publishedSummary?.key, .init(snapshot: third))
+
         gate.release(generation: 2)
         let superseded = await secondTask.value
         XCTAssertEqual(superseded, .superseded(.init(snapshot: second)))
-        gate.release(generation: 3)
-        try await requirePublished(thirdTask.value)
+        let afterSupersededCompletion = await actor.accounting()
+        XCTAssertEqual(afterSupersededCompletion.publishedSummary?.key, .init(snapshot: third))
+        XCTAssertEqual(
+            afterSupersededCompletion.publishedCount,
+            afterLatestPublication.publishedCount
+        )
 
         let fourth = snapshot(authority: authority, bindings: bindings, generation: 4)
         let cancelledTask = Task { await actor.rebuild(from: fourth) }
