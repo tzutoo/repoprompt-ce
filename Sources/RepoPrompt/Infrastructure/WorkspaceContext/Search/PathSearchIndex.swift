@@ -323,10 +323,11 @@ final class WorkspaceProjectedPathSearchShadowControl: @unchecked Sendable {
 /// Every published generation owns immutable overlay/tombstone values, so older readers can safely
 /// continue querying the base and overlay generation they captured.
 final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
-    enum BuildKind {
+    enum BuildKind: Equatable {
         case full
         case overlay
         case reused
+        case projectedReuse
     }
 
     struct Candidate {
@@ -367,7 +368,8 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
     let entries: [WorkspaceSearchCatalogEntry]
     let buildKind: BuildKind
 
-    private let base: MaterializedBase
+    private let base: MaterializedBase?
+    private let projectedIndex: WorkspaceProjectedPathSearchIndex?
     private let overlayEntries: [WorkspaceSearchCatalogEntry]
     private let overlayIndex: PathSearchIndex?
     private let tombstonedBaseEntryIDs: Set<UUID>
@@ -385,6 +387,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.entries = entries
         buildKind = .full
         base = MaterializedBase(entries: entries)
+        projectedIndex = nil
         overlayEntries = []
         overlayIndex = nil
         tombstonedBaseEntryIDs = []
@@ -409,6 +412,7 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.entries = entries
         self.buildKind = buildKind
         self.base = base
+        projectedIndex = nil
         self.overlayEntries = overlayEntries
         overlayIndex = preparedOverlayIndex ?? (
             overlayEntries.isEmpty
@@ -418,6 +422,47 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         self.tombstonedBaseEntryIDs = tombstonedBaseEntryIDs
         self.accumulatedChangedFileIDs = accumulatedChangedFileIDs
         self.shadowControl = shadowControl
+    }
+
+    init(
+        identity: WorkspaceSearchRootPathIndexIdentity,
+        rootPath: String,
+        entries: [WorkspaceSearchCatalogEntry],
+        projectedIndex: WorkspaceProjectedPathSearchIndex
+    ) {
+        precondition(projectedIndex.entries == entries)
+        self.identity = identity
+        self.rootPath = rootPath
+        self.entries = entries
+        buildKind = .projectedReuse
+        base = nil
+        self.projectedIndex = projectedIndex
+        overlayEntries = []
+        overlayIndex = nil
+        tombstonedBaseEntryIDs = []
+        accumulatedChangedFileIDs = []
+        shadowControl = nil
+    }
+
+    convenience init?(
+        identity: WorkspaceSearchRootPathIndexIdentity,
+        root: WorkspaceRootRecord,
+        projectedSnapshot snapshot: WorkspaceRootReusableSnapshot,
+        projectedPlan plan: WorkspaceRootSeedPlan,
+        entries: [WorkspaceSearchCatalogEntry]
+    ) {
+        guard let projectedIndex = WorkspaceProjectedPathSearchIndex(
+            snapshot: snapshot,
+            plan: plan,
+            root: root,
+            authoritativeEntries: entries
+        ) else { return nil }
+        self.init(
+            identity: identity,
+            rootPath: root.standardizedFullPath,
+            entries: entries,
+            projectedIndex: projectedIndex
+        )
     }
 
     var count: Int {
@@ -436,6 +481,17 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         }
 
         guard !changedFileIDs.isEmpty else {
+            if let projectedIndex {
+                return WorkspaceSearchRootPathIndex(
+                    identity: identity,
+                    rootPath: rootPath,
+                    entries: entries,
+                    projectedIndex: projectedIndex
+                )
+            }
+            guard let base else {
+                return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
+            }
             return WorkspaceSearchRootPathIndex(
                 identity: identity,
                 rootPath: rootPath,
@@ -450,12 +506,52 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
             )
         }
 
+        if let projectedIndex {
+            let previousEntriesByID = Dictionary(
+                uniqueKeysWithValues: self.entries.map { ($0.id, $0) }
+            )
+            let currentEntriesByID = Dictionary(
+                uniqueKeysWithValues: entries.map { ($0.id, $0) }
+            )
+            var changedRelativePaths = Set<String>()
+            changedRelativePaths.reserveCapacity(changedFileIDs.count * 2)
+            for fileID in changedFileIDs {
+                var resolvedPath = false
+                if let previous = previousEntriesByID[fileID] {
+                    changedRelativePaths.insert(previous.standardizedRelativePath)
+                    resolvedPath = true
+                }
+                if let current = currentEntriesByID[fileID] {
+                    changedRelativePaths.insert(current.standardizedRelativePath)
+                    resolvedPath = true
+                }
+                guard resolvedPath else {
+                    return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
+                }
+            }
+            guard let nextProjectedIndex = projectedIndex.applyingPatch(
+                entries: entries,
+                changedRelativePaths: changedRelativePaths
+            ) else {
+                return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
+            }
+            return WorkspaceSearchRootPathIndex(
+                identity: identity,
+                rootPath: rootPath,
+                entries: entries,
+                projectedIndex: nextProjectedIndex
+            )
+        }
+
         let nextChangedFileIDs = accumulatedChangedFileIDs.union(changedFileIDs)
         shadowControl?.invalidate()
         guard nextChangedFileIDs.count < Self.maxOverlayChangedFileCount else {
             return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
         }
 
+        guard let base else {
+            return WorkspaceSearchRootPathIndex(identity: identity, rootPath: rootPath, entries: entries)
+        }
         var nextTombstonedBaseEntryIDs = tombstonedBaseEntryIDs
         var nextOverlayEntriesByID = Dictionary(
             uniqueKeysWithValues: overlayEntries.map { ($0.id, $0) }
@@ -495,6 +591,10 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
 
     func search(_ query: String, limit: Int) -> [Candidate] {
         guard limit > 0 else { return [] }
+        if let projectedIndex {
+            return projectedIndex.search(query, limit: limit)
+        }
+        guard let base else { return [] }
 
         let boundedBaseLimit = min(base.entries.count, limit)
         let baseOverfetch = min(
@@ -594,6 +694,10 @@ final class WorkspaceSearchRootPathIndex: @unchecked Sendable {
         }
     }
 
+    var projectedAccumulatedChangedPathCount: Int? {
+        projectedIndex?.accumulatedChangedRelativePathCount
+    }
+
     private static func candidatePrecedes(_ lhs: Candidate, _ rhs: Candidate) -> Bool {
         if lhs.score != rhs.score { return lhs.score > rhs.score }
         switch WorkspaceFileContextStore.compareUTF8Binary(lhs.tieBreakKey, rhs.tieBreakKey) {
@@ -620,6 +724,7 @@ final class WorkspaceProjectedPathSearchIndex: @unchecked Sendable {
     let baseEntryCount: Int
     let overlayEntryCount: Int
     let tombstoneCount: Int
+    let accumulatedChangedRelativePathCount: Int
 
     private let relativeBase: WorkspaceSearchRelativePathBase
     private let targetEntriesByBaseIndex: [WorkspaceSearchCatalogEntry?]
@@ -627,6 +732,7 @@ final class WorkspaceProjectedPathSearchIndex: @unchecked Sendable {
     private let overlayIndex: PathSearchIndex?
     private let displayPrefix: String
     private let absolutePrefix: String
+    private let accumulatedChangedRelativePaths: Set<String>
 
     init?(
         snapshot: WorkspaceRootReusableSnapshot,
@@ -634,14 +740,18 @@ final class WorkspaceProjectedPathSearchIndex: @unchecked Sendable {
         root: WorkspaceRootRecord,
         authoritativeEntries: [WorkspaceSearchCatalogEntry]
     ) {
+        let changed = Set(
+            plan.changedRelativeFilePaths
+                .union(plan.tombstonedBaseRelativeFilePaths)
+                .map(StandardizedPath.relative)
+        )
         guard snapshot.identity == plan.snapshotIdentity,
-              plan.changedRelativeFilePaths.count < WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount
+              changed.count < WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount
         else { return nil }
         let entriesByRelativePath = Dictionary(
             authoritativeEntries.map { ($0.standardizedRelativePath, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let changed = plan.changedRelativeFilePaths
         let projectedDisplayPrefix = root.name + "/"
         let projectedAbsolutePrefix = root.standardizedFullPath + "/"
         guard authoritativeEntries.allSatisfy({ entry in
@@ -677,8 +787,76 @@ final class WorkspaceProjectedPathSearchIndex: @unchecked Sendable {
         baseEntryCount = targets.compactMap(\.self).count
         overlayEntryCount = overlayEntries.count
         tombstoneCount = targets.count - baseEntryCount
+        accumulatedChangedRelativePaths = changed
+        accumulatedChangedRelativePathCount = changed.count
         displayPrefix = projectedDisplayPrefix
         absolutePrefix = projectedAbsolutePrefix
+    }
+
+    private init?(
+        relativeBase: WorkspaceSearchRelativePathBase,
+        displayPrefix: String,
+        absolutePrefix: String,
+        accumulatedChangedRelativePaths: Set<String>,
+        authoritativeEntries: [WorkspaceSearchCatalogEntry]
+    ) {
+        let changed = Set(accumulatedChangedRelativePaths.map(StandardizedPath.relative))
+        guard changed.count < WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount,
+              authoritativeEntries.allSatisfy({ entry in
+                  entry.displayPath == displayPrefix + entry.standardizedRelativePath
+                      && entry.standardizedFullPath == absolutePrefix + entry.standardizedRelativePath
+              })
+        else { return nil }
+
+        let entriesByRelativePath = Dictionary(
+            authoritativeEntries.map { ($0.standardizedRelativePath, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var targets: [WorkspaceSearchCatalogEntry?] = []
+        targets.reserveCapacity(relativeBase.relativePaths.count)
+        var baseRelativePaths = Set<String>()
+        for relativePath in relativeBase.relativePaths {
+            let standardized = StandardizedPath.relative(relativePath)
+            baseRelativePaths.insert(standardized)
+            if changed.contains(standardized) {
+                targets.append(nil)
+            } else {
+                guard let entry = entriesByRelativePath[standardized] else { return nil }
+                targets.append(entry)
+            }
+        }
+
+        let overlays = authoritativeEntries.filter {
+            changed.contains($0.standardizedRelativePath)
+                || !baseRelativePaths.contains($0.standardizedRelativePath)
+        }
+        self.relativeBase = relativeBase
+        targetEntriesByBaseIndex = targets
+        overlayEntries = overlays
+        overlayIndex = overlays.isEmpty
+            ? nil
+            : PathSearchIndex(paths: overlays.map(\.pathSearchIndexKey))
+        entries = authoritativeEntries
+        baseEntryCount = targets.compactMap(\.self).count
+        overlayEntryCount = overlays.count
+        tombstoneCount = targets.count - baseEntryCount
+        self.accumulatedChangedRelativePaths = changed
+        accumulatedChangedRelativePathCount = changed.count
+        self.displayPrefix = displayPrefix
+        self.absolutePrefix = absolutePrefix
+    }
+
+    func applyingPatch(
+        entries: [WorkspaceSearchCatalogEntry],
+        changedRelativePaths: Set<String>
+    ) -> WorkspaceProjectedPathSearchIndex? {
+        WorkspaceProjectedPathSearchIndex(
+            relativeBase: relativeBase,
+            displayPrefix: displayPrefix,
+            absolutePrefix: absolutePrefix,
+            accumulatedChangedRelativePaths: accumulatedChangedRelativePaths.union(changedRelativePaths),
+            authoritativeEntries: entries
+        )
     }
 
     func search(_ query: String, limit: Int) -> [Candidate] {

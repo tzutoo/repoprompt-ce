@@ -164,7 +164,10 @@ final class WorkspaceRootCreationReceiptCoordinator: @unchecked Sendable {
             stream: stream,
             queue: queue,
             startedAtUptimeNanoseconds: startedAt,
-            startEventID: started ? FSEventStreamGetLatestEventId(stream) : 0,
+            // A newly started `sinceNow` stream reports the sentinel until its
+            // first callback. The receipt needs a durable journal position even
+            // when creation produces no callback before this synchronous cut.
+            startEventID: started ? FSEventsGetCurrentEventId() : 0,
             streamStarted: started
         )
     }
@@ -176,7 +179,7 @@ final class WorkspaceRootCreationReceiptCoordinator: @unchecked Sendable {
             if session.streamStarted {
                 FSEventStreamFlushSync(stream)
                 session.queue.sync {}
-                endEventID = FSEventStreamGetLatestEventId(stream)
+                endEventID = FSEventsGetCurrentEventId()
                 FSEventStreamStop(stream)
             } else {
                 endEventID = 0

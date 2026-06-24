@@ -2305,6 +2305,42 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             XCTAssertEqual(applied.appliedWatcherWatermark.rawValue, 7)
         }
 
+        func testWorkspaceIngressCoordinatorPrivateHandoffRetargetsQueuedPublicationBeforeResume() async {
+            let coordinator = WorkspaceFileSystemIngressCoordinator()
+            let rootID = UUID()
+            let oldRecorder = OrderedIngressRecorder()
+            let newRecorder = OrderedIngressRecorder()
+            let subscription = coordinator.openPublisherIngress(rootID: rootID) { publication, _ in
+                await oldRecorder.append(publication.servicePublicationSequence)
+            }
+            XCTAssertTrue(coordinator.pauseDrainAndReplaceHandler(subscription) { publication, _ in
+                await oldRecorder.append(publication.servicePublicationSequence)
+            })
+            XCTAssertTrue(coordinator.accept(
+                subscription,
+                publication: FileSystemDeltaPublication(
+                    servicePublicationSequence: 1,
+                    source: .watcherBarrierNoop,
+                    watcherAcceptedWatermark: .init(rawValue: 31),
+                    deltas: []
+                ),
+                lifecycleCorrelation: nil
+            ))
+            XCTAssertTrue(coordinator.pauseDrainAndReplaceHandler(subscription) { publication, _ in
+                await newRecorder.append(publication.servicePublicationSequence)
+            })
+            let oldBeforeResume = await oldRecorder.snapshot()
+            let newBeforeResume = await newRecorder.snapshot()
+            XCTAssertEqual(oldBeforeResume, [])
+            XCTAssertEqual(newBeforeResume, [])
+            XCTAssertTrue(coordinator.resumeDrainAfterHandoff(subscription))
+            await coordinator.waitUntilApplied(rootID: rootID, servicePublicationSequence: 1)
+            let oldAfterResume = await oldRecorder.snapshot()
+            let newAfterResume = await newRecorder.snapshot()
+            XCTAssertEqual(oldAfterResume, [])
+            XCTAssertEqual(newAfterResume, [1])
+        }
+
         #if DEBUG
             func testWorkspaceIngressCoordinatorCancelledWaiterDetachesWhileLiveWaiterCompletes() async {
                 let coordinator = WorkspaceFileSystemIngressCoordinator()

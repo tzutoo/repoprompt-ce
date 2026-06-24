@@ -1,5 +1,10 @@
 import Foundation
 
+enum WorktreeStartupServingControl: Equatable {
+    case automatic
+    case forceFullCrawl
+}
+
 struct WorktreeStartupFeatureFlags: Equatable {
     static let observeDefaultsKey = "observeDiffSeededWorktreeStartup"
     static let serveDefaultsKey = "serveDiffSeededWorktreeStartup"
@@ -29,15 +34,18 @@ struct WorktreeStartupContext: Equatable {
     let agentSessionID: UUID
     let correlationID: UUID
     let flags: WorktreeStartupFeatureFlags
+    let servingControl: WorktreeStartupServingControl
 
     init(
         agentSessionID: UUID,
         correlationID: UUID = UUID(),
-        flags: WorktreeStartupFeatureFlags = .current()
+        flags: WorktreeStartupFeatureFlags = .current(),
+        servingControl: WorktreeStartupServingControl = .automatic
     ) {
         self.agentSessionID = agentSessionID
         self.correlationID = correlationID
         self.flags = flags
+        self.servingControl = servingControl
     }
 }
 
@@ -78,6 +86,11 @@ enum WorkspaceRootSeedFallbackReason: String, Equatable {
     case ownerSuperseded
     case serviceIngressGenerationChanged
     case watcherRecoveryUncertain
+    case watcherActivationFailure
+    case watcherDrop
+    case watcherOverflow
+    case pendingIngressSequenceGap
+    case seededShardPreparationFailure
     case cancellation
 }
 
@@ -87,6 +100,11 @@ enum WorktreeStartupPhase: String, Equatable {
     case bindingTransitionStarted
     case rootLoadStarted
     case shadowVerified
+    case seedWatcherAttached
+    case seedReplayFenced
+    case seedReadyForCommit
+    case seedPublished
+    case seedFallback
     case rootReady
     case providerStart
     case failed
@@ -129,6 +147,7 @@ enum WorktreeStartupInstrumentation {
         let routeCounts: [WorkspaceRootStartupRoute: Int]
         let fallbackCounts: [WorkspaceRootSeedFallbackReason: Int]
         let shadow: ShadowCounters
+        let seed: SeedCounters
     }
 
     struct ShadowCounters: Equatable {
@@ -143,14 +162,32 @@ enum WorktreeStartupInstrumentation {
         var latestTombstoneCount = 0
     }
 
+    struct SeedCounters: Equatable {
+        var receiptJournalCutPresent = 0
+        var receiptJournalCutAbsent = 0
+        var acceptedReplayPayloadCount = 0
+        var acceptedReplayEventCount = 0
+        var latestInitializationWatermarkDelta = 0
+        var latestServiceSequenceDelta = 0
+        var latestReplayChangedPathCount = 0
+        var metadataRevalidationChecks = 0
+        var metadataRevalidationUses = 0
+        var latestProjectedBaseEntryCount = 0
+        var latestProjectedOverlayEntryCount = 0
+        var latestProjectedTombstoneCount = 0
+        var fullCrawlFallbackCount = 0
+    }
+
     private static let lock = NSLock()
     private static let maximumEventCount = 512
     private static let maximumGitCommandMetricCount = 1024
+    private static let maximumSeedMetricValue = 1_000_000
     private static var events: [Event] = []
     private static var gitCommands: [GitCommandMetric] = []
     private static var routeCounts: [WorkspaceRootStartupRoute: Int] = [:]
     private static var fallbackCounts: [WorkspaceRootSeedFallbackReason: Int] = [:]
     private static var shadowCounters = ShadowCounters()
+    private static var seedCounters = SeedCounters()
 
     static func record(
         _ phase: WorktreeStartupPhase,
@@ -241,6 +278,65 @@ enum WorktreeStartupInstrumentation {
         lock.unlock()
     }
 
+    static func recordSeedReceiptJournalCut(present: Bool) {
+        lock.lock()
+        if present {
+            seedCounters.receiptJournalCutPresent = incremented(seedCounters.receiptJournalCutPresent)
+        } else {
+            seedCounters.receiptJournalCutAbsent = incremented(seedCounters.receiptJournalCutAbsent)
+        }
+        lock.unlock()
+    }
+
+    static func recordSeedReplay(
+        acceptedPayloadCount: Int,
+        acceptedEventCount: Int,
+        initializationWatermarkDelta: Int,
+        serviceSequenceDelta: Int,
+        changedPathCount: Int
+    ) {
+        lock.lock()
+        seedCounters.acceptedReplayPayloadCount = added(
+            seedCounters.acceptedReplayPayloadCount,
+            acceptedPayloadCount
+        )
+        seedCounters.acceptedReplayEventCount = added(
+            seedCounters.acceptedReplayEventCount,
+            acceptedEventCount
+        )
+        seedCounters.latestInitializationWatermarkDelta = bounded(initializationWatermarkDelta)
+        seedCounters.latestServiceSequenceDelta = bounded(serviceSequenceDelta)
+        seedCounters.latestReplayChangedPathCount = bounded(changedPathCount)
+        lock.unlock()
+    }
+
+    static func recordSeedMetadataRevalidation(used: Bool) {
+        lock.lock()
+        seedCounters.metadataRevalidationChecks = incremented(seedCounters.metadataRevalidationChecks)
+        if used {
+            seedCounters.metadataRevalidationUses = incremented(seedCounters.metadataRevalidationUses)
+        }
+        lock.unlock()
+    }
+
+    static func recordSeedProjectedPreparation(
+        baseEntryCount: Int,
+        overlayEntryCount: Int,
+        tombstoneCount: Int
+    ) {
+        lock.lock()
+        seedCounters.latestProjectedBaseEntryCount = bounded(baseEntryCount)
+        seedCounters.latestProjectedOverlayEntryCount = bounded(overlayEntryCount)
+        seedCounters.latestProjectedTombstoneCount = bounded(tombstoneCount)
+        lock.unlock()
+    }
+
+    static func recordSeedFullCrawlFallback() {
+        lock.lock()
+        seedCounters.fullCrawlFallbackCount = incremented(seedCounters.fullCrawlFallbackCount)
+        lock.unlock()
+    }
+
     static func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -249,12 +345,21 @@ enum WorktreeStartupInstrumentation {
             gitCommands: gitCommands,
             routeCounts: routeCounts,
             fallbackCounts: fallbackCounts,
-            shadow: shadowCounters
+            shadow: shadowCounters,
+            seed: seedCounters
         )
     }
 
     private static func incremented(_ value: Int) -> Int {
-        value == Int.max ? value : value + 1
+        value >= maximumSeedMetricValue ? maximumSeedMetricValue : value + 1
+    }
+
+    private static func bounded(_ value: Int) -> Int {
+        min(max(0, value), maximumSeedMetricValue)
+    }
+
+    private static func added(_ current: Int, _ value: Int) -> Int {
+        min(maximumSeedMetricValue, current + bounded(value))
     }
 
     #if DEBUG
@@ -265,6 +370,7 @@ enum WorktreeStartupInstrumentation {
             routeCounts.removeAll(keepingCapacity: true)
             fallbackCounts.removeAll(keepingCapacity: true)
             shadowCounters = ShadowCounters()
+            seedCounters = SeedCounters()
             lock.unlock()
         }
     #endif

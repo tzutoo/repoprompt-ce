@@ -1,5 +1,58 @@
 import Foundation
 
+private final class GitWorkspaceAuthoritySynchronousState: @unchecked Sendable {
+    private struct RepositoryState {
+        let invalidationGeneration: UInt64
+        let mutationDepth: Int
+        let monitorCoverageUnavailable: Bool
+        let publicationGenerations: [GitWorkspaceAuthorityScopeKey: UInt64]
+    }
+
+    private let lock = NSLock()
+    private var repositories: [GitWorkspaceAuthorityRepositoryKey: RepositoryState] = [:]
+
+    func update(
+        repositoryKey: GitWorkspaceAuthorityRepositoryKey,
+        invalidationGeneration: UInt64,
+        mutationDepth: Int,
+        monitorCoverageUnavailable: Bool,
+        publicationGenerations: [GitWorkspaceAuthorityScopeKey: UInt64]
+    ) {
+        lock.lock()
+        repositories[repositoryKey] = RepositoryState(
+            invalidationGeneration: invalidationGeneration,
+            mutationDepth: mutationDepth,
+            monitorCoverageUnavailable: monitorCoverageUnavailable,
+            publicationGenerations: publicationGenerations
+        )
+        lock.unlock()
+    }
+
+    func isCurrent(_ fence: GitWorkspacePendingInitializationAuthorityFence) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return matches(fence)
+    }
+
+    func withCurrentFences<T>(
+        _ fences: [GitWorkspacePendingInitializationAuthorityFence],
+        _ body: () -> T?
+    ) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fences.allSatisfy(matches) else { return nil }
+        return body()
+    }
+
+    private func matches(_ fence: GitWorkspacePendingInitializationAuthorityFence) -> Bool {
+        guard let state = repositories[fence.repositoryKey] else { return false }
+        return state.invalidationGeneration == fence.lease.invalidationGeneration
+            && state.mutationDepth == 0
+            && !state.monitorCoverageUnavailable
+            && state.publicationGenerations[fence.lease.scopeKey] == fence.lease.authorityGeneration
+    }
+}
+
 /// Owns currentness and metadata observation for worktree bootstrap. Collection
 /// is always bracketed by a scope-bound capture token and conditional install;
 /// reusable snapshot storage/eviction is bounded and remains observation-only.
@@ -16,6 +69,7 @@ actor GitWorkspaceStateAuthority {
             let reusableSnapshotCount: Int
             let reusableSnapshotAliasCount: Int
             let reusableSnapshotEstimatedBytes: Int
+            let invalidationSubscriberCount: Int
         }
     #endif
 
@@ -41,6 +95,7 @@ actor GitWorkspaceStateAuthority {
     }
 
     private let metadataMonitor: GitWorkspaceMetadataMonitor
+    private nonisolated let synchronousState = GitWorkspaceAuthoritySynchronousState()
     private let reusableSnapshotCacheLimits: WorkspaceRootReusableSnapshotCacheLimits
     private var records: [GitWorkspaceAuthorityRepositoryKey: Record] = [:]
     private var activeMutations: [UUID: GitWorkspaceMutationToken] = [:]
@@ -48,6 +103,7 @@ actor GitWorkspaceStateAuthority {
     private var reusableSnapshotAliasesByScope: [GitWorkspaceAuthorityScopeKey: ReusableSnapshotAlias] = [:]
     private var reusableSnapshotAccessOrdinal: UInt64 = 0
     private var reusableSnapshotEstimatedBytes = 0
+    private var invalidationContinuations: [UUID: AsyncStream<GitWorkspaceAuthorityInvalidationEvent>.Continuation] = [:]
 
     init(
         metadataMonitor: GitWorkspaceMetadataMonitor = GitWorkspaceMetadataMonitor(),
@@ -78,6 +134,7 @@ actor GitWorkspaceStateAuthority {
         else { return .failure(.mutationInProgress) }
         guard !record.monitorCoverageUnavailable else { return .failure(.monitorCoverageUnavailable) }
         records[scopeKey.repositoryKey] = record
+        updateSynchronousState(repositoryKey: scopeKey.repositoryKey, record: record)
         return .success(GitWorkspaceAuthorityCaptureToken(
             scopeKey: scopeKey,
             invalidationGeneration: record.invalidationGeneration,
@@ -132,6 +189,7 @@ actor GitWorkspaceStateAuthority {
             record.snapshotsByScope[scopeKey] = snapshot
             record.acceptedWatermarkByScope[scopeKey] = token.acceptedMetadataWatermark
             records[scopeKey.repositoryKey] = record
+            updateSynchronousState(repositoryKey: scopeKey.repositoryKey, record: record)
             return GitWorkspaceAuthorityLease(
                 scopeKey: scopeKey,
                 authorityGeneration: publicationGeneration,
@@ -200,6 +258,103 @@ actor GitWorkspaceStateAuthority {
             && record.snapshotsByScope[lease.scopeKey] == lease.snapshot
             && record.acceptedWatermarkByScope[lease.scopeKey] == lease.acceptedMetadataWatermark
             && metadataMonitor.acceptedWatermark(for: lease.repositoryKey) == lease.acceptedMetadataWatermark
+    }
+
+    /// Retains no paths and performs no polling. Events are path-free wakeups;
+    /// the accepted watermark and lease remain the authority for currentness.
+    func invalidationEvents() -> AsyncStream<GitWorkspaceAuthorityInvalidationEvent> {
+        let subscriptionID = UUID()
+        return AsyncStream { continuation in
+            invalidationContinuations[subscriptionID] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeInvalidationContinuation(subscriptionID) }
+            }
+        }
+    }
+
+    func pendingInitializationFenceDecision(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async -> GitWorkspacePendingAuthorityFenceDecision {
+        if await pendingInitializationAuthorityFenceIsCurrent(fence) {
+            return .current
+        }
+        guard !fence.revalidationUsed else { return .fallback }
+        return .revalidationRequired(
+            latestAcceptedMetadataWatermark: metadataMonitor.acceptedWatermark(for: fence.repositoryKey)
+        )
+    }
+
+    func pendingInitializationAuthorityFenceIsCurrent(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async -> Bool {
+        guard fence.snapshot == fence.lease.snapshot,
+              fence.acceptedMetadataWatermark == fence.lease.acceptedMetadataWatermark,
+              fence.repositoryKey == GitWorkspaceAuthorityRepositoryKey(layout: fence.targetLayout),
+              fence.repositoryRelativeRootPrefix == fence.lease.scopeKey.repositoryRelativeRootPrefix,
+              fence.repositoryRelativeRootPrefix == fence.snapshot.repositoryRelativeRootPrefix,
+              isCurrent(fence.lease),
+              metadataMonitor.acceptedWatermarkIsCurrent(
+                  for: fence.repositoryKey,
+                  expected: fence.acceptedMetadataWatermark
+              )
+        else { return false }
+        guard await metadataObservationIsCurrent(
+            fence.metadataObservationToken,
+            for: fence.targetLayout,
+            additionalAuthorityPaths: fence.additionalAuthorityPaths,
+            expectedAcceptedWatermark: fence.acceptedMetadataWatermark
+        ) else { return false }
+        // The monitor actor hop above is an await boundary. Reprove both actor
+        // generation and callback-accepted watermark after resumption.
+        return isCurrent(fence.lease)
+            && metadataMonitor.acceptedWatermarkIsCurrent(
+                for: fence.repositoryKey,
+                expected: fence.acceptedMetadataWatermark
+            )
+    }
+
+    nonisolated func pendingInitializationAuthorityFenceIsSynchronouslyCurrent(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) -> Bool {
+        guard synchronousState.isCurrent(fence) else { return false }
+        guard metadataMonitor.acceptedWatermarkIsCurrent(
+            for: fence.repositoryKey,
+            expected: fence.acceptedMetadataWatermark
+        ) else { return false }
+        // Recheck the actor-owned generation mirror after the watermark read so
+        // mutation begin and metadata callback acceptance cannot straddle this proof.
+        return synchronousState.isCurrent(fence)
+    }
+
+    /// Serializes the pending-to-published store commit with both mutation
+    /// invalidation and callback-accepted Git metadata watermarks. An
+    /// invalidation that wins the permit makes publication fail; one that
+    /// arrives afterward is necessarily a published-root reconciliation.
+    nonisolated func withPendingInitializationAuthorityPublicationPermit<T>(
+        _ fences: [GitWorkspacePendingInitializationAuthorityFence],
+        _ body: () -> T
+    ) -> T? {
+        var expectedWatermarks: [GitWorkspaceAuthorityRepositoryKey: UInt64] = [:]
+        for fence in fences {
+            if let existing = expectedWatermarks[fence.repositoryKey],
+               existing != fence.acceptedMetadataWatermark
+            {
+                return nil
+            }
+            expectedWatermarks[fence.repositoryKey] = fence.acceptedMetadataWatermark
+        }
+        return synchronousState.withCurrentFences(fences) {
+            metadataMonitor.withCurrentAcceptedWatermarks(expectedWatermarks, body)
+        }
+    }
+
+    func releasePendingInitializationAuthorityFence(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async {
+        await retireEphemeralAuthorityLease(
+            fence.lease,
+            observationToken: fence.metadataObservationToken
+        )
     }
 
     @discardableResult
@@ -394,6 +549,12 @@ actor GitWorkspaceStateAuthority {
             record.invalidationGeneration &+= 1
             record.snapshotsByScope.removeAll(keepingCapacity: true)
             records[key] = record
+            updateSynchronousState(repositoryKey: key, record: record)
+            emitInvalidation(
+                repositoryKey: key,
+                record: record,
+                kind: .mutationBegan(kind)
+            )
         }
         await removeReusableSnapshotAliases(for: affectedKeys)
         activeMutations[token.id] = token
@@ -405,13 +566,19 @@ actor GitWorkspaceStateAuthority {
     /// reinstall stale evidence.
     func finishMutation(
         _ token: GitWorkspaceMutationToken,
-        outcome _: GitWorkspaceMutationOutcome
+        outcome: GitWorkspaceMutationOutcome
     ) {
         guard activeMutations.removeValue(forKey: token.id) != nil else { return }
         for key in token.affectedRepositoryKeys {
             var record = records[key] ?? Record()
             record.mutationDepth = max(0, record.mutationDepth - 1)
             records[key] = record
+            updateSynchronousState(repositoryKey: key, record: record)
+            emitInvalidation(
+                repositoryKey: key,
+                record: record,
+                kind: .mutationCompleted(token.kind, outcome)
+            )
         }
     }
 
@@ -427,6 +594,12 @@ actor GitWorkspaceStateAuthority {
             record.monitorCoverageUnavailable = true
         }
         records[repositoryKey] = record
+        updateSynchronousState(repositoryKey: repositoryKey, record: record)
+        emitInvalidation(
+            repositoryKey: repositoryKey,
+            record: record,
+            kind: .metadata(kinds)
+        )
         await removeReusableSnapshotAliases(for: [repositoryKey])
     }
 
@@ -458,6 +631,7 @@ actor GitWorkspaceStateAuthority {
             record.snapshotsByScope.removeAll(keepingCapacity: true)
         }
         records[key] = record
+        updateSynchronousState(repositoryKey: key, record: record)
         return token
     }
 
@@ -488,6 +662,7 @@ actor GitWorkspaceStateAuthority {
         record.invalidationGeneration &+= 1
         record.snapshotsByScope.removeAll(keepingCapacity: true)
         records[lease.repositoryKey] = record
+        updateSynchronousState(repositoryKey: lease.repositoryKey, record: record)
         await removeReusableSnapshotAliases(for: [lease.repositoryKey])
     }
 
@@ -505,7 +680,8 @@ actor GitWorkspaceStateAuthority {
                 authorityGenerations: records.mapValues(\.invalidationGeneration),
                 reusableSnapshotCount: reusableSnapshotsByIdentity.count,
                 reusableSnapshotAliasCount: reusableSnapshotAliasesByScope.count,
-                reusableSnapshotEstimatedBytes: reusableSnapshotEstimatedBytes
+                reusableSnapshotEstimatedBytes: reusableSnapshotEstimatedBytes,
+                invalidationSubscriberCount: invalidationContinuations.count
             )
         }
 
@@ -522,6 +698,39 @@ actor GitWorkspaceStateAuthority {
                 Self.sameCommonDirectory($0, repositoryKey)
             })
         }
+    }
+
+    private func emitInvalidation(
+        repositoryKey: GitWorkspaceAuthorityRepositoryKey,
+        record: Record,
+        kind: GitWorkspaceAuthorityInvalidationKind
+    ) {
+        let event = GitWorkspaceAuthorityInvalidationEvent(
+            repositoryKey: repositoryKey,
+            invalidationGeneration: record.invalidationGeneration,
+            acceptedMetadataWatermark: metadataMonitor.acceptedWatermark(for: repositoryKey),
+            kind: kind
+        )
+        for continuation in invalidationContinuations.values {
+            continuation.yield(event)
+        }
+    }
+
+    private func updateSynchronousState(
+        repositoryKey: GitWorkspaceAuthorityRepositoryKey,
+        record: Record
+    ) {
+        synchronousState.update(
+            repositoryKey: repositoryKey,
+            invalidationGeneration: record.invalidationGeneration,
+            mutationDepth: record.mutationDepth,
+            monitorCoverageUnavailable: record.monitorCoverageUnavailable,
+            publicationGenerations: record.publicationGenerationByScope
+        )
+    }
+
+    private func removeInvalidationContinuation(_ id: UUID) {
+        invalidationContinuations.removeValue(forKey: id)
     }
 
     private nonisolated static func sameCommonDirectory(

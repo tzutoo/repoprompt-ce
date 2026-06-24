@@ -20,6 +20,19 @@ import XCTest
                     serveDiffSeededWorktreeStartup: true
                 )
             )
+
+            let automatic = WorktreeStartupContext(agentSessionID: UUID())
+            XCTAssertEqual(automatic.servingControl, .automatic)
+            let forced = WorktreeStartupContext(
+                agentSessionID: UUID(),
+                flags: .init(
+                    observeDiffSeededWorktreeStartup: true,
+                    serveDiffSeededWorktreeStartup: true
+                ),
+                servingControl: .forceFullCrawl
+            )
+            XCTAssertEqual(forced.servingControl, .forceFullCrawl)
+            XCTAssertTrue(forced.flags.serveDiffSeededWorktreeStartup)
         }
 
         func testNonGitMaterializationCarriesCorrelationUsesFullCrawlAndIssuesZeroGitCommands() async throws {
@@ -117,6 +130,42 @@ import XCTest
             XCTAssertEqual(counters.latestOverlayEntryCount, 4)
             XCTAssertEqual(counters.latestTombstoneCount, 3)
             XCTAssertEqual(snapshot.fallbackCounts[.projectedSearchMismatch], 1)
+        }
+
+        func testSeedCountersAreBoundedPathFreeAndCountFallbackOnce() {
+            WorktreeStartupInstrumentation.resetForTesting()
+            WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: true)
+            WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: false)
+            WorktreeStartupInstrumentation.recordSeedReplay(
+                acceptedPayloadCount: Int.max,
+                acceptedEventCount: 7,
+                initializationWatermarkDelta: 5,
+                serviceSequenceDelta: 4,
+                changedPathCount: 3
+            )
+            WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(used: false)
+            WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(used: true)
+            WorktreeStartupInstrumentation.recordSeedProjectedPreparation(
+                baseEntryCount: 90,
+                overlayEntryCount: 3,
+                tombstoneCount: 2
+            )
+            WorktreeStartupInstrumentation.recordSeedFullCrawlFallback()
+
+            let seed = WorktreeStartupInstrumentation.snapshot().seed
+            XCTAssertEqual(seed.receiptJournalCutPresent, 1)
+            XCTAssertEqual(seed.receiptJournalCutAbsent, 1)
+            XCTAssertEqual(seed.acceptedReplayPayloadCount, 1_000_000)
+            XCTAssertEqual(seed.acceptedReplayEventCount, 7)
+            XCTAssertEqual(seed.latestInitializationWatermarkDelta, 5)
+            XCTAssertEqual(seed.latestServiceSequenceDelta, 4)
+            XCTAssertEqual(seed.latestReplayChangedPathCount, 3)
+            XCTAssertEqual(seed.metadataRevalidationChecks, 2)
+            XCTAssertEqual(seed.metadataRevalidationUses, 1)
+            XCTAssertEqual(seed.latestProjectedBaseEntryCount, 90)
+            XCTAssertEqual(seed.latestProjectedOverlayEntryCount, 3)
+            XCTAssertEqual(seed.latestProjectedTombstoneCount, 2)
+            XCTAssertEqual(seed.fullCrawlFallbackCount, 1)
         }
     }
 #endif

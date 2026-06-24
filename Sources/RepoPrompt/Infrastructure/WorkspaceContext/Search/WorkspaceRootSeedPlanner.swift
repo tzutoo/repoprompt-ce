@@ -1,5 +1,13 @@
 import Foundation
 
+enum WorkspaceRootSeedServingPlanningOutcome: Equatable {
+    case planned(
+        plan: WorkspaceRootSeedPlan,
+        authorityFence: GitWorkspacePendingInitializationAuthorityFence
+    )
+    case fallback(WorkspaceRootSeedFallbackReason)
+}
+
 actor WorkspaceRootSeedPlanner {
     static let shared = WorkspaceRootSeedPlanner()
 
@@ -26,12 +34,45 @@ actor WorkspaceRootSeedPlanner {
         hint: WorkspaceRootMaterializationHint,
         service: FileSystemService
     ) async -> WorkspaceRootSeedPlannerOutcome {
+        let result = await planningResult(
+            hint: hint,
+            service: service,
+            retainFinalAuthorityFence: false
+        )
+        return result.outcome
+    }
+
+    func planForServing(
+        hint: WorkspaceRootMaterializationHint,
+        service: FileSystemService
+    ) async -> WorkspaceRootSeedServingPlanningOutcome {
+        let result = await planningResult(
+            hint: hint,
+            service: service,
+            retainFinalAuthorityFence: true
+        )
+        switch result.outcome {
+        case let .fallback(reason):
+            return .fallback(reason)
+        case let .planned(plan):
+            guard let fence = result.authorityFence else {
+                return .fallback(.authorityUnstable)
+            }
+            return .planned(plan: plan, authorityFence: fence)
+        }
+    }
+
+    private func planningResult(
+        hint: WorkspaceRootMaterializationHint,
+        service: FileSystemService,
+        retainFinalAuthorityFence: Bool
+    ) async -> (outcome: WorkspaceRootSeedPlannerOutcome, authorityFence: GitWorkspacePendingInitializationAuthorityFence?) {
         do {
             try Task.checkCancellation()
             guard let snapshot = await authority.reusableSnapshot(
                 identity: hint.creationReceipt.parentSnapshotIdentity,
                 expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
-            ) else { return .fallback(.baseEvicted) }
+            ) else { return (.fallback(.baseEvicted), nil) }
 
             let receipt = hint.creationReceipt
             let before = try await gitService.generationFencedAuthoritySnapshot(
@@ -40,7 +81,7 @@ actor WorkspaceRootSeedPlanner {
             )
             let targetCompatibility = WorkspaceRootSeedCompatibilityKey(authority: before)
             guard targetCompatibility.isDeltaCompatible(with: snapshot.compatibilityKey) else {
-                return .fallback(.compatibilityMismatch)
+                return (.fallback(.compatibilityMismatch), nil)
             }
 
             let treeDelta = try await gitService.diffTrees(
@@ -74,12 +115,29 @@ actor WorkspaceRootSeedPlanner {
                 limits: limits
             )
 
-            let after = try await gitService.generationFencedAuthoritySnapshot(
-                layout: receipt.targetLayout,
-                prefix: receipt.repositoryRelativeRootPrefix
-            )
-            guard before == after else { return .fallback(.authorityUnstable) }
-            return Self.materialize(
+            let authorityFence: GitWorkspacePendingInitializationAuthorityFence?
+            let after: GitWorkspaceAuthoritySnapshot
+            if retainFinalAuthorityFence {
+                let fence = try await gitService.pendingInitializationAuthorityFence(
+                    layout: receipt.targetLayout,
+                    prefix: receipt.repositoryRelativeRootPrefix
+                )
+                authorityFence = fence
+                after = fence.snapshot
+            } else {
+                authorityFence = nil
+                after = try await gitService.generationFencedAuthoritySnapshot(
+                    layout: receipt.targetLayout,
+                    prefix: receipt.repositoryRelativeRootPrefix
+                )
+            }
+            guard before == after else {
+                if let authorityFence {
+                    await gitService.releasePendingInitializationAuthorityFence(authorityFence)
+                }
+                return (.fallback(.authorityUnstable), nil)
+            }
+            let outcome = Self.materialize(
                 snapshot: snapshot,
                 targetTreeOID: before.treeOID,
                 treeDelta: treeDelta,
@@ -90,37 +148,42 @@ actor WorkspaceRootSeedPlanner {
                 prefix: receipt.repositoryRelativeRootPrefix,
                 limits: limits
             )
+            if case .fallback = outcome, let authorityFence {
+                await gitService.releasePendingInitializationAuthorityFence(authorityFence)
+                return (outcome, nil)
+            }
+            return (outcome, authorityFence)
         } catch is CancellationError {
-            return .fallback(.cancellation)
+            return (.fallback(.cancellation), nil)
         } catch WorkspaceRootSeedVerificationError.limitExceeded {
-            return .fallback(.verificationLimitExceeded)
+            return (.fallback(.verificationLimitExceeded), nil)
         } catch WorkspaceRootSeedVerificationError.invalidPath {
-            return .fallback(.unexplainedFilesystemEntry)
+            return (.fallback(.unexplainedFilesystemEntry), nil)
         } catch WorkspaceRootSeedVerificationError.unsupportedTopology {
-            return .fallback(.submoduleOrNestedRepository)
+            return (.fallback(.submoduleOrNestedRepository), nil)
         } catch let reason as GitWorkspaceAuthorityUnavailableReason {
             switch reason {
             case .mutationInProgress, .metadataEventPending:
-                return .fallback(.authorityChanging)
+                return (.fallback(.authorityChanging), nil)
             case .noSnapshot, .monitorCoverageUnavailable, .superseded,
                  .invalidatedDuringCollection, .collectionScopeMismatch:
-                return .fallback(.authorityUnstable)
+                return (.fallback(.authorityUnstable), nil)
             }
         } catch let error as GitWorktreeInitializationError {
             switch error.reason {
             case .timeout:
-                return .fallback(.gitTimeout)
+                return (.fallback(.gitTimeout), nil)
             case .cappedOutput, .recordLimitExceeded, .pathLimitExceeded:
-                return .fallback(.gitCappedOutput)
+                return (.fallback(.gitCappedOutput), nil)
             case .malformedOutput, .invalidRootPrefix:
-                return .fallback(.gitMalformedOutput)
+                return (.fallback(.gitMalformedOutput), nil)
             case .gitError:
-                return .fallback(.gitError)
+                return (.fallback(.gitError), nil)
             case .cancelled:
-                return .fallback(.cancellation)
+                return (.fallback(.cancellation), nil)
             }
         } catch {
-            return .fallback(.gitError)
+            return (.fallback(.gitError), nil)
         }
     }
 

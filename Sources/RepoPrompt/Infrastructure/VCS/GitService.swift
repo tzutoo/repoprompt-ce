@@ -632,6 +632,94 @@ actor GitService {
         layout: GitRepositoryLayout,
         prefix: GitRepositoryRelativeRootPrefix
     ) async throws -> GitWorkspaceAuthoritySnapshot {
+        let fence = try await pendingInitializationAuthorityFence(
+            layout: layout,
+            prefix: prefix
+        )
+        await workspaceStateAuthority.retireEphemeralAuthorityLease(
+            fence.lease,
+            observationToken: fence.metadataObservationToken
+        )
+        return fence.snapshot
+    }
+
+    /// Captures exact target authority while retaining every metadata path
+    /// (including dynamically resolved external policy files) needed to prove
+    /// the lease current through hidden root preparation and publication.
+    func pendingInitializationAuthorityFence(
+        layout: GitRepositoryLayout,
+        prefix: GitRepositoryRelativeRootPrefix
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        try await capturePendingInitializationAuthorityFence(
+            layout: layout,
+            prefix: prefix,
+            revalidationUsed: false
+        )
+    }
+
+    /// Returns without issuing Git commands while the retained lease is
+    /// current. Once invalidated, all already accepted signals coalesce into
+    /// one generation-fenced recapture. A changed snapshot, an event during
+    /// recapture, or any later invalidation fails closed and releases the
+    /// consumed fence. No timer or polling path exists.
+    func validateOrRevalidatePendingInitializationAuthorityFence(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        switch await workspaceStateAuthority.pendingInitializationFenceDecision(fence) {
+        case .current:
+            return fence
+        case .fallback:
+            await workspaceStateAuthority.releasePendingInitializationAuthorityFence(fence)
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        case let .revalidationRequired(latestAcceptedMetadataWatermark):
+            do {
+                let replacement = try await capturePendingInitializationAuthorityFence(
+                    layout: fence.targetLayout,
+                    prefix: fence.repositoryRelativeRootPrefix,
+                    revalidationUsed: true
+                )
+                guard replacement.snapshot == fence.snapshot,
+                      replacement.acceptedMetadataWatermark >= latestAcceptedMetadataWatermark,
+                      await workspaceStateAuthority.pendingInitializationAuthorityFenceIsCurrent(replacement)
+                else {
+                    await workspaceStateAuthority.releasePendingInitializationAuthorityFence(replacement)
+                    throw GitWorkspaceAuthorityUnavailableReason.superseded
+                }
+                await workspaceStateAuthority.releasePendingInitializationAuthorityFence(fence)
+                return replacement
+            } catch {
+                await workspaceStateAuthority.releasePendingInitializationAuthorityFence(fence)
+                throw error
+            }
+        }
+    }
+
+    func releasePendingInitializationAuthorityFence(
+        _ fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async {
+        await workspaceStateAuthority.releasePendingInitializationAuthorityFence(fence)
+    }
+
+    /// Captures fresh published-root authority after an event-driven
+    /// invalidation. Unlike pending bootstrap's one-shot revalidation budget,
+    /// each completed published mutation receives a new exact fence; callers
+    /// decide whether an unchanged snapshot permits targeted reuse or requires
+    /// one authoritative filesystem reconciliation.
+    func recapturePublishedInitializationAuthorityFence(
+        replacing fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        try await capturePendingInitializationAuthorityFence(
+            layout: fence.targetLayout,
+            prefix: fence.repositoryRelativeRootPrefix,
+            revalidationUsed: false
+        )
+    }
+
+    private func capturePendingInitializationAuthorityFence(
+        layout: GitRepositoryLayout,
+        prefix: GitRepositoryRelativeRootPrefix,
+        revalidationUsed: Bool
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
         let scope = GitWorkspaceAuthorityScopeKey(
             repositoryKey: GitWorkspaceAuthorityRepositoryKey(layout: layout),
             repositoryRelativeRootPrefix: prefix
@@ -687,12 +775,17 @@ actor GitService {
             guard await workspaceStateAuthority.isCurrent(lease) else {
                 throw GitWorkspaceAuthorityUnavailableReason.invalidatedDuringCollection
             }
-            await workspaceStateAuthority.retireEphemeralAuthorityLease(
-                lease,
-                observationToken: observation
-            )
             replacementObservation = nil
-            return lease.snapshot
+            return GitWorkspacePendingInitializationAuthorityFence(
+                snapshot: lease.snapshot,
+                lease: lease,
+                metadataObservationToken: observation,
+                acceptedMetadataWatermark: lease.acceptedMetadataWatermark,
+                targetLayout: layout,
+                repositoryRelativeRootPrefix: prefix,
+                additionalAuthorityPaths: captured.metadata.resolvedExternalAuthorityPaths,
+                revalidationUsed: revalidationUsed
+            )
         } catch {
             if let discoveryObservation {
                 await workspaceStateAuthority.releaseMetadataObservation(discoveryObservation)

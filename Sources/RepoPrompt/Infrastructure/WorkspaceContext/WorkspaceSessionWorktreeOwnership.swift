@@ -78,6 +78,7 @@ struct WorkspaceSessionWorktreeOwnershipPreparation {
         String: WorkspaceRootMaterializationHintObservation
     ]
     let rootSeedShadowPreparations: [WorkspaceRootSeedShadowPreparation]
+    let pendingSeededRootPreparations: [WorkspacePendingSeededRootPreparation]
 
     init(
         token: WorkspaceSessionWorktreeOwnershipToken,
@@ -87,7 +88,8 @@ struct WorkspaceSessionWorktreeOwnershipPreparation {
         materializationHintObservationsByPhysicalRootPath: [
             String: WorkspaceRootMaterializationHintObservation
         ] = [:],
-        rootSeedShadowPreparations: [WorkspaceRootSeedShadowPreparation] = []
+        rootSeedShadowPreparations: [WorkspaceRootSeedShadowPreparation] = [],
+        pendingSeededRootPreparations: [WorkspacePendingSeededRootPreparation] = []
     ) {
         self.token = token
         self.bindingFingerprint = bindingFingerprint
@@ -95,6 +97,7 @@ struct WorkspaceSessionWorktreeOwnershipPreparation {
         self.reusesInstalledOwnership = reusesInstalledOwnership
         self.materializationHintObservationsByPhysicalRootPath = materializationHintObservationsByPhysicalRootPath
         self.rootSeedShadowPreparations = rootSeedShadowPreparations
+        self.pendingSeededRootPreparations = pendingSeededRootPreparations
     }
 }
 

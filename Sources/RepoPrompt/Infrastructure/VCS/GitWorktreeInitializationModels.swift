@@ -126,6 +126,50 @@ struct GitWorkspaceAuthorityLease: Hashable {
     }
 }
 
+/// Ephemeral authority retained while a diff-seeded root is private. Unlike
+/// the immutable 8A authority snapshot, this value owns live metadata
+/// observation and must be released on publication handoff, fallback, abort,
+/// or supersession.
+struct GitWorkspacePendingInitializationAuthorityFence: Equatable {
+    let snapshot: GitWorkspaceAuthoritySnapshot
+    let lease: GitWorkspaceAuthorityLease
+    let metadataObservationToken: GitWorkspaceMetadataMonitor.RetainToken
+    let acceptedMetadataWatermark: UInt64
+    let targetLayout: GitRepositoryLayout
+    let repositoryRelativeRootPrefix: GitRepositoryRelativeRootPrefix
+    let additionalAuthorityPaths: [URL]
+    let revalidationUsed: Bool
+
+    var repositoryKey: GitWorkspaceAuthorityRepositoryKey {
+        lease.repositoryKey
+    }
+}
+
+/// A pending preparation performs no Git work while its retained evidence is
+/// current. Accepted metadata events coalesce into one requested recapture;
+/// instability after that single recapture fails closed.
+enum GitWorkspacePendingAuthorityFenceDecision: Equatable {
+    case current
+    case revalidationRequired(latestAcceptedMetadataWatermark: UInt64)
+    case fallback
+}
+
+enum GitWorkspaceAuthorityInvalidationKind: Equatable {
+    case metadata(Set<GitWorkspaceMetadataEventKind>)
+    case mutationBegan(GitWorkspaceMutationKind)
+    case mutationCompleted(GitWorkspaceMutationKind, GitWorkspaceMutationOutcome)
+}
+
+/// Path-free notification used to trigger targeted authority reconciliation.
+/// It is only a wakeup signal; consumers must prove currentness from a lease
+/// and accepted metadata watermark rather than treating delivery as evidence.
+struct GitWorkspaceAuthorityInvalidationEvent: Equatable {
+    let repositoryKey: GitWorkspaceAuthorityRepositoryKey
+    let invalidationGeneration: UInt64
+    let acceptedMetadataWatermark: UInt64
+    let kind: GitWorkspaceAuthorityInvalidationKind
+}
+
 struct GitWorktreeInitializationContext: Equatable {
     let agentSessionID: UUID
     let correlationID: UUID
@@ -171,6 +215,10 @@ struct GitWorktreeCreationWitnessCoverage: Equatable {
     var provesCreationInterval: Bool {
         streamStartedBeforeMutation
             && streamEndedAfterInitialization
+            && startEventID > 0
+            && endEventID > 0
+            && startEventID != UInt64.max
+            && endEventID != UInt64.max
             && !hadGap
             && !hadDrop
             && !overflowed

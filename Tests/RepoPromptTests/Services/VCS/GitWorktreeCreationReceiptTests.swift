@@ -4,6 +4,28 @@ import Darwin
 import XCTest
 
 final class GitWorktreeCreationReceiptTests: XCTestCase {
+    func testWitnessCoverageRejectsZeroAndSinceNowJournalCuts() {
+        func coverage(start: UInt64, end: UInt64) -> GitWorktreeCreationWitnessCoverage {
+            GitWorktreeCreationWitnessCoverage(
+                startedAtUptimeNanoseconds: 1,
+                endedAtUptimeNanoseconds: 2,
+                startEventID: start,
+                endEventID: end,
+                destinationRelativePaths: [],
+                affectedDestinationRelativeDirectories: [],
+                streamStartedBeforeMutation: true,
+                streamEndedAfterInitialization: true,
+                hadGap: false,
+                hadDrop: false,
+                overflowed: false
+            )
+        }
+
+        XCTAssertFalse(coverage(start: 0, end: 0).provesCreationInterval)
+        XCTAssertFalse(coverage(start: UInt64.max, end: UInt64.max).provesCreationInterval)
+        XCTAssertTrue(coverage(start: 10, end: 11).provesCreationInterval)
+    }
+
     func testSubdirectoryReceiptPlansOnlyCorrespondingPhysicalRoot() async throws {
         let fixture = try ReceiptFixture()
         defer { fixture.cleanup() }

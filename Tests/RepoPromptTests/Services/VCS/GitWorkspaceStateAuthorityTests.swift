@@ -122,6 +122,115 @@ final class GitWorkspaceStateAuthorityTests: XCTestCase {
         await authority.releaseMetadataObservation(observation)
     }
 
+    func testPendingFenceUsesAcceptedWatermarkAndAllowsOnlyOneCoalescedRevalidation() async throws {
+        let fixture = try GitAuthorityFixture()
+        defer { fixture.cleanup() }
+        let monitor = GitWorkspaceMetadataMonitor()
+        let authority = GitWorkspaceStateAuthority(metadataMonitor: monitor)
+        let observation = try await authority.retainMetadataObservation(for: fixture.layout)
+        let snapshot = try fixture.snapshot()
+        let lease = try await authority.install(snapshot)
+        let fence = GitWorkspacePendingInitializationAuthorityFence(
+            snapshot: snapshot,
+            lease: lease,
+            metadataObservationToken: observation,
+            acceptedMetadataWatermark: lease.acceptedMetadataWatermark,
+            targetLayout: fixture.layout,
+            repositoryRelativeRootPrefix: snapshot.repositoryRelativeRootPrefix,
+            additionalAuthorityPaths: [],
+            revalidationUsed: false
+        )
+
+        let initialDecision = await authority.pendingInitializationFenceDecision(fence)
+        XCTAssertEqual(initialDecision, .current)
+
+        await monitor.injectAcceptedEventForTesting(repositoryKey: fixture.key, kinds: [.head])
+        await monitor.injectAcceptedEventForTesting(repositoryKey: fixture.key, kinds: [.index])
+        let latestAcceptedWatermark = monitor.acceptedWatermark(for: fixture.key)
+        XCTAssertEqual(latestAcceptedWatermark, lease.acceptedMetadataWatermark + 2)
+        let currentAfterAcceptedEvents = await authority.pendingInitializationAuthorityFenceIsCurrent(fence)
+        XCTAssertFalse(currentAfterAcceptedEvents)
+        XCTAssertFalse(authority.pendingInitializationAuthorityFenceIsSynchronouslyCurrent(fence))
+        XCTAssertNil(authority.withPendingInitializationAuthorityPublicationPermit([fence]) { true })
+
+        let decision = await authority.pendingInitializationFenceDecision(fence)
+        XCTAssertEqual(
+            decision,
+            .revalidationRequired(latestAcceptedMetadataWatermark: latestAcceptedWatermark)
+        )
+
+        let alreadyRevalidated = GitWorkspacePendingInitializationAuthorityFence(
+            snapshot: fence.snapshot,
+            lease: fence.lease,
+            metadataObservationToken: fence.metadataObservationToken,
+            acceptedMetadataWatermark: fence.acceptedMetadataWatermark,
+            targetLayout: fence.targetLayout,
+            repositoryRelativeRootPrefix: fence.repositoryRelativeRootPrefix,
+            additionalAuthorityPaths: fence.additionalAuthorityPaths,
+            revalidationUsed: true
+        )
+        let repeatedDecision = await authority.pendingInitializationFenceDecision(alreadyRevalidated)
+        XCTAssertEqual(repeatedDecision, .fallback)
+        let monitorSnapshot = await monitor.snapshotForTesting()
+        XCTAssertEqual(monitorSnapshot.pollingCommandCount, 0)
+        await authority.releasePendingInitializationAuthorityFence(fence)
+    }
+
+    func testSynchronousPublicationPermitRejectsMutationBeginWithoutWaitingForEventDelivery() async throws {
+        let fixture = try GitAuthorityFixture()
+        defer { fixture.cleanup() }
+        let monitor = GitWorkspaceMetadataMonitor()
+        let authority = GitWorkspaceStateAuthority(metadataMonitor: monitor)
+        let observation = try await authority.retainMetadataObservation(for: fixture.layout)
+        let snapshot = try fixture.snapshot()
+        let lease = try await authority.install(snapshot)
+        let fence = GitWorkspacePendingInitializationAuthorityFence(
+            snapshot: snapshot,
+            lease: lease,
+            metadataObservationToken: observation,
+            acceptedMetadataWatermark: lease.acceptedMetadataWatermark,
+            targetLayout: fixture.layout,
+            repositoryRelativeRootPrefix: snapshot.repositoryRelativeRootPrefix,
+            additionalAuthorityPaths: [],
+            revalidationUsed: false
+        )
+
+        XCTAssertTrue(authority.pendingInitializationAuthorityFenceIsSynchronouslyCurrent(fence))
+        XCTAssertEqual(
+            authority.withPendingInitializationAuthorityPublicationPermit([fence]) { true },
+            true
+        )
+        let mutation = await authority.beginMutation(repositoryKey: fixture.key, kind: .branchSwitch)
+        XCTAssertFalse(authority.pendingInitializationAuthorityFenceIsSynchronouslyCurrent(fence))
+        XCTAssertNil(authority.withPendingInitializationAuthorityPublicationPermit([fence]) { true })
+        await authority.finishMutation(mutation, outcome: .succeeded)
+        await authority.releasePendingInitializationAuthorityFence(fence)
+    }
+
+    func testInvalidationStreamEmitsPathFreeMutationAndMetadataWakeups() async throws {
+        let fixture = try GitAuthorityFixture()
+        defer { fixture.cleanup() }
+        let authority = GitWorkspaceStateAuthority()
+        let events = await authority.invalidationEvents()
+        var iterator = events.makeAsyncIterator()
+
+        let mutation = await authority.beginMutation(
+            repositoryKey: fixture.key,
+            kind: .branchSwitch
+        )
+        await authority.finishMutation(mutation, outcome: .succeeded)
+        await authority.metadataDidChange(repositoryKey: fixture.key, kinds: [.monitorGap])
+
+        let began = await iterator.next()
+        let completed = await iterator.next()
+        let metadata = await iterator.next()
+        XCTAssertEqual(began?.repositoryKey, fixture.key)
+        XCTAssertEqual(began?.kind, .mutationBegan(.branchSwitch))
+        XCTAssertEqual(completed?.kind, .mutationCompleted(.branchSwitch, .succeeded))
+        XCTAssertEqual(metadata?.kind, .metadata([.monitorGap]))
+        XCTAssertEqual(metadata?.acceptedMetadataWatermark, 0)
+    }
+
     func testMonitorRetainsAreAdditiveTransactionalAndExternalAuthorityUsesRealEvents() async throws {
         let fixture = try GitAuthorityFixture()
         defer { fixture.cleanup() }

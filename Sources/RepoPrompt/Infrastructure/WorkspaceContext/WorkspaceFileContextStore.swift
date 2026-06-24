@@ -176,6 +176,49 @@ actor WorkspaceFileContextStore {
         var childFileIDsByFolderID: [UUID: [UUID]]
     }
 
+    private struct PendingSeededRoot {
+        let id: WorkspacePendingSeededRootID
+        let token: WorkspaceSessionWorktreeOwnershipToken
+        let bindingFingerprint: String
+        let standardizedPath: String
+        let initializationID: FileSystemSeedInitializationID
+        let loadConfiguration: RootLoadConfiguration
+        let startupContext: WorktreeStartupContext
+        var phase: WorkspacePendingSeededRootPhase
+        var state: RootState
+        var indexes: RootIndexBuffers
+        var captureIdentity: FileSystemSeedCaptureIdentity?
+        var authorityFence: GitWorkspacePendingInitializationAuthorityFence?
+        var authorityInvalidationGeneration: UInt64
+        var authorityAcceptedMetadataWatermark: UInt64
+        var authorityMutationDepth: Int
+        var snapshot: WorkspaceRootReusableSnapshot?
+        var effectivePlan: WorkspaceRootSeedPlan?
+        var attachment: WatcherPublisherAttachment?
+        var preparedShard: RootCatalogShard?
+        var lastAppliedServicePublicationSequence: UInt64
+        var lastAppliedWatcherWatermark: FileSystemWatcherIngressMailbox.Watermark
+        var replayChangedRelativePaths: Set<String>
+        var activationProof: FileSystemSeedPublicationActivationProof?
+        var terminalFallbackReason: WorkspaceRootSeedFallbackReason?
+    }
+
+    private struct PublishedSeededAuthorityState {
+        var epoch: UInt64
+        var pendingInvalidationGeneration: UInt64?
+        var pendingAcceptedMetadataWatermark: UInt64
+        var activeMutationDepth: Int
+        var isBlocked: Bool
+        var isReconciling: Bool
+        var reconciliationFailed: Bool
+        var fullCrawlAttemptedGeneration: UInt64?
+    }
+
+    private enum PendingSeededRootAttempt {
+        case prepared(WorkspacePendingSeededRootPreparation)
+        case fallback(WorkspaceRootSeedFallbackReason)
+    }
+
     private struct CodemapRootAuthority: Equatable {
         let rootEpoch: WorkspaceCodemapRootEpoch
         let standardizedRootPath: String
@@ -384,6 +427,7 @@ actor WorkspaceFileContextStore {
     private struct SessionWorktreeOwnershipRecord {
         let bindingFingerprint: String
         let roots: [WorkspaceSessionWorktreeOwnedRoot]
+        let pendingSeededRootIDs: [WorkspacePendingSeededRootID]
     }
 
     private struct SessionWorktreeReservedLoadFlight {
@@ -394,10 +438,12 @@ actor WorkspaceFileContextStore {
     private struct SessionWorktreeOwnershipRemoval {
         var ownedRoots: [WorkspaceSessionWorktreeOwnedRoot] = []
         var reservedLoadFlights: [SessionWorktreeReservedLoadFlight] = []
+        var pendingSeededRootIDs: [WorkspacePendingSeededRootID] = []
 
         mutating func append(_ other: SessionWorktreeOwnershipRemoval) {
             ownedRoots.append(contentsOf: other.ownedRoots)
             reservedLoadFlights.append(contentsOf: other.reservedLoadFlights)
+            pendingSeededRootIDs.append(contentsOf: other.pendingSeededRootIDs)
         }
     }
 
@@ -797,6 +843,16 @@ actor WorkspaceFileContextStore {
             let rootCatalogShards: RootCatalogShardDebugSnapshot
         }
 
+        struct PublishedSeededAuthorityDebugSnapshot: Equatable {
+            let epoch: UInt64
+            let isBlocked: Bool
+            let activeMutationDepth: Int
+            let isReconciling: Bool
+            let reconciliationFailed: Bool
+            let waiterCount: Int
+            let fullCrawlCount: Int
+        }
+
         struct ReadSearchRootDiagnosticsSnapshot: Equatable {
             let rootID: UUID
             let rootToken: UUID
@@ -869,6 +925,11 @@ actor WorkspaceFileContextStore {
         private var appliedIngressDidCaptureWatermarksHandler: (@Sendable ([UUID: UInt64]) async -> Void)?
         private var scopedIngressBarrierWillFlushHandler: (@Sendable (UUID) async -> Void)?
         private var watcherActivationFailurePointForNewServicesForTesting: FileSystemService.WatcherActivationFailurePoint?
+        private var seededShardPreparationShouldFailForTesting = false
+        private var pendingSeededRootDidBecomeReadyHandler: (@Sendable (String) async -> Void)?
+        private var pendingSeededRootDidActivateHandler: (@Sendable (String) async -> Void)?
+        private var seededPublicationActivationShouldFailForTesting = false
+        private var publishedSeededAuthorityFullCrawlCountsByRootID: [UUID: Int] = [:]
         private var scopedIngressBarrierLaunchCountsByRootID: [UUID: Int] = [:]
         private var scopedIngressBarrierJoinCountsByRootID: [UUID: Int] = [:]
         private var scopedIngressBarrierSuccessorCountsByRootID: [UUID: Int] = [:]
@@ -989,6 +1050,72 @@ actor WorkspaceFileContextStore {
             _ failurePoint: FileSystemService.WatcherActivationFailurePoint?
         ) {
             watcherActivationFailurePointForNewServicesForTesting = failurePoint
+        }
+
+        func setSeededShardPreparationFailureForTesting(_ enabled: Bool) {
+            seededShardPreparationShouldFailForTesting = enabled
+        }
+
+        func setPendingSeededRootDidBecomeReadyHandler(
+            _ handler: (@Sendable (String) async -> Void)?
+        ) {
+            pendingSeededRootDidBecomeReadyHandler = handler
+        }
+
+        func setPendingSeededRootDidActivateHandler(
+            _ handler: (@Sendable (String) async -> Void)?
+        ) {
+            pendingSeededRootDidActivateHandler = handler
+        }
+
+        func setSeededPublicationActivationFailureForTesting(_ shouldFail: Bool) {
+            seededPublicationActivationShouldFailForTesting = shouldFail
+        }
+
+        func handleSeededAuthorityInvalidationForTesting(
+            _ event: GitWorkspaceAuthorityInvalidationEvent
+        ) {
+            handleSeededAuthorityInvalidation(event)
+        }
+
+        func publishedSeededAuthoritySnapshotForTesting(
+            rootID: UUID
+        ) -> PublishedSeededAuthorityDebugSnapshot? {
+            guard let state = publishedSeededAuthorityStatesByRootID[rootID] else { return nil }
+            return PublishedSeededAuthorityDebugSnapshot(
+                epoch: state.epoch,
+                isBlocked: state.isBlocked,
+                activeMutationDepth: state.activeMutationDepth,
+                isReconciling: state.isReconciling,
+                reconciliationFailed: state.reconciliationFailed,
+                waiterCount: publishedSeededAuthorityWaitersByRootID[rootID]?.count ?? 0,
+                fullCrawlCount: publishedSeededAuthorityFullCrawlCountsByRootID[rootID] ?? 0
+            )
+        }
+
+        func publishedSeededAuthorityIsCurrentForTesting(rootID: UUID) -> Bool {
+            publishedSeededAuthorityIsQueryable(rootID: rootID)
+        }
+
+        func waitForPublishedSeededAuthorityReconciliationForTesting(rootID: UUID) async {
+            while let task = seededAuthorityReconciliationTasksByRootID[rootID] {
+                await task.value
+            }
+        }
+
+        func waitForPublishedSeededAuthorityWaiterForTesting(rootID: UUID) async {
+            while publishedSeededAuthorityWaitersByRootID[rootID]?.isEmpty != false {
+                await Task.yield()
+            }
+        }
+
+        func waitForPublishedSeededAuthorityMutationDepthForTesting(
+            rootID: UUID,
+            atLeast expectedDepth: Int
+        ) async {
+            while (publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth ?? 0) < expectedDepth {
+                await Task.yield()
+            }
         }
 
         func scopedIngressBarrierStatsForTesting(rootID: UUID) -> ScopedIngressBarrierStats {
@@ -1624,6 +1751,7 @@ actor WorkspaceFileContextStore {
     private let rootMaterializationHintEvaluator = WorkspaceRootMaterializationHintEvaluator.shared
     private let rootSeedPlanner = WorkspaceRootSeedPlanner.shared
     private let workspaceStateAuthority = GitWorkspaceStateAuthority.shared
+    private let worktreeSeedGitService = GitService()
     private let searchDecodedContentCache = WorkspaceSearchDecodedContentCache()
     private let interactiveReadCache = WorkspaceInteractiveReadCache()
     private let searchContentSchedulerOwnerID = UUID()
@@ -1700,6 +1828,19 @@ actor WorkspaceFileContextStore {
     private var sessionWorktreeReservationTokensByStandardizedPath: [String: Set<WorkspaceSessionWorktreeOwnershipToken>] = [:]
     private var sessionWorktreeReservedPathsByToken: [WorkspaceSessionWorktreeOwnershipToken: Set<String>] = [:]
     private var sessionWorktreeReservationLoadFlightsByToken: [WorkspaceSessionWorktreeOwnershipToken: [String: RootLoadFlight]] = [:]
+    private var pendingSeededRootsByID: [WorkspacePendingSeededRootID: PendingSeededRoot] = [:]
+    private var pendingSeededRootIDsByStandardizedPath: [String: WorkspacePendingSeededRootID] = [:]
+    private var pendingSeededRootVisibilityWaitersByPath: [
+        String: [UUID: CheckedContinuation<Void, Error>]
+    ] = [:]
+    private var seededAuthorityInvalidationListenerTask: Task<Void, Never>?
+    private var publishedSeededAuthorityFencesByRootID: [UUID: GitWorkspacePendingInitializationAuthorityFence] = [:]
+    private var publishedSeededAuthorityStatesByRootID: [UUID: PublishedSeededAuthorityState] = [:]
+    private var publishedSeededAuthorityWaitersByRootID: [
+        UUID: [UUID: CheckedContinuation<Void, Error>]
+    ] = [:]
+    private var seededAuthorityPendingGenerationByRootID: [UUID: UInt64] = [:]
+    private var seededAuthorityReconciliationTasksByRootID: [UUID: Task<Void, Never>] = [:]
     private let publisherIngressCoordinator: WorkspaceFileSystemIngressCoordinator
     private let unloadTerminationPolicy: WorkspaceRootUnloadTerminationPolicy
     private var scopedIngressBarrierFlightStatesByRootID: [UUID: ScopedIngressBarrierRootFlightState] = [:]
@@ -2108,6 +2249,111 @@ actor WorkspaceFileContextStore {
         return subscription
     }
 
+    /// Opens canonical publisher ingress before subscribing to the hidden
+    /// service, preserving the same sink-boundary ordering as published roots.
+    private func attachPendingSeededRootPublisherIngress(
+        pendingID: WorkspacePendingSeededRootID
+    ) async throws -> WatcherPublisherAttachment {
+        guard let pending = pendingSeededRootsByID[pendingID] else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        let rootID = pending.state.root.id
+        let lifetimeID = pending.state.lifetimeID
+        let coordinator = publisherIngressCoordinator
+        let subscription = coordinator.openPublisherIngress(rootID: rootID) { [weak self] publication, _ in
+            await self?.handlePendingSeededRootPublication(
+                publication,
+                pendingID: pendingID,
+                expectedRootID: rootID,
+                expectedLifetimeID: lifetimeID
+            )
+        }
+        let publisher = await pending.state.service.publisherForChanges()
+        guard let current = pendingSeededRootsByID[pendingID],
+              current.state.root.id == rootID,
+              current.state.lifetimeID == lifetimeID,
+              coordinator.isPublisherIngressOpen(subscription)
+        else {
+            coordinator.closePublisherIngress(subscription)
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        let cancellable = publisher.sink { publication in
+            coordinator.accept(
+                subscription,
+                publication: publication,
+                lifecycleCorrelation: nil
+            )
+        }
+        guard let current = pendingSeededRootsByID[pendingID],
+              current.state.root.id == rootID,
+              current.state.lifetimeID == lifetimeID,
+              coordinator.isPublisherIngressOpen(subscription)
+        else {
+            cancellable.cancel()
+            coordinator.closePublisherIngress(subscription)
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        return WatcherPublisherAttachment(subscription: subscription, cancellable: cancellable)
+    }
+
+    private func handlePendingSeededRootPublication(
+        _ publication: FileSystemDeltaPublication,
+        pendingID: WorkspacePendingSeededRootID,
+        expectedRootID: UUID,
+        expectedLifetimeID: UUID
+    ) {
+        guard var pending = pendingSeededRootsByID[pendingID],
+              pending.state.root.id == expectedRootID,
+              pending.state.lifetimeID == expectedLifetimeID,
+              pending.terminalFallbackReason == nil
+        else { return }
+
+        guard case .replaying = pending.phase else {
+            if pending.phase == .readyForCommit {
+                pending.terminalFallbackReason = .serviceIngressGenerationChanged
+                pendingSeededRootsByID[pendingID] = pending
+            }
+            return
+        }
+
+        let expectedSequence = pending.lastAppliedServicePublicationSequence &+ 1
+        guard publication.servicePublicationSequence == expectedSequence else {
+            pending.terminalFallbackReason = .pendingIngressSequenceGap
+            pendingSeededRootsByID[pendingID] = pending
+            return
+        }
+        guard !publication.requiresFullResync,
+              publication.source == .watcher || publication.source == .watcherBarrierNoop
+        else {
+            pending.terminalFallbackReason = switch publication.source {
+            case .overflowRootRescan: .watcherOverflow
+            case .recoveryFullResync: .watcherRecoveryUncertain
+            case .watcher, .watcherBarrierNoop, .syntheticMutation: .watcherDrop
+            }
+            pendingSeededRootsByID[pendingID] = pending
+            return
+        }
+
+        pending.lastAppliedServicePublicationSequence = publication.servicePublicationSequence
+        if let watermark = publication.watcherAcceptedWatermark {
+            guard watermark >= pending.lastAppliedWatcherWatermark else {
+                pending.terminalFallbackReason = .pendingIngressSequenceGap
+                pendingSeededRootsByID[pendingID] = pending
+                return
+            }
+            pending.lastAppliedWatcherWatermark = watermark
+        }
+        pending.replayChangedRelativePaths.formUnion(publication.deltas.map { delta in
+            switch delta {
+            case let .fileAdded(path), let .fileRemoved(path), let .folderAdded(path), let .folderRemoved(path):
+                StandardizedPath.relative(path)
+            case let .fileModified(path, _), let .folderModified(path, _):
+                StandardizedPath.relative(path)
+            }
+        })
+        pendingSeededRootsByID[pendingID] = pending
+    }
+
     private func removeWatcherPublisherAttachment(
         key: WatcherInfrastructureKey,
         subscription: WorkspaceFileSystemIngressCoordinator.Subscription
@@ -2142,6 +2388,849 @@ actor WorkspaceFileContextStore {
 
     func nextSessionWorktreeOwnershipGeneration(ownerID: UUID) -> UInt64 {
         (latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] ?? 0) &+ 1
+    }
+
+    private func pendingSeededRootIsCurrent(
+        _ pendingID: WorkspacePendingSeededRootID,
+        token: WorkspaceSessionWorktreeOwnershipToken,
+        standardizedPath: String,
+        expectedPhase: WorkspacePendingSeededRootPhase? = nil
+    ) -> Bool {
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[token.ownerID] == token.generation,
+              let record = sessionWorktreeOwnershipRecordsByToken[token],
+              record.pendingSeededRootIDs.contains(pendingID),
+              sessionWorktreeReservedPathsByToken[token]?.contains(standardizedPath) == true,
+              pendingSeededRootIDsByStandardizedPath[standardizedPath] == pendingID,
+              let pending = pendingSeededRootsByID[pendingID],
+              pending.token == token,
+              pending.standardizedPath == standardizedPath
+        else { return false }
+        return expectedPhase == nil || pending.phase == expectedPhase
+    }
+
+    private func requirePendingSeededRootCurrent(
+        _ pendingID: WorkspacePendingSeededRootID,
+        token: WorkspaceSessionWorktreeOwnershipToken,
+        standardizedPath: String,
+        expectedPhase: WorkspacePendingSeededRootPhase? = nil
+    ) throws {
+        guard pendingSeededRootIsCurrent(
+            pendingID,
+            token: token,
+            standardizedPath: standardizedPath,
+            expectedPhase: expectedPhase
+        ) else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+    }
+
+    private func installValidatedPendingAuthorityFence(
+        _ candidate: GitWorkspacePendingInitializationAuthorityFence,
+        pendingID: WorkspacePendingSeededRootID,
+        token: WorkspaceSessionWorktreeOwnershipToken,
+        standardizedPath: String,
+        expectedPhase: WorkspacePendingSeededRootPhase
+    ) async throws {
+        guard await workspaceStateAuthority.pendingInitializationAuthorityFenceIsCurrent(candidate) else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        try requirePendingSeededRootCurrent(
+            pendingID,
+            token: token,
+            standardizedPath: standardizedPath,
+            expectedPhase: expectedPhase
+        )
+        guard workspaceStateAuthority
+            .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(candidate),
+            var pending = pendingSeededRootsByID[pendingID],
+            pending.authorityInvalidationGeneration <= candidate.lease.invalidationGeneration,
+            pending.authorityAcceptedMetadataWatermark <= candidate.acceptedMetadataWatermark,
+            pending.authorityMutationDepth == 0,
+            pending.terminalFallbackReason == nil
+        else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        pending.authorityFence = candidate
+        pending.authorityInvalidationGeneration = candidate.lease.invalidationGeneration
+        pending.authorityAcceptedMetadataWatermark = candidate.acceptedMetadataWatermark
+        pendingSeededRootsByID[pendingID] = pending
+    }
+
+    private func preparePendingSeededRoot(
+        token: WorkspaceSessionWorktreeOwnershipToken,
+        bindingFingerprint: String,
+        standardizedPath: String,
+        hint: WorkspaceRootMaterializationHint,
+        startupContext: WorktreeStartupContext
+    ) async throws -> PendingSeededRootAttempt {
+        guard hint.creationReceipt.witnessCoverage.endEventID > 0 else {
+            WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: false)
+            return .fallback(.witnessGap)
+        }
+        WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: true)
+        try Task.checkCancellation()
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[token.ownerID] == token.generation,
+              sessionWorktreeReservedPathsByToken[token]?.contains(standardizedPath) == true,
+              pendingSeededRootIDsByStandardizedPath[standardizedPath] == nil,
+              rootIDsByStandardizedPath[standardizedPath] == nil
+        else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+
+        let service: FileSystemService
+        do {
+            service = try await FileSystemService(
+                path: standardizedPath,
+                respectRepoIgnore: true,
+                respectCursorignore: true,
+                skipSymlinks: true,
+                enableHierarchicalIgnores: true
+            )
+        } catch {
+            return .fallback(.watcherActivationFailure)
+        }
+        try Task.checkCancellation()
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[token.ownerID] == token.generation,
+              sessionWorktreeReservedPathsByToken[token]?.contains(standardizedPath) == true
+        else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+        #if DEBUG
+            if let watcherActivationFailurePointForNewServicesForTesting {
+                await service.setWatcherActivationFailureForTesting(
+                    watcherActivationFailurePointForNewServicesForTesting
+                )
+            }
+            await service.setSeededPublicationActivationFailureForTesting(
+                seededPublicationActivationShouldFailForTesting
+            )
+        #endif
+
+        let topology = makePendingSeededRootTopology(
+            standardizedPath: standardizedPath,
+            service: service,
+            relativeFilePaths: [],
+            relativeFolderPaths: []
+        )
+        let pendingID = WorkspacePendingSeededRootID()
+        let initializationID = FileSystemSeedInitializationID()
+        let loadConfiguration = RootLoadConfiguration(
+            kind: .sessionWorktree,
+            gitignorePolicyIdentity: .current,
+            respectRepoIgnore: true,
+            respectCursorignore: true,
+            skipSymlinks: true,
+            enableHierarchicalIgnores: true
+        )
+        pendingSeededRootsByID[pendingID] = PendingSeededRoot(
+            id: pendingID,
+            token: token,
+            bindingFingerprint: bindingFingerprint,
+            standardizedPath: standardizedPath,
+            initializationID: initializationID,
+            loadConfiguration: loadConfiguration,
+            startupContext: startupContext,
+            phase: .reserved,
+            state: topology.state,
+            indexes: topology.indexes,
+            captureIdentity: nil,
+            authorityFence: nil,
+            authorityInvalidationGeneration: 0,
+            authorityAcceptedMetadataWatermark: 0,
+            authorityMutationDepth: 0,
+            snapshot: nil,
+            effectivePlan: nil,
+            attachment: nil,
+            preparedShard: nil,
+            lastAppliedServicePublicationSequence: 0,
+            lastAppliedWatcherWatermark: .zero,
+            replayChangedRelativePaths: [],
+            activationProof: nil,
+            terminalFallbackReason: nil
+        )
+        pendingSeededRootIDsByStandardizedPath[standardizedPath] = pendingID
+        try registerPendingSessionWorktreeRoot(
+            pendingID,
+            standardizedPath: standardizedPath,
+            token: token,
+            bindingFingerprint: bindingFingerprint
+        )
+
+        do {
+            let attachment = try await attachPendingSeededRootPublisherIngress(pendingID: pendingID)
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .reserved
+            )
+            pendingSeededRootsByID[pendingID]?.attachment = attachment
+
+            await ensureSeededAuthorityInvalidationListener()
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .reserved
+            )
+
+            let journalCut = FileSystemSeedReplayJournalCut(
+                fseventID: FSEventStreamEventId(hint.creationReceipt.witnessCoverage.endEventID)
+            )
+            let capture = try await service.startWatchingForSeedPreparation(
+                since: journalCut,
+                initializationID: initializationID
+            )
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .reserved
+            )
+            pendingSeededRootsByID[pendingID]?.captureIdentity = capture
+            pendingSeededRootsByID[pendingID]?.lastAppliedWatcherWatermark = capture.initialAcceptedWatermark
+            pendingSeededRootsByID[pendingID]?.phase = .watcherCapturing
+            WorktreeStartupInstrumentation.record(
+                .seedWatcherAttached,
+                context: startupContext,
+                route: .diffSeedServing
+            )
+
+            pendingSeededRootsByID[pendingID]?.phase = .planning
+            let planningOutcome = await rootSeedPlanner.planForServing(hint: hint, service: service)
+            try Task.checkCancellation()
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .planning
+            )
+            let plan: WorkspaceRootSeedPlan
+            let authorityFence: GitWorkspacePendingInitializationAuthorityFence
+            switch planningOutcome {
+            case let .fallback(reason):
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: reason,
+                    startupContext: startupContext
+                )
+                return .fallback(reason)
+            case let .planned(planned, fence):
+                plan = planned
+                authorityFence = fence
+                try await installValidatedPendingAuthorityFence(
+                    fence,
+                    pendingID: pendingID,
+                    token: token,
+                    standardizedPath: standardizedPath,
+                    expectedPhase: .planning
+                )
+            }
+
+            guard let snapshot = await workspaceStateAuthority.reusableSnapshot(
+                identity: plan.snapshotIdentity,
+                expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
+            ) else {
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: .baseEvicted,
+                    startupContext: startupContext
+                )
+                return .fallback(.baseEvicted)
+            }
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .planning
+            )
+            pendingSeededRootsByID[pendingID]?.snapshot = snapshot
+            pendingSeededRootsByID[pendingID]?.effectivePlan = plan
+
+            let inventory = try await service.prepareSeededInventory(
+                plan: plan,
+                initializationID: initializationID
+            )
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .planning
+            )
+            try await service.installSeededInventory(inventory)
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .planning
+            )
+            pendingSeededRootsByID[pendingID]?.phase = .seedInstalled
+
+            let replayCut = try await service.captureSeedReplayAcceptedWatermark(
+                initializationID: initializationID
+            )
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .seedInstalled
+            )
+            pendingSeededRootsByID[pendingID]?.phase = .replaying(replayCut)
+            let replay = try await service.flushSeedReplay(
+                through: replayCut,
+                initializationID: initializationID
+            )
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .replaying(replayCut)
+            )
+            await publisherIngressCoordinator.waitUntilApplied(
+                rootID: topology.state.root.id,
+                servicePublicationSequence: replay.finalServicePublicationSequence
+            )
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .replaying(replayCut)
+            )
+            guard let reconciled = pendingSeededRootsByID[pendingID],
+                  reconciled.terminalFallbackReason == nil,
+                  reconciled.lastAppliedServicePublicationSequence == replay.finalServicePublicationSequence,
+                  reconciled.lastAppliedWatcherWatermark >= replay.requestedAcceptedWatermark,
+                  reconciled.replayChangedRelativePaths == replay.changedRelativePaths
+            else {
+                let reason = pendingSeededRootsByID[pendingID]?.terminalFallbackReason
+                    ?? .pendingIngressSequenceGap
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: reason,
+                    startupContext: startupContext
+                )
+                return .fallback(reason)
+            }
+            guard !replay.ignoreControlPathsChanged else {
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: .changedIgnoreAuthority,
+                    startupContext: startupContext
+                )
+                return .fallback(.changedIgnoreAuthority)
+            }
+            WorktreeStartupInstrumentation.record(
+                .seedReplayFenced,
+                context: startupContext,
+                route: .diffSeedServing
+            )
+            WorktreeStartupInstrumentation.recordSeedReplay(
+                acceptedPayloadCount: replay.acceptedPayloadCount,
+                acceptedEventCount: replay.acceptedEventCount,
+                initializationWatermarkDelta: Int(
+                    replay.requestedAcceptedWatermark.rawValue
+                        &- capture.initialAcceptedWatermark.rawValue
+                ),
+                serviceSequenceDelta: Int(replay.finalServicePublicationSequence),
+                changedPathCount: replay.changedRelativePaths.count
+            )
+
+            let validatedFence = try await worktreeSeedGitService
+                .validateOrRevalidatePendingInitializationAuthorityFence(authorityFence)
+            try await installValidatedPendingAuthorityFence(
+                validatedFence,
+                pendingID: pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .replaying(replayCut)
+            )
+            WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(
+                used: validatedFence.revalidationUsed
+            )
+
+            let replayChanged = plan.changedRelativeFilePaths
+                .union(replay.changedRelativePaths)
+                .union(plan.baseRelativeFilePaths.subtracting(replay.relativeFilePaths))
+            guard replayChanged.count < WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount else {
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: .overlayThresholdExceeded,
+                    startupContext: startupContext
+                )
+                return .fallback(.overlayThresholdExceeded)
+            }
+            let effectivePlan = WorkspaceRootSeedPlan(
+                snapshotIdentity: plan.snapshotIdentity,
+                targetTreeOID: plan.targetTreeOID,
+                relativeFilePaths: replay.relativeFilePaths,
+                relativeFolderPaths: replay.relativeFolderPaths,
+                baseRelativeFilePaths: plan.baseRelativeFilePaths,
+                changedRelativeFilePaths: replayChanged,
+                tombstonedBaseRelativeFilePaths: plan.baseRelativeFilePaths.subtracting(replay.relativeFilePaths),
+                verifiedPathCount: plan.verifiedPathCount
+            )
+            pendingSeededRootsByID[pendingID]?.phase = .preparingShard
+            let finalTopology = makePendingSeededRootTopology(
+                standardizedPath: standardizedPath,
+                service: service,
+                relativeFilePaths: replay.relativeFilePaths,
+                relativeFolderPaths: replay.relativeFolderPaths,
+                root: topology.state.root,
+                lifetimeID: topology.state.lifetimeID
+            )
+            let components = buildPendingCatalogComponents(
+                root: finalTopology.state.root,
+                indexes: finalTopology.indexes
+            )
+            let key = RootCatalogShardKey(
+                canonicalConfigurationIdentity: RootCatalogCanonicalConfigurationIdentity(
+                    canonicalPath: standardizedPath,
+                    loadConfiguration: loadConfiguration
+                ),
+                rootID: finalTopology.state.root.id,
+                lifetimeID: finalTopology.state.lifetimeID,
+                // The atomic root publication performs exactly one catalog
+                // invalidation after installing the private shard.
+                topologyGeneration: 1
+            )
+            let indexIdentity = WorkspaceSearchRootPathIndexIdentity(
+                rootID: key.rootID,
+                lifetimeID: key.lifetimeID,
+                topologyGeneration: key.topologyGeneration
+            )
+            #if DEBUG
+                if seededShardPreparationShouldFailForTesting {
+                    await fallBackPendingSeededRoot(
+                        pendingID,
+                        reason: .seededShardPreparationFailure,
+                        startupContext: startupContext
+                    )
+                    return .fallback(.seededShardPreparationFailure)
+                }
+            #endif
+            guard let projected = WorkspaceProjectedPathSearchIndex(
+                snapshot: snapshot,
+                plan: effectivePlan,
+                root: finalTopology.state.root,
+                authoritativeEntries: components.entries
+            ) else {
+                await fallBackPendingSeededRoot(
+                    pendingID,
+                    reason: .seededShardPreparationFailure,
+                    startupContext: startupContext
+                )
+                return .fallback(.seededShardPreparationFailure)
+            }
+            let pathIndex = WorkspaceSearchRootPathIndex(
+                identity: indexIdentity,
+                rootPath: finalTopology.state.root.standardizedFullPath,
+                entries: components.entries,
+                projectedIndex: projected
+            )
+            let shard = RootCatalogShard(
+                key: key,
+                root: finalTopology.state.root,
+                files: components.files,
+                folders: components.folders,
+                entries: components.entries,
+                pathSearchIndex: pathIndex,
+                appliedIndexGeneration: 0
+            )
+            guard var ready = pendingSeededRootsByID[pendingID],
+                  ready.phase == .preparingShard,
+                  ready.state.root.id == topology.state.root.id,
+                  ready.state.lifetimeID == topology.state.lifetimeID
+            else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+
+            ready.state = finalTopology.state
+            ready.indexes = finalTopology.indexes
+            ready.effectivePlan = effectivePlan
+            ready.preparedShard = shard
+            ready.phase = .readyForCommit
+            pendingSeededRootsByID[pendingID] = ready
+            WorktreeStartupInstrumentation.recordSeedProjectedPreparation(
+                baseEntryCount: projected.baseEntryCount,
+                overlayEntryCount: projected.overlayEntryCount,
+                tombstoneCount: projected.tombstoneCount
+            )
+            WorktreeStartupInstrumentation.record(
+                .seedReadyForCommit,
+                context: startupContext,
+                route: .diffSeedServing
+            )
+            #if DEBUG
+                if let pendingSeededRootDidBecomeReadyHandler {
+                    await pendingSeededRootDidBecomeReadyHandler(standardizedPath)
+                    try requirePendingSeededRootCurrent(
+                        pendingID,
+                        token: token,
+                        standardizedPath: standardizedPath,
+                        expectedPhase: .readyForCommit
+                    )
+                }
+            #endif
+            return .prepared(WorkspacePendingSeededRootPreparation(id: pendingID))
+        } catch is CancellationError {
+            await abortPendingSeededRoots([pendingID])
+            throw CancellationError()
+        } catch let error as WorkspaceSessionWorktreeOwnershipError {
+            await abortPendingSeededRoots([pendingID])
+            throw error
+        } catch let error as FileSystemWatcherActivationError {
+            await fallBackPendingSeededRoot(
+                pendingID,
+                reason: .watcherActivationFailure,
+                startupContext: startupContext
+            )
+            _ = error
+            return .fallback(.watcherActivationFailure)
+        } catch let error as FileSystemSeedReplayError {
+            let reason: WorkspaceRootSeedFallbackReason = switch error {
+            case .mailboxOverflow: .watcherOverflow
+            case .unsafeEventFlags: .watcherDrop
+            case .recoveryRequired, .fullResyncRequired: .watcherRecoveryUncertain
+            case .acceptedWatermarkGap, .requestedWatermarkNotPublished,
+                 .watcherIngressChanged, .watcherNotActive,
+                 .requestedWatermarkPredatesCapture, .requestedWatermarkNotYetAccepted:
+                .pendingIngressSequenceGap
+            case .invalidJournalCut: .witnessGap
+            case .watcherAlreadyActive, .initializationAlreadyActive,
+                 .initializationNotCurrent, .inventoryNotInstalled,
+                 .invalidSeedInventoryPath, .replayAlreadyCompleted:
+                .serviceIngressGenerationChanged
+            }
+            await fallBackPendingSeededRoot(
+                pendingID,
+                reason: reason,
+                startupContext: startupContext
+            )
+            return .fallback(reason)
+        } catch {
+            await fallBackPendingSeededRoot(
+                pendingID,
+                reason: .authorityUnstable,
+                startupContext: startupContext
+            )
+            return .fallback(.authorityUnstable)
+        }
+    }
+
+    private func ensureSeededAuthorityInvalidationListener() async {
+        guard seededAuthorityInvalidationListenerTask == nil else { return }
+        let events = await workspaceStateAuthority.invalidationEvents()
+        seededAuthorityInvalidationListenerTask = Task { [weak self] in
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                await self?.handleSeededAuthorityInvalidation(event)
+            }
+        }
+    }
+
+    private func handleSeededAuthorityInvalidation(
+        _ event: GitWorkspaceAuthorityInvalidationEvent
+    ) {
+        let affectedPendingIDs = pendingSeededRootsByID.compactMap { pendingID, pending in
+            pending.authorityFence?.repositoryKey == event.repositoryKey ? pendingID : nil
+        }
+        for pendingID in affectedPendingIDs {
+            guard var pending = pendingSeededRootsByID[pendingID] else { continue }
+            pending.authorityInvalidationGeneration = max(
+                pending.authorityInvalidationGeneration,
+                event.invalidationGeneration
+            )
+            pending.authorityAcceptedMetadataWatermark = max(
+                pending.authorityAcceptedMetadataWatermark,
+                event.acceptedMetadataWatermark
+            )
+            switch event.kind {
+            case .mutationBegan:
+                pending.authorityMutationDepth += 1
+            case .mutationCompleted:
+                pending.authorityMutationDepth = max(0, pending.authorityMutationDepth - 1)
+            case .metadata:
+                break
+            }
+            pendingSeededRootsByID[pendingID] = pending
+        }
+
+        let affectedRootIDs = publishedSeededAuthorityFencesByRootID.compactMap { rootID, fence in
+            fence.repositoryKey == event.repositoryKey ? rootID : nil
+        }
+        for rootID in affectedRootIDs {
+            var state = publishedSeededAuthorityStatesByRootID[rootID] ?? PublishedSeededAuthorityState(
+                epoch: 0,
+                pendingInvalidationGeneration: nil,
+                pendingAcceptedMetadataWatermark: 0,
+                activeMutationDepth: 0,
+                isBlocked: false,
+                isReconciling: false,
+                reconciliationFailed: false,
+                fullCrawlAttemptedGeneration: nil
+            )
+            let wasBlocked = state.isBlocked
+            state.epoch &+= 1
+            state.pendingInvalidationGeneration = max(
+                state.pendingInvalidationGeneration ?? 0,
+                event.invalidationGeneration
+            )
+            state.pendingAcceptedMetadataWatermark = max(
+                state.pendingAcceptedMetadataWatermark,
+                event.acceptedMetadataWatermark
+            )
+            state.isBlocked = true
+            state.reconciliationFailed = false
+            switch event.kind {
+            case .mutationBegan:
+                state.activeMutationDepth += 1
+            case .mutationCompleted:
+                state.activeMutationDepth = max(0, state.activeMutationDepth - 1)
+            case .metadata:
+                break
+            }
+            publishedSeededAuthorityStatesByRootID[rootID] = state
+            if !wasBlocked, let root = rootStatesByID[rootID]?.root {
+                invalidatePathMatchSnapshot(
+                    affectedRootKinds: [root.kind],
+                    reason: .catalogMutation,
+                    affectedRootIDs: [rootID]
+                )
+            }
+            seededAuthorityPendingGenerationByRootID[rootID] = max(
+                seededAuthorityPendingGenerationByRootID[rootID] ?? 0,
+                event.invalidationGeneration
+            )
+            schedulePublishedSeededAuthorityReconciliationIfPossible(rootID: rootID)
+        }
+    }
+
+    private func schedulePublishedSeededAuthorityReconciliationIfPossible(rootID: UUID) {
+        guard publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0,
+              seededAuthorityReconciliationTasksByRootID[rootID] == nil,
+              seededAuthorityPendingGenerationByRootID[rootID] != nil
+        else { return }
+        seededAuthorityReconciliationTasksByRootID[rootID] = Task { [weak self] in
+            await self?.reconcilePublishedSeededAuthority(rootID: rootID)
+        }
+    }
+
+    private func reconcilePublishedSeededAuthority(rootID: UUID) async {
+        while let capturedGeneration = seededAuthorityPendingGenerationByRootID[rootID],
+              let fence = publishedSeededAuthorityFencesByRootID[rootID],
+              let state = rootStatesByID[rootID]
+        {
+            guard publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0 else { break }
+            seededAuthorityPendingGenerationByRootID.removeValue(forKey: rootID)
+            publishedSeededAuthorityStatesByRootID[rootID]?.isReconciling = true
+            do {
+                let replacement = try await worktreeSeedGitService
+                    .recapturePublishedInitializationAuthorityFence(replacing: fence)
+                guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
+                      publishedSeededAuthorityFencesByRootID[rootID] == fence,
+                      publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0,
+                      seededAuthorityPendingGenerationByRootID[rootID].map({ $0 > capturedGeneration }) != true,
+                      await workspaceStateAuthority.pendingInitializationAuthorityFenceIsCurrent(replacement),
+                      workspaceStateAuthority
+                      .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(replacement)
+                else {
+                    await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
+                    continue
+                }
+
+                if replacement.snapshot != fence.snapshot {
+                    guard publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlAttemptedGeneration == nil
+                    else {
+                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
+                        failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
+                        break
+                    }
+                    publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlAttemptedGeneration = capturedGeneration
+                    #if DEBUG
+                        publishedSeededAuthorityFullCrawlCountsByRootID[rootID, default: 0] += 1
+                    #endif
+                    guard await state.service.reconcileEntireTreeForAuthorityChange() else {
+                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
+                        failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
+                        break
+                    }
+                    await waitForCurrentPublisherIngress(rootIDs: [rootID])
+                    guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
+                          publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0,
+                          seededAuthorityPendingGenerationByRootID[rootID].map({ $0 > capturedGeneration }) != true,
+                          await workspaceStateAuthority.pendingInitializationAuthorityFenceIsCurrent(replacement),
+                          workspaceStateAuthority
+                          .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(replacement)
+                    else {
+                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
+                        continue
+                    }
+                }
+                publishedSeededAuthorityFencesByRootID[rootID] = replacement
+                markPublishedSeededAuthorityCurrent(rootID: rootID)
+                await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)
+            } catch {
+                if await workspaceStateAuthority.collectionMutationFenceReason(
+                    for: fence.repositoryKey
+                ) != nil {
+                    seededAuthorityPendingGenerationByRootID[rootID] = max(
+                        seededAuthorityPendingGenerationByRootID[rootID] ?? 0,
+                        capturedGeneration
+                    )
+                    publishedSeededAuthorityStatesByRootID[rootID]?.isBlocked = true
+                    break
+                }
+                guard publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0 else { break }
+                if publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlAttemptedGeneration == nil,
+                   isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID)
+                {
+                    publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlAttemptedGeneration = capturedGeneration
+                    #if DEBUG
+                        publishedSeededAuthorityFullCrawlCountsByRootID[rootID, default: 0] += 1
+                    #endif
+                    _ = await state.service.reconcileEntireTreeForAuthorityChange()
+                    await waitForCurrentPublisherIngress(rootIDs: [rootID])
+                }
+                failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
+                break
+            }
+            guard seededAuthorityPendingGenerationByRootID[rootID].map({ $0 > capturedGeneration }) == true else {
+                break
+            }
+        }
+        seededAuthorityReconciliationTasksByRootID.removeValue(forKey: rootID)
+        publishedSeededAuthorityStatesByRootID[rootID]?.isReconciling = false
+        schedulePublishedSeededAuthorityReconciliationIfPossible(rootID: rootID)
+    }
+
+    private func markPublishedSeededAuthorityCurrent(rootID: UUID) {
+        guard var authority = publishedSeededAuthorityStatesByRootID[rootID] else { return }
+        authority.pendingInvalidationGeneration = nil
+        authority.isBlocked = false
+        authority.isReconciling = false
+        authority.reconciliationFailed = false
+        authority.fullCrawlAttemptedGeneration = nil
+        publishedSeededAuthorityStatesByRootID[rootID] = authority
+        resumePublishedSeededAuthorityWaiters(rootID: rootID, error: nil)
+    }
+
+    private func failPublishedSeededAuthorityReconciliation(rootID: UUID, state: RootState) {
+        guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
+              var authority = publishedSeededAuthorityStatesByRootID[rootID]
+        else { return }
+        authority.isBlocked = true
+        authority.isReconciling = false
+        authority.reconciliationFailed = true
+        publishedSeededAuthorityStatesByRootID[rootID] = authority
+        resumePublishedSeededAuthorityWaiters(
+            rootID: rootID,
+            error: WorkspaceSessionWorktreeOwnershipError.unavailableRoot(state.root.standardizedFullPath)
+        )
+    }
+
+    private func publishedSeededAuthorityIsQueryable(rootID: UUID) -> Bool {
+        guard let fence = publishedSeededAuthorityFencesByRootID[rootID] else { return true }
+        guard let state = publishedSeededAuthorityStatesByRootID[rootID],
+              !state.isBlocked,
+              !state.reconciliationFailed
+        else { return false }
+        return workspaceStateAuthority.pendingInitializationAuthorityFenceIsSynchronouslyCurrent(fence)
+    }
+
+    private func requirePublishedSeededAuthorityFresh(rootID: UUID) async throws {
+        while publishedSeededAuthorityFencesByRootID[rootID] != nil {
+            if publishedSeededAuthorityIsQueryable(rootID: rootID) { return }
+            guard let state = publishedSeededAuthorityStatesByRootID[rootID],
+                  !state.reconciliationFailed,
+                  state.isBlocked
+            else {
+                let path = rootStatesByID[rootID]?.root.standardizedFullPath ?? rootID.uuidString
+                throw WorkspaceSessionWorktreeOwnershipError.unavailableRoot(path)
+            }
+            let waiterID = UUID()
+            let _: Void = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    guard !Task.isCancelled else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    publishedSeededAuthorityWaitersByRootID[rootID, default: [:]][waiterID] = continuation
+                }
+            } onCancel: {
+                Task { await self.cancelPublishedSeededAuthorityWaiter(rootID: rootID, waiterID: waiterID) }
+            }
+        }
+    }
+
+    private func cancelPublishedSeededAuthorityWaiter(rootID: UUID, waiterID: UUID) {
+        guard let continuation = publishedSeededAuthorityWaitersByRootID[rootID]?
+            .removeValue(forKey: waiterID)
+        else { return }
+        if publishedSeededAuthorityWaitersByRootID[rootID]?.isEmpty == true {
+            publishedSeededAuthorityWaitersByRootID.removeValue(forKey: rootID)
+        }
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumePublishedSeededAuthorityWaiters(rootID: UUID, error: Error?) {
+        let waiters = publishedSeededAuthorityWaitersByRootID.removeValue(forKey: rootID) ?? [:]
+        for continuation in waiters.values {
+            if let error {
+                continuation.resume(throwing: error)
+            } else {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func fallBackPendingSeededRoot(
+        _ pendingID: WorkspacePendingSeededRootID,
+        reason: WorkspaceRootSeedFallbackReason,
+        startupContext: WorktreeStartupContext
+    ) async {
+        guard var pending = pendingSeededRootsByID[pendingID] else { return }
+        if case .fallingBack = pending.phase { return }
+        pending.phase = .fallingBack(reason)
+        pending.terminalFallbackReason = pending.terminalFallbackReason ?? reason
+        pendingSeededRootsByID[pendingID] = pending
+        WorktreeStartupInstrumentation.record(
+            .seedFallback,
+            context: startupContext,
+            route: .diffSeedServing,
+            fallback: reason
+        )
+        WorktreeStartupInstrumentation.recordSeedFullCrawlFallback()
+        await discardPendingSeededRoot(pendingID, terminalPhase: .aborted)
+    }
+
+    private func abortPendingSeededRoots(_ pendingIDs: [WorkspacePendingSeededRootID]) async {
+        for pendingID in pendingIDs {
+            await discardPendingSeededRoot(pendingID, terminalPhase: .aborted)
+        }
+    }
+
+    private func discardPendingSeededRoot(
+        _ pendingID: WorkspacePendingSeededRootID,
+        terminalPhase: WorkspacePendingSeededRootPhase
+    ) async {
+        guard var pending = pendingSeededRootsByID[pendingID] else { return }
+        pending.phase = terminalPhase
+        pendingSeededRootsByID[pendingID] = pending
+        await pending.state.service.abortSeededPreparation(initializationID: pending.initializationID)
+        pending.attachment?.cancellable.cancel()
+        if let subscription = pending.attachment?.subscription {
+            publisherIngressCoordinator.closePublisherIngress(subscription)
+            await publisherIngressCoordinator.waitForCurrentPublisherIngress(rootIDs: [pending.state.root.id])
+        }
+        if let fence = pending.authorityFence {
+            await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)
+        }
+        pendingSeededRootsByID.removeValue(forKey: pendingID)
+        if pendingSeededRootIDsByStandardizedPath[pending.standardizedPath] == pendingID {
+            pendingSeededRootIDsByStandardizedPath.removeValue(forKey: pending.standardizedPath)
+        }
+        finishPendingSeededRootVisibility(path: pending.standardizedPath)
+        if let record = sessionWorktreeOwnershipRecordsByToken[pending.token] {
+            sessionWorktreeOwnershipRecordsByToken[pending.token] = SessionWorktreeOwnershipRecord(
+                bindingFingerprint: record.bindingFingerprint,
+                roots: record.roots,
+                pendingSeededRootIDs: record.pendingSeededRootIDs.filter { $0 != pendingID }
+            )
+        }
     }
 
     func prepareSessionWorktreeOwnership(
@@ -2193,31 +3282,84 @@ actor WorkspaceFileContextStore {
 
         sessionWorktreeOwnershipRecordsByToken[token] = SessionWorktreeOwnershipRecord(
             bindingFingerprint: bindingFingerprint,
-            roots: []
+            roots: [],
+            pendingSeededRootIDs: []
         )
         reserveSessionWorktreePaths(standardizedPaths, for: token)
         do {
             var preparedRoots: [WorkspaceSessionWorktreeOwnedRoot] = []
             var materializationHintObservations: [String: WorkspaceRootMaterializationHintObservation] = [:]
             var rootSeedShadowPreparations: [WorkspaceRootSeedShadowPreparation] = []
+            var pendingSeededRootPreparations: [WorkspacePendingSeededRootPreparation] = []
             for path in standardizedPaths {
                 try Task.checkCancellation()
+                guard latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] == generation else {
+                    throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+                }
+                let hint = initializationHintsByPhysicalRootPath[path]
+                var servingFallbackReason: WorkspaceRootSeedFallbackReason?
+                if let startupContext,
+                   startupContext.flags.serveDiffSeededWorktreeStartup,
+                   startupContext.servingControl == .automatic,
+                   let hint
+                {
+                    let observation: WorkspaceRootMaterializationHintObservation = if hint.expectedOwnerBindingGeneration != generation
+                        || hint.agentSessionID != ownerID
+                        || startupContext.agentSessionID != ownerID
+                    {
+                        .fallback(.ownerSuperseded)
+                    } else {
+                        await rootMaterializationHintEvaluator.observe(
+                            hint,
+                            observationEnabled: true
+                        )
+                    }
+                    try Task.checkCancellation()
+                    guard latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] == generation else {
+                        throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+                    }
+                    materializationHintObservations[path] = observation
+                    switch observation {
+                    case .observationDisabled:
+                        break
+                    case let .fallback(reason):
+                        servingFallbackReason = reason
+                        WorktreeStartupInstrumentation.record(
+                            .seedFallback,
+                            context: startupContext,
+                            route: .diffSeedServing,
+                            fallback: reason
+                        )
+                    case .eligible:
+                        let attempt = try await FileSystemService.withContentReadForegroundActivity(
+                            kind: .rootLoad
+                        ) {
+                            try await self.preparePendingSeededRoot(
+                                token: token,
+                                bindingFingerprint: bindingFingerprint,
+                                standardizedPath: path,
+                                hint: hint,
+                                startupContext: startupContext
+                            )
+                        }
+                        switch attempt {
+                        case let .prepared(preparation):
+                            pendingSeededRootPreparations.append(preparation)
+                            continue
+                        case let .fallback(reason):
+                            servingFallbackReason = reason
+                            materializationHintObservations[path] = .fallback(reason)
+                        }
+                    }
+                }
+
                 if let startupContext {
-                    // Slice 8A is observation-only. This event intentionally
-                    // precedes the unchanged full crawler and performs no VCS
-                    // detection, preserving zero Git commands for non-Git roots.
                     WorktreeStartupInstrumentation.record(
                         .rootLoadStarted,
                         context: startupContext,
                         route: .fullCrawl
                     )
                 }
-                guard latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] == generation else {
-                    throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
-                }
-                let hint = initializationHintsByPhysicalRootPath[path]
-                // Milestone 8B never serves from a receipt or reusable snapshot. The
-                // authoritative full crawler remains the only publication path.
                 let root = try await loadRoot(
                     path: path,
                     kind: .sessionWorktree,
@@ -2258,10 +3400,14 @@ actor WorkspaceFileContextStore {
                     throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
                 }
 
-                let observation: WorkspaceRootMaterializationHintObservation = if let hint,
-                                                                                  hint.expectedOwnerBindingGeneration != generation
-                                                                                  || hint.agentSessionID != ownerID
-                                                                                  || startupContext?.agentSessionID != ownerID
+                let observation: WorkspaceRootMaterializationHintObservation = if let servingFallbackReason {
+                    .fallback(servingFallbackReason)
+                } else if startupContext?.servingControl == .forceFullCrawl {
+                    .fallback(.noReceipt)
+                } else if let hint,
+                          hint.expectedOwnerBindingGeneration != generation
+                          || hint.agentSessionID != ownerID
+                          || startupContext?.agentSessionID != ownerID
                 {
                     .fallback(.ownerSuperseded)
                 } else {
@@ -2270,7 +3416,9 @@ actor WorkspaceFileContextStore {
                         observationEnabled: startupContext?.flags.observeDiffSeededWorktreeStartup ?? false
                     )
                 }
-                if case let .fallback(reason) = observation,
+                if servingFallbackReason == nil,
+                   startupContext?.servingControl != .forceFullCrawl,
+                   case let .fallback(reason) = observation,
                    let startupContext,
                    startupContext.flags.observeDiffSeededWorktreeStartup
                 {
@@ -2281,7 +3429,9 @@ actor WorkspaceFileContextStore {
                         fallback: reason
                     )
                 }
-                if case .eligible = observation,
+                if servingFallbackReason == nil,
+                   startupContext?.servingControl != .forceFullCrawl,
+                   case .eligible = observation,
                    let hint,
                    let startupContext,
                    startupContext.flags.observeDiffSeededWorktreeStartup
@@ -2352,7 +3502,8 @@ actor WorkspaceFileContextStore {
                 roots: preparedRoots,
                 reusesInstalledOwnership: false,
                 materializationHintObservationsByPhysicalRootPath: materializationHintObservations,
-                rootSeedShadowPreparations: rootSeedShadowPreparations
+                rootSeedShadowPreparations: rootSeedShadowPreparations,
+                pendingSeededRootPreparations: pendingSeededRootPreparations
             )
         } catch {
             let resources = removeSessionWorktreeOwnershipToken(token)
@@ -2374,10 +3525,14 @@ actor WorkspaceFileContextStore {
             }
             return record.roots
         }
+        if !preparation.pendingSeededRootPreparations.isEmpty {
+            return try await commitPendingSeededSessionWorktreeOwnership(preparation)
+        }
         guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID] == preparation.token.generation,
               let record = sessionWorktreeOwnershipRecordsByToken[preparation.token],
               record.bindingFingerprint == preparation.bindingFingerprint,
               record.roots == preparation.roots,
+              record.pendingSeededRootIDs == preparation.pendingSeededRootPreparations.map(\.id),
               sessionWorktreeOwnershipRecordIsCurrent(record)
         else {
             throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
@@ -2409,6 +3564,439 @@ actor WorkspaceFileContextStore {
         }
         scheduleOrphanedSessionWorktreeResourceCleanup(previousResources)
         return record.roots
+    }
+
+    private func commitPendingSeededSessionWorktreeOwnership(
+        _ preparation: WorkspaceSessionWorktreeOwnershipPreparation
+    ) async throws -> [WorkspaceSessionWorktreeOwnedRoot] {
+        let pendingIDs = preparation.pendingSeededRootPreparations.map(\.id)
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
+            == preparation.token.generation,
+            let record = sessionWorktreeOwnershipRecordsByToken[preparation.token],
+            record.bindingFingerprint == preparation.bindingFingerprint,
+            record.roots == preparation.roots,
+            record.pendingSeededRootIDs == pendingIDs,
+            sessionWorktreeVisibleRootsAreCurrent(record.roots),
+            pendingIDs.allSatisfy({ pendingID in
+                guard let pending = pendingSeededRootsByID[pendingID],
+                      pending.token == preparation.token,
+                      pending.bindingFingerprint == preparation.bindingFingerprint,
+                      pending.phase == .readyForCommit,
+                      pending.preparedShard != nil,
+                      pending.attachment.map({
+                          publisherIngressCoordinator.isPublisherIngressOpen($0.subscription)
+                      }) == true,
+                      pendingSeededRootIDsByStandardizedPath[pending.standardizedPath] == pendingID,
+                      rootIDsByStandardizedPath[pending.standardizedPath] == nil,
+                      sessionWorktreeReservedPathsByToken[preparation.token]?
+                      .contains(pending.standardizedPath) == true
+                else { return false }
+                return true
+            })
+        else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+
+        // Metadata callbacks may have arrived after preparation returned. Each
+        // pending root gets at most the single event-triggered recapture owned by
+        // its fence; no timer or polling path is introduced.
+        do {
+            for pendingID in pendingIDs {
+                guard let pending = pendingSeededRootsByID[pendingID],
+                      let fence = pending.authorityFence
+                else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+                let validated = try await worktreeSeedGitService
+                    .validateOrRevalidatePendingInitializationAuthorityFence(fence)
+                try await installValidatedPendingAuthorityFence(
+                    validated,
+                    pendingID: pendingID,
+                    token: preparation.token,
+                    standardizedPath: pending.standardizedPath,
+                    expectedPhase: .readyForCommit
+                )
+                WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(
+                    used: validated.revalidationUsed
+                )
+            }
+        } catch let error as WorkspaceSessionWorktreeOwnershipError {
+            throw error
+        } catch {
+            return try await fallBackPendingSeededRootsDuringCommit(
+                preparation,
+                pendingIDs: pendingIDs,
+                reason: .authorityUnstable
+            )
+        }
+
+        // Resume each watcher while its root is still private. Any publication
+        // that lands before the ingress handoff invalidates the prepared shard
+        // and takes the ordinary one-shot crawl route.
+        for pendingID in pendingIDs {
+            guard let pending = pendingSeededRootsByID[pendingID] else {
+                throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+            }
+            guard let proof = await pending.state.service.activateSeededPublication(
+                initializationID: pending.initializationID
+            ) else {
+                return try await fallBackPendingSeededRootsDuringCommit(
+                    preparation,
+                    pendingIDs: pendingIDs,
+                    reason: .watcherActivationFailure
+                )
+            }
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: preparation.token,
+                standardizedPath: pending.standardizedPath,
+                expectedPhase: .readyForCommit
+            )
+            pendingSeededRootsByID[pendingID]?.activationProof = proof
+            #if DEBUG
+                if let pendingSeededRootDidActivateHandler {
+                    await pendingSeededRootDidActivateHandler(pending.standardizedPath)
+                }
+            #endif
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: preparation.token,
+                standardizedPath: pending.standardizedPath,
+                expectedPhase: .readyForCommit
+            )
+            await publisherIngressCoordinator.waitForCurrentPublisherIngress(
+                rootIDs: [pending.state.root.id]
+            )
+            guard let current = pendingSeededRootsByID[pendingID],
+                  current.terminalFallbackReason == nil,
+                  await current.state.service.seededPublicationActivationIsCurrent(proof)
+            else {
+                return try await fallBackPendingSeededRootsDuringCommit(
+                    preparation,
+                    pendingIDs: pendingIDs,
+                    reason: .serviceIngressGenerationChanged
+                )
+            }
+        }
+
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
+            == preparation.token.generation,
+            let currentRecord = sessionWorktreeOwnershipRecordsByToken[preparation.token],
+            currentRecord.bindingFingerprint == preparation.bindingFingerprint,
+            currentRecord.roots == preparation.roots,
+            currentRecord.pendingSeededRootIDs == pendingIDs,
+            sessionWorktreeVisibleRootsAreCurrent(currentRecord.roots)
+        else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+
+        var pendingRoots: [PendingSeededRoot] = []
+        pendingRoots.reserveCapacity(pendingIDs.count)
+        for pendingID in pendingIDs {
+            guard let pending = pendingSeededRootsByID[pendingID],
+                  pending.phase == .readyForCommit,
+                  let shard = pending.preparedShard,
+                  shard.key.rootID == pending.state.root.id,
+                  shard.key.lifetimeID == pending.state.lifetimeID,
+                  shard.pathSearchIndex != nil,
+                  let attachment = pending.attachment,
+                  pending.activationProof != nil,
+                  let authorityFence = pending.authorityFence,
+                  publisherIngressCoordinator.isPublisherIngressOpen(attachment.subscription),
+                  pending.lastAppliedServicePublicationSequence > 0,
+                  pending.lastAppliedWatcherWatermark > .zero,
+                  rootIDsByStandardizedPath[pending.standardizedPath] == nil
+            else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+            guard workspaceStateAuthority
+                .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(authorityFence),
+                pending.authorityMutationDepth == 0,
+                pending.terminalFallbackReason == nil
+            else {
+                return try await fallBackPendingSeededRootsDuringCommit(
+                    preparation,
+                    pendingIDs: pendingIDs,
+                    reason: .authorityUnstable
+                )
+            }
+            pendingRoots.append(pending)
+        }
+
+        var pausedHandoffSubscriptions: [WorkspaceFileSystemIngressCoordinator.Subscription] = []
+        for pending in pendingRoots {
+            guard let attachment = pending.attachment else {
+                throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+            }
+            let root = pending.state.root
+            let diagnosticRootToken = pending.state.service.diagnosticRootToken
+            let publishedLifetimeID = pending.state.lifetimeID
+            let replacement: WorkspaceFileSystemIngressCoordinator.DrainHandler = { [weak self] publication, correlation in
+                await self?.handleObservedPublisherFileSystemPublication(
+                    publication,
+                    root: root,
+                    expectedLifetimeID: publishedLifetimeID,
+                    publicationCorrelation: correlation,
+                    diagnosticRootToken: diagnosticRootToken
+                )
+            }
+            if !publisherIngressCoordinator.pauseDrainAndReplaceHandler(
+                attachment.subscription,
+                drainHandler: replacement
+            ) {
+                await publisherIngressCoordinator.waitForCurrentPublisherIngress(rootIDs: [root.id])
+                guard pendingSeededRootsByID[pending.id]?.terminalFallbackReason == nil,
+                      publisherIngressCoordinator.pauseDrainAndReplaceHandler(
+                          attachment.subscription,
+                          drainHandler: replacement
+                      )
+                else {
+                    for subscription in pausedHandoffSubscriptions {
+                        _ = publisherIngressCoordinator.resumeDrainAfterHandoff(subscription)
+                    }
+                    return try await fallBackPendingSeededRootsDuringCommit(
+                        preparation,
+                        pendingIDs: pendingIDs,
+                        reason: .serviceIngressGenerationChanged
+                    )
+                }
+            }
+            pausedHandoffSubscriptions.append(attachment.subscription)
+        }
+
+        for pending in pendingRoots {
+            guard let proof = pending.activationProof,
+                  await pending.state.service.seededPublicationActivationIsCurrent(proof),
+                  pendingSeededRootIsCurrent(
+                      pending.id,
+                      token: preparation.token,
+                      standardizedPath: pending.standardizedPath,
+                      expectedPhase: .readyForCommit
+                  )
+            else {
+                for subscription in pausedHandoffSubscriptions {
+                    _ = publisherIngressCoordinator.resumeDrainAfterHandoff(subscription)
+                }
+                return try await fallBackPendingSeededRootsDuringCommit(
+                    preparation,
+                    pendingIDs: pendingIDs,
+                    reason: .serviceIngressGenerationChanged
+                )
+            }
+        }
+
+        guard pendingRoots.compactMap(\.authorityFence).count == pendingRoots.count else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        let publicationFences = pendingRoots.compactMap(\.authorityFence)
+
+        // No await, callback, task creation, or throwing operation is allowed
+        // from the authority permit through the complete visible-state assignment.
+        var installedRoots = currentRecord.roots
+        var newlyPublishedRootIDs = Set<UUID>()
+        var newlyPublishedPaths: [String] = []
+        var pendingServices: [(FileSystemService, FileSystemSeedPublicationActivationProof, WorktreeStartupContext)] = []
+        var previousToken: WorkspaceSessionWorktreeOwnershipToken?
+        let didPublish = workspaceStateAuthority.withPendingInitializationAuthorityPublicationPermit(
+            publicationFences
+        ) {
+            guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
+                == preparation.token.generation,
+                sessionWorktreeOwnershipRecordsByToken[preparation.token]?.pendingSeededRootIDs == pendingIDs,
+                pendingRoots.allSatisfy({ pending in
+                    guard let fence = pending.authorityFence,
+                          let current = pendingSeededRootsByID[pending.id]
+                    else { return false }
+                    return current.phase == .readyForCommit
+                        && current.authorityFence == fence
+                        && current.authorityInvalidationGeneration == fence.lease.invalidationGeneration
+                        && current.authorityAcceptedMetadataWatermark == fence.acceptedMetadataWatermark
+                        && current.authorityMutationDepth == 0
+                        && current.terminalFallbackReason == nil
+                }),
+                pausedHandoffSubscriptions.allSatisfy({
+                    publisherIngressCoordinator.resumeDrainAfterHandoff($0)
+                })
+            else { return false }
+
+            for pending in pendingRoots {
+                guard let fence = pending.authorityFence,
+                      let activationProof = pending.activationProof
+                else { return false }
+                let root = pending.state.root
+                let ownedRoot = WorkspaceSessionWorktreeOwnedRoot(
+                    rootID: root.id,
+                    lifetimeID: pending.state.lifetimeID,
+                    standardizedPhysicalPath: pending.standardizedPath
+                )
+                commit(pending.indexes)
+                rootIDsByStandardizedPath[pending.standardizedPath] = root.id
+                rootStatesByID[root.id] = pending.state
+                rootLoadConfigurationsByPath[pending.standardizedPath] = pending.loadConfiguration
+                rootLoadOrder.append(root.id)
+                appliedIndexGenerationsByRootID[root.id] = 0
+                catalogGenerationsByRootID[root.id] = 0
+                publishedRootCatalogShardsByRootID[root.id] = pending.preparedShard
+                rootCatalogShardDeltaStatesByRootID[root.id] = RootCatalogShardDeltaState(
+                    lifetimeID: pending.state.lifetimeID,
+                    lastAppliedIndexGeneration: 0,
+                    isDirty: false,
+                    capability: .recordsAndPathIndexes
+                )
+                if let shard = pending.preparedShard {
+                    registerPublishedRootCatalogShard(shard, kind: .authoritative)
+                }
+                if let attachment = pending.attachment {
+                    watcherPublisherAttachmentsByKey[WatcherInfrastructureKey(
+                        rootID: root.id,
+                        lifetimeID: pending.state.lifetimeID
+                    )] = attachment
+                }
+                let lifetimeKey = SessionWorktreeRootLifetimeKey(
+                    rootID: root.id,
+                    lifetimeID: pending.state.lifetimeID
+                )
+                sessionWorktreeOwnershipTokensByRootLifetime[lifetimeKey, default: []]
+                    .insert(preparation.token)
+                removeSessionWorktreeReservation(
+                    standardizedPath: pending.standardizedPath,
+                    token: preparation.token
+                )
+                installedRoots.append(ownedRoot)
+                newlyPublishedRootIDs.insert(root.id)
+                newlyPublishedPaths.append(pending.standardizedPath)
+                pendingServices.append((pending.state.service, activationProof, pending.startupContext))
+                publishedSeededAuthorityFencesByRootID[root.id] = fence
+                publishedSeededAuthorityStatesByRootID[root.id] = PublishedSeededAuthorityState(
+                    epoch: 0,
+                    pendingInvalidationGeneration: nil,
+                    pendingAcceptedMetadataWatermark: fence.acceptedMetadataWatermark,
+                    activeMutationDepth: 0,
+                    isBlocked: false,
+                    isReconciling: false,
+                    reconciliationFailed: false,
+                    fullCrawlAttemptedGeneration: nil
+                )
+                pendingSeededRootsByID.removeValue(forKey: pending.id)
+                pendingSeededRootIDsByStandardizedPath.removeValue(forKey: pending.standardizedPath)
+                #if DEBUG
+                    rootCrawlCountsByRootID[root.id] = 0
+                #endif
+            }
+            sessionRootLifetimeClock.advance()
+            sessionWorktreeOwnershipRecordsByToken[preparation.token] = SessionWorktreeOwnershipRecord(
+                bindingFingerprint: preparation.bindingFingerprint,
+                roots: installedRoots,
+                pendingSeededRootIDs: []
+            )
+            previousToken = installedSessionWorktreeOwnershipTokenByOwnerID.updateValue(
+                preparation.token,
+                forKey: preparation.token.ownerID
+            )
+            invalidatePathMatchSnapshot(
+                affectedRootKinds: [.sessionWorktree],
+                reason: .rootLoad,
+                affectedRootIDs: newlyPublishedRootIDs
+            )
+            return true
+        } ?? false
+
+        guard didPublish else {
+            for subscription in pausedHandoffSubscriptions {
+                _ = publisherIngressCoordinator.resumeDrainAfterHandoff(subscription)
+            }
+            return try await fallBackPendingSeededRootsDuringCommit(
+                preparation,
+                pendingIDs: pendingIDs,
+                reason: .authorityUnstable
+            )
+        }
+
+        var previousResources = SessionWorktreeOwnershipRemoval()
+        if let previousToken, previousToken != preparation.token {
+            previousResources = removeSessionWorktreeOwnershipToken(previousToken)
+        }
+        for shadowPreparation in preparation.rootSeedShadowPreparations {
+            installRootSeedSearchShadow(shadowPreparation)
+        }
+
+        // Watchers were activated and revalidated while private. Finalization
+        // only retires the proof; visibility waiters remain held until it succeeds.
+        for (service, activationProof, context) in pendingServices {
+            guard await service.finalizeSeededPublication(activationProof) else {
+                throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+            }
+            WorktreeStartupInstrumentation.record(
+                .seedPublished,
+                context: context,
+                route: .diffSeedServing
+            )
+        }
+        for path in newlyPublishedPaths {
+            finishPendingSeededRootVisibility(path: path)
+        }
+        scheduleOrphanedSessionWorktreeResourceCleanup(previousResources)
+        return installedRoots
+    }
+
+    private func fallBackPendingSeededRootsDuringCommit(
+        _ preparation: WorkspaceSessionWorktreeOwnershipPreparation,
+        pendingIDs: [WorkspacePendingSeededRootID],
+        reason: WorkspaceRootSeedFallbackReason
+    ) async throws -> [WorkspaceSessionWorktreeOwnedRoot] {
+        guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
+            == preparation.token.generation
+        else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+        let pending = pendingIDs.compactMap { pendingSeededRootsByID[$0] }
+        guard pending.count == pendingIDs.count else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        for root in pending {
+            await fallBackPendingSeededRoot(
+                root.id,
+                reason: reason,
+                startupContext: root.startupContext
+            )
+        }
+
+        var roots = sessionWorktreeOwnershipRecordsByToken[preparation.token]?.roots ?? []
+        for root in pending {
+            guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
+                == preparation.token.generation
+            else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
+            WorktreeStartupInstrumentation.record(
+                .rootLoadStarted,
+                context: root.startupContext,
+                route: .fullCrawl
+            )
+            let loaded = try await loadRoot(
+                path: root.standardizedPath,
+                kind: .sessionWorktree,
+                respectRepoIgnore: true,
+                respectCursorignore: true,
+                sessionWorktreeReservationToken: preparation.token
+            )
+            guard let loadedState = rootStatesByID[loaded.id] else {
+                throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+            }
+            let owned = WorkspaceSessionWorktreeOwnedRoot(
+                rootID: loaded.id,
+                lifetimeID: loadedState.lifetimeID,
+                standardizedPhysicalPath: root.standardizedPath
+            )
+            roots.append(owned)
+            try convertSessionWorktreeReservationToClaim(
+                token: preparation.token,
+                bindingFingerprint: preparation.bindingFingerprint,
+                preparedRoots: roots,
+                ownedRoot: owned
+            )
+            try await reconcileAggregateWatcherDemand(rootID: loaded.id)
+        }
+        let replacement = WorkspaceSessionWorktreeOwnershipPreparation(
+            token: preparation.token,
+            bindingFingerprint: preparation.bindingFingerprint,
+            roots: roots,
+            reusesInstalledOwnership: false,
+            materializationHintObservationsByPhysicalRootPath:
+            preparation.materializationHintObservationsByPhysicalRootPath,
+            rootSeedShadowPreparations: preparation.rootSeedShadowPreparations
+        )
+        return try await commitSessionWorktreeOwnership(replacement)
     }
 
     func abortSessionWorktreeOwnership(
@@ -2523,6 +4111,8 @@ actor WorkspaceFileContextStore {
             let rootClaimCount: Int
             let pathReservationCount: Int
             let explicitWatcherDemandCount: Int
+            let pendingSeededRootCount: Int
+            let pendingVisibilityWaiterCount: Int
         }
 
         func sessionWorktreeOwnershipDebugSnapshotForTesting() -> SessionWorktreeOwnershipDebugSnapshot {
@@ -2532,13 +4122,24 @@ actor WorkspaceFileContextStore {
                 provisionalOwnerCount: sessionWorktreeOwnershipRecordsByToken.keys.count(where: { !installedTokens.contains($0) }),
                 rootClaimCount: sessionWorktreeOwnershipTokensByRootLifetime.values.reduce(0) { $0 + $1.count },
                 pathReservationCount: sessionWorktreeReservationTokensByStandardizedPath.values.reduce(0) { $0 + $1.count },
-                explicitWatcherDemandCount: explicitWatcherDemandRootIDs.count
+                explicitWatcherDemandCount: explicitWatcherDemandRootIDs.count,
+                pendingSeededRootCount: pendingSeededRootsByID.count,
+                pendingVisibilityWaiterCount: pendingSeededRootVisibilityWaitersByPath.values.reduce(0) {
+                    $0 + $1.count
+                }
             )
         }
     #endif
 
     private func sessionWorktreeOwnershipRecordIsCurrent(_ record: SessionWorktreeOwnershipRecord) -> Bool {
-        record.roots.allSatisfy { root in
+        guard record.pendingSeededRootIDs.isEmpty else { return false }
+        return sessionWorktreeVisibleRootsAreCurrent(record.roots)
+    }
+
+    private func sessionWorktreeVisibleRootsAreCurrent(
+        _ roots: [WorkspaceSessionWorktreeOwnedRoot]
+    ) -> Bool {
+        roots.allSatisfy { root in
             let watcherKey = WatcherInfrastructureKey(rootID: root.rootID, lifetimeID: root.lifetimeID)
             guard let state = rootStatesByID[root.rootID],
                   state.lifetimeID == root.lifetimeID,
@@ -2593,7 +4194,8 @@ actor WorkspaceFileContextStore {
 
         sessionWorktreeOwnershipRecordsByToken[token] = SessionWorktreeOwnershipRecord(
             bindingFingerprint: bindingFingerprint,
-            roots: preparedRoots
+            roots: preparedRoots,
+            pendingSeededRootIDs: record.pendingSeededRootIDs
         )
         let rootKey = SessionWorktreeRootLifetimeKey(
             rootID: ownedRoot.rootID,
@@ -2606,6 +4208,27 @@ actor WorkspaceFileContextStore {
         removeSessionWorktreeReservation(
             standardizedPath: ownedRoot.standardizedPhysicalPath,
             token: token
+        )
+    }
+
+    private func registerPendingSessionWorktreeRoot(
+        _ pendingID: WorkspacePendingSeededRootID,
+        standardizedPath: String,
+        token: WorkspaceSessionWorktreeOwnershipToken,
+        bindingFingerprint: String
+    ) throws {
+        guard let record = sessionWorktreeOwnershipRecordsByToken[token],
+              record.bindingFingerprint == bindingFingerprint,
+              sessionWorktreeReservedPathsByToken[token]?.contains(standardizedPath) == true,
+              sessionWorktreeReservationTokensByStandardizedPath[standardizedPath]?.contains(token) == true,
+              !record.pendingSeededRootIDs.contains(pendingID)
+        else {
+            throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+        }
+        sessionWorktreeOwnershipRecordsByToken[token] = SessionWorktreeOwnershipRecord(
+            bindingFingerprint: record.bindingFingerprint,
+            roots: record.roots,
+            pendingSeededRootIDs: record.pendingSeededRootIDs + [pendingID]
         )
     }
 
@@ -2658,20 +4281,24 @@ actor WorkspaceFileContextStore {
                     standardizedPath: path,
                     flight: flight
                 )
-            }
+            },
+            pendingSeededRootIDs: record?.pendingSeededRootIDs ?? []
         )
     }
 
     private func scheduleOrphanedSessionWorktreeResourceCleanup(
         _ resources: SessionWorktreeOwnershipRemoval
     ) {
-        guard !resources.ownedRoots.isEmpty || !resources.reservedLoadFlights.isEmpty else { return }
+        guard !resources.ownedRoots.isEmpty || !resources.reservedLoadFlights.isEmpty
+            || !resources.pendingSeededRootIDs.isEmpty
+        else { return }
         Task { await cleanupOrphanedSessionWorktreeResources(resources) }
     }
 
     private func cleanupOrphanedSessionWorktreeResources(
         _ resources: SessionWorktreeOwnershipRemoval
     ) async {
+        await abortPendingSeededRoots(resources.pendingSeededRootIDs)
         await cleanupOrphanedSessionWorktreeRoots(resources.ownedRoots)
         scheduleOrphanedSessionWorktreeLoadFlightCleanup(resources.reservedLoadFlights)
     }
@@ -3045,7 +4672,9 @@ actor WorkspaceFileContextStore {
     }
 
     func appliedIndexRootSnapshot(rootID: UUID) -> WorkspaceAppliedIndexRootSnapshot? {
-        guard let root = rootStatesByID[rootID]?.root else { return nil }
+        guard publishedSeededAuthorityIsQueryable(rootID: rootID),
+              let root = rootStatesByID[rootID]?.root
+        else { return nil }
         return WorkspaceAppliedIndexRootSnapshot(
             root: root,
             generation: appliedIndexGenerationsByRootID[rootID] ?? 0,
@@ -3146,7 +4775,8 @@ actor WorkspaceFileContextStore {
             })
             missing = requested.filter { path in
                 guard let rootID = rootIDsByStandardizedPath[path],
-                      rootStatesByID[rootID]?.root.kind == .sessionWorktree
+                      rootStatesByID[rootID]?.root.kind == .sessionWorktree,
+                      publishedSeededAuthorityIsQueryable(rootID: rootID)
                 else { return true }
                 var isDirectory: ObjCBool = false
                 return !FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) ||
@@ -3163,7 +4793,8 @@ actor WorkspaceFileContextStore {
             .compactMap { expectedRoot, expectedKind in
                 guard let currentRoot = rootStatesByID[expectedRoot.id]?.root,
                       currentRoot.kind == expectedKind,
-                      currentRoot.standardizedFullPath == expectedRoot.standardizedFullPath
+                      currentRoot.standardizedFullPath == expectedRoot.standardizedFullPath,
+                      publishedSeededAuthorityIsQueryable(rootID: expectedRoot.id)
                 else { return expectedRoot.standardizedFullPath }
                 var isDirectory: ObjCBool = false
                 return FileManager.default.fileExists(
@@ -3397,6 +5028,11 @@ actor WorkspaceFileContextStore {
         requirement: WorkspaceSearchCatalogAccessRequirement = .recordsAndPathIndexes
     ) -> WorkspaceSearchCatalogSnapshot {
         let catalogSnapshotState = EditFlowPerf.begin(EditFlowPerf.Stage.Search.catalogSnapshot)
+        if rootsForPathLookupIgnoringPublishedAuthority(scope: rootScope).contains(where: {
+            !publishedSeededAuthorityIsQueryable(rootID: $0.id)
+        }) {
+            searchCatalogSnapshotsByScope.removeValue(forKey: rootScope)
+        }
         let validationToken = searchCatalogSnapshotValidationToken(scope: rootScope)
         if var cached = searchCatalogSnapshotsByScope[rootScope] {
             if cached.validationToken == validationToken {
@@ -3892,6 +5528,8 @@ actor WorkspaceFileContextStore {
             case .full:
                 rootCatalogShardFullPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .overlay:
+                rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
+            case .projectedReuse:
                 rootCatalogShardOverlayPathIndexBuildCountsByRootID[shard.key.rootID, default: 0] += 1
             case .reused, nil:
                 break
@@ -4503,6 +6141,19 @@ actor WorkspaceFileContextStore {
         return AuthoritativeCatalogComponents(files: files, folders: folders, entries: entries)
     }
 
+    /// Builds the publication payload for a hidden root without consulting any
+    /// globally visible store map. This is the catalog half of the 8D atomic
+    /// root publication invariant.
+    private func buildPendingCatalogComponents(
+        root: WorkspaceRootRecord,
+        indexes: RootIndexBuffers
+    ) -> AuthoritativeCatalogComponents {
+        let files = indexes.filesByID.values.sorted(by: Self.searchRootCatalogFilePrecedes)
+        let folders = indexes.foldersByID.values.sorted(by: Self.searchCatalogFolderPrecedes)
+        let entries = files.map { WorkspaceSearchCatalogEntry(file: $0, root: root) }
+        return AuthoritativeCatalogComponents(files: files, folders: folders, entries: entries)
+    }
+
     private func buildAuthoritativeSearchCatalogSnapshot(
         rootScope: WorkspaceLookupRootScope,
         generation: UInt64,
@@ -5026,7 +6677,13 @@ actor WorkspaceFileContextStore {
                     guard let target = targetsByRootID[rootID] else { continue }
                     group.addTask { [weak self] in
                         guard !Task.isCancelled, let self else { return (index, nil) }
+                        guard await (try? requirePublishedSeededAuthorityFresh(rootID: rootID)) != nil else {
+                            return (index, nil)
+                        }
                         let sample = await awaitAppliedIngress(rootID: rootID, target: target)
+                        guard await (try? requirePublishedSeededAuthorityFresh(rootID: rootID)) != nil else {
+                            return (index, nil)
+                        }
                         return (index, sample)
                     }
                 }
@@ -5891,6 +7548,11 @@ actor WorkspaceFileContextStore {
         try Task.checkCancellation()
         try await waitForRootUnloadIfNeeded(standardizedPath: standardizedPath)
         try Task.checkCancellation()
+        try await waitForPendingSeededRootVisibilityIfNeeded(
+            standardizedPath: standardizedPath,
+            bypassToken: sessionWorktreeReservationToken
+        )
+        try Task.checkCancellation()
         if let sessionWorktreeReservationToken {
             guard sessionWorktreeReservedPathsByToken[
                 sessionWorktreeReservationToken
@@ -6282,6 +7944,63 @@ actor WorkspaceFileContextStore {
         return root
     }
 
+    /// Constructs fresh target-local IDs and records for a pending seeded root.
+    /// No source-worktree record, metadata, descriptor, or cache is reused.
+    private func makePendingSeededRootTopology(
+        standardizedPath: String,
+        service: FileSystemService,
+        relativeFilePaths: Set<String>,
+        relativeFolderPaths: Set<String>,
+        root existingRoot: WorkspaceRootRecord? = nil,
+        lifetimeID existingLifetimeID: UUID? = nil
+    ) -> (state: RootState, indexes: RootIndexBuffers) {
+        let rootURL = URL(fileURLWithPath: standardizedPath).standardizedFileURL
+        let root = existingRoot ?? WorkspaceRootRecord(
+            name: rootURL.lastPathComponent,
+            fullPath: rootURL.path,
+            kind: .sessionWorktree
+        )
+        var state = RootState(
+            lifetimeID: existingLifetimeID ?? UUID(),
+            root: root,
+            service: service,
+            folderIDsByRelativePath: [:],
+            fileIDsByRelativePath: [:],
+            childFolderIDsByFolderID: [:],
+            childFileIDsByFolderID: [:]
+        )
+        var indexes = RootIndexBuffers()
+        let rootFolder = WorkspaceFolderRecord(
+            id: root.id,
+            rootID: root.id,
+            name: root.name,
+            relativePath: "",
+            fullPath: root.fullPath,
+            parentFolderID: nil
+        )
+        indexes.foldersByID[rootFolder.id] = rootFolder
+        indexes.folderIDsByStandardizedFullPath[rootFolder.standardizedFullPath] = rootFolder.id
+        state.folderIDsByRelativePath[""] = rootFolder.id
+
+        let folders = relativeFolderPaths
+            .map(StandardizedPath.relative)
+            .filter { !$0.isEmpty && $0 != "." }
+            .sorted { lhs, rhs in
+                let lhsDepth = lhs.split(separator: "/").count
+                let rhsDepth = rhs.split(separator: "/").count
+                return lhsDepth == rhsDepth ? lhs < rhs : lhsDepth < rhsDepth
+            }
+            .map { FSItemDTO(relativePath: $0, isDirectory: true, hierarchy: $0.split(separator: "/").count) }
+        indexFolders(folders, root: root, state: &state, indexes: &indexes)
+
+        let files = relativeFilePaths
+            .map(StandardizedPath.relative)
+            .sorted()
+            .map { FSItemDTO(relativePath: $0, isDirectory: false, hierarchy: $0.split(separator: "/").count) }
+        indexFiles(files, root: root, state: &state, indexes: &indexes)
+        return (state, indexes)
+    }
+
     private func waitForRootUnloadIfNeeded(standardizedPath: String) async throws {
         try Task.checkCancellation()
         while unloadingRootPaths.contains(standardizedPath) {
@@ -6294,6 +8013,53 @@ actor WorkspaceFileContextStore {
                 Task { await self.cancelRootUnloadWaiter(standardizedPath: standardizedPath, waiterID: waiterID) }
             }
             try Task.checkCancellation()
+        }
+    }
+
+    private func waitForPendingSeededRootVisibilityIfNeeded(
+        standardizedPath: String,
+        bypassToken: WorkspaceSessionWorktreeOwnershipToken?
+    ) async throws {
+        while let pendingID = pendingSeededRootIDsByStandardizedPath[standardizedPath],
+              let pending = pendingSeededRootsByID[pendingID]
+        {
+            if pending.token == bypassToken {
+                throw WorkspaceSessionWorktreeOwnershipError.staleUpdate
+            }
+            let waiterID = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    pendingSeededRootVisibilityWaitersByPath[standardizedPath, default: [:]][waiterID] = continuation
+                }
+            } onCancel: {
+                Task {
+                    await self.cancelPendingSeededRootVisibilityWaiter(
+                        standardizedPath: standardizedPath,
+                        waiterID: waiterID
+                    )
+                }
+            }
+            try Task.checkCancellation()
+        }
+    }
+
+    private func cancelPendingSeededRootVisibilityWaiter(
+        standardizedPath: String,
+        waiterID: UUID
+    ) {
+        guard let continuation = pendingSeededRootVisibilityWaitersByPath[standardizedPath]?
+            .removeValue(forKey: waiterID)
+        else { return }
+        if pendingSeededRootVisibilityWaitersByPath[standardizedPath]?.isEmpty == true {
+            pendingSeededRootVisibilityWaitersByPath.removeValue(forKey: standardizedPath)
+        }
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func finishPendingSeededRootVisibility(path: String) {
+        let waiters = pendingSeededRootVisibilityWaitersByPath.removeValue(forKey: path) ?? [:]
+        for continuation in waiters.values {
+            continuation.resume()
         }
     }
 
@@ -6327,9 +8093,21 @@ actor WorkspaceFileContextStore {
         var statesToUnload: [(rootID: UUID, state: RootState)] = []
         var codemapCleanupFlights: [CodemapCleanupFlight] = []
         var codemapCleanupIDs = Set<UUID>()
+        var seededAuthorityFencesToRelease: [GitWorkspacePendingInitializationAuthorityFence] = []
         var ownershipResourcesReleasedByUnload = SessionWorktreeOwnershipRemoval()
         var invalidatedOwnershipTokens = Set<WorkspaceSessionWorktreeOwnershipToken>()
         for rootID in orderedRootIDs {
+            if let fence = publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID) {
+                seededAuthorityFencesToRelease.append(fence)
+            }
+            publishedSeededAuthorityStatesByRootID.removeValue(forKey: rootID)
+            let unavailablePath = rootStatesByID[rootID]?.root.standardizedFullPath ?? rootID.uuidString
+            resumePublishedSeededAuthorityWaiters(
+                rootID: rootID,
+                error: WorkspaceSessionWorktreeOwnershipError.unavailableRoot(unavailablePath)
+            )
+            seededAuthorityPendingGenerationByRootID.removeValue(forKey: rootID)
+            seededAuthorityReconciliationTasksByRootID.removeValue(forKey: rootID)?.cancel()
             explicitWatcherDemandRootIDs.remove(rootID)
             if let state = rootStatesByID[rootID] {
                 let watcherKey = WatcherInfrastructureKey(rootID: rootID, lifetimeID: state.lifetimeID)
@@ -6383,6 +8161,9 @@ actor WorkspaceFileContextStore {
                 $0.value.rootEpoch != rootEpoch
             }
             statesToUnload.append((rootID, state))
+        }
+        for fence in seededAuthorityFencesToRelease {
+            await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)
         }
         guard !statesToUnload.isEmpty else { return }
         invalidatePathMatchSnapshot(
@@ -6648,6 +8429,9 @@ actor WorkspaceFileContextStore {
     func cachedSearchContentSnapshot(
         for expectedRecord: WorkspaceFileRecord
     ) async -> FileSearchContentSnapshot {
+        guard publishedSeededAuthorityIsQueryable(rootID: expectedRecord.rootID) else {
+            return staleSearchContentSnapshot(for: expectedRecord)
+        }
         guard let current = file(
             rootID: expectedRecord.rootID,
             relativePath: expectedRecord.standardizedRelativePath
@@ -6686,6 +8470,7 @@ actor WorkspaceFileContextStore {
         for expectedRecord: WorkspaceFileRecord,
         freshnessPolicy: FileContentFreshnessPolicy = .validateDiskMetadata
     ) async throws -> FileSearchContentSnapshot {
+        try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
             guard let state = rootStatesByID[expectedRecord.rootID],
@@ -6718,6 +8503,7 @@ actor WorkspaceFileContextStore {
                     file: current,
                     rootLifetimeID: state.lifetimeID
                 )
+                try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
                     content: cached.content,
                     contentRevision: cached.revision,
@@ -6772,6 +8558,7 @@ actor WorkspaceFileContextStore {
                     file: current,
                     rootLifetimeID: state.lifetimeID
                 )
+                try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return FileSearchContentSnapshot(
                     content: cached.content,
                     contentRevision: cached.revision,
@@ -6806,6 +8593,7 @@ actor WorkspaceFileContextStore {
     private func interactiveReadSnapshotWithinForegroundActivity(
         for expectedRecord: WorkspaceFileRecord
     ) async throws -> WorkspaceInteractiveReadSnapshot? {
+        try await requirePublishedSeededAuthorityFresh(rootID: expectedRecord.rootID)
         for attempt in 0 ..< 2 {
             try Task.checkCancellation()
             guard let state = rootStatesByID[expectedRecord.rootID],
@@ -6875,6 +8663,7 @@ actor WorkspaceFileContextStore {
                     file: current,
                     rootLifetimeID: state.lifetimeID
                 )
+                try await requirePublishedSeededAuthorityFresh(rootID: current.rootID)
                 return WorkspaceInteractiveReadSnapshot(
                     preparedContent: preparedContent,
                     cacheHit: cached.cacheHit
@@ -6908,12 +8697,15 @@ actor WorkspaceFileContextStore {
         maximumBytes: Int,
         workloadClass: ContentReadWorkloadClass = .unspecified
     ) async throws -> FileContentPrefix? {
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         let state = try state(for: rootID)
-        return try await state.service.loadContentPrefix(
+        let result = try await state.service.loadContentPrefix(
             ofRelativePath: StandardizedPath.relative(relativePath),
             maximumBytes: maximumBytes,
             workloadClass: workloadClass
         )
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
+        return result
     }
 
     func readContent(
@@ -6921,6 +8713,7 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         workloadClass: ContentReadWorkloadClass = .unspecified
     ) async throws -> String? {
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         let state = try state(for: rootID)
         let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
         EditFlowPerf.lifecycleEvent(
@@ -6940,6 +8733,7 @@ actor WorkspaceFileContextStore {
                 ofRelativePath: StandardizedPath.relative(relativePath),
                 workloadClass: workloadClass
             )
+            try await requirePublishedSeededAuthorityFresh(rootID: rootID)
             EditFlowPerf.end(
                 EditFlowPerf.Stage.ReadFile.storeReadContentForwardAwait,
                 forwardState,
@@ -6979,14 +8773,17 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         workloadClass: ContentReadWorkloadClass = .unspecified
     ) async throws -> ValidatedFileContentSnapshot {
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         let state = try state(for: rootID)
         let standardizedRelativePath = StandardizedPath.relative(relativePath)
         let fingerprint = try await state.service.contentFingerprint(ofRelativePath: standardizedRelativePath)
-        return try await state.service.loadValidatedContent(
+        let result = try await state.service.loadValidatedContent(
             ofRelativePath: standardizedRelativePath,
             expectedFingerprint: fingerprint,
             workloadClass: workloadClass
         )
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
+        return result
     }
 
     func readContentWithDate(
@@ -6994,6 +8791,7 @@ actor WorkspaceFileContextStore {
         relativePath: String,
         workloadClass: ContentReadWorkloadClass = .unspecified
     ) async throws -> (content: String?, modificationDate: Date) {
+        try await requirePublishedSeededAuthorityFresh(rootID: rootID)
         let state = try state(for: rootID)
         let lifecycleCorrelation = EditFlowPerf.currentLifecycleCorrelation
         EditFlowPerf.lifecycleEvent(
@@ -7013,6 +8811,7 @@ actor WorkspaceFileContextStore {
                 ofRelativePath: StandardizedPath.relative(relativePath),
                 workloadClass: workloadClass
             )
+            try await requirePublishedSeededAuthorityFresh(rootID: rootID)
             EditFlowPerf.end(
                 EditFlowPerf.Stage.ReadFile.storeReadContentForwardAwait,
                 forwardState,
@@ -12188,7 +13987,8 @@ actor WorkspaceFileContextStore {
     }
 
     func lookupDiscoverablePath(rootID: UUID, relativePath: String) -> WorkspacePathLookupResult? {
-        guard let result = lookupPath(rootID: rootID, relativePath: relativePath),
+        guard publishedSeededAuthorityIsQueryable(rootID: rootID),
+              let result = lookupPath(rootID: rootID, relativePath: relativePath),
               isDiscoverableLookupResult(result)
         else { return nil }
         return result
@@ -12242,6 +14042,7 @@ actor WorkspaceFileContextStore {
         let standardizedPath = StandardizedPath.absolute(trimmed)
         guard let rootID = rootIDsByStandardizedPath[standardizedPath],
               let state = rootStatesByID[rootID],
+              publishedSeededAuthorityIsQueryable(rootID: rootID),
               state.root.kind == kind,
               state.root.standardizedFullPath == standardizedPath
         else { return nil }
@@ -12427,6 +14228,7 @@ actor WorkspaceFileContextStore {
         guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: expectedKind) else {
             return nil
         }
+        guard publishedSeededAuthorityIsQueryable(rootID: state.root.id) else { return nil }
 
         let trimmed = absolutePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -12453,6 +14255,7 @@ actor WorkspaceFileContextStore {
         _ file: WorkspaceFileRecord,
         expectedRoot: WorkspaceRootRef
     ) async -> String? {
+        guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
         guard let state = exactRootState(expectedRoot: expectedRoot, expectedKind: .workspaceGitData),
               file.rootID == state.root.id,
               let current = self.file(rootID: state.root.id, relativePath: file.standardizedRelativePath),
@@ -12462,6 +14265,8 @@ actor WorkspaceFileContextStore {
 
         let expectedLifetimeID = state.lifetimeID
         let content = try? await state.service.loadContent(ofRelativePath: file.standardizedRelativePath)
+
+        guard await (try? requirePublishedSeededAuthorityFresh(rootID: file.rootID)) != nil else { return nil }
 
         guard let currentState = rootStatesByID[expectedRoot.id],
               currentState.lifetimeID == expectedLifetimeID,
@@ -12954,7 +14759,15 @@ actor WorkspaceFileContextStore {
     ) -> SearchCatalogSnapshotValidationToken {
         switch scope {
         case .visibleWorkspace, .visibleWorkspacePlusGitData, .allLoaded, .allLoadedExcludingGitData:
-            let generation = (catalogGenerationsByScope[scope] ?? 0) &* 3 &+ scopeDiscriminator(scope)
+            var hasher = Hasher()
+            hasher.combine((catalogGenerationsByScope[scope] ?? 0) &* 3 &+ scopeDiscriminator(scope))
+            for root in rootsForPathLookupIgnoringPublishedAuthority(scope: scope) {
+                guard publishedSeededAuthorityFencesByRootID[root.id] != nil else { continue }
+                hasher.combine(root.id)
+                hasher.combine(publishedSeededAuthorityStatesByRootID[root.id]?.epoch ?? 0)
+                hasher.combine(publishedSeededAuthorityIsQueryable(rootID: root.id))
+            }
+            let generation = UInt64(bitPattern: Int64(hasher.finalize()))
             return .staticScope(generation: generation)
         case let .sessionBoundWorkspace(logicalRootPaths, physicalRootPaths):
             let normalizedLogicalRootPaths = normalizedSessionSelectorPaths(logicalRootPaths).sorted()
@@ -13134,6 +14947,14 @@ actor WorkspaceFileContextStore {
     }
 
     private func rootsForPathLookup(scope: WorkspaceLookupRootScope) -> [WorkspaceRootRecord] {
+        rootsForPathLookupIgnoringPublishedAuthority(scope: scope).filter {
+            publishedSeededAuthorityIsQueryable(rootID: $0.id)
+        }
+    }
+
+    private func rootsForPathLookupIgnoringPublishedAuthority(
+        scope: WorkspaceLookupRootScope
+    ) -> [WorkspaceRootRecord] {
         let allRoots = roots()
         switch scope {
         case .visibleWorkspace:

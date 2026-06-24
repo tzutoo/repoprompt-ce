@@ -34,6 +34,91 @@ final class WorkspaceRootSeedPlannerTests: XCTestCase {
         XCTAssertEqual(plan.verifiedPathCount, 0)
     }
 
+    func testServingOutcomeCarriesExactFinalAuthorityEvidenceWithoutChangingPlan() async throws {
+        let prefix = try GitRepositoryRelativeRootPrefix("")
+        let reusable = Support.snapshot(paths: [("A.swift", "100644")], prefix: prefix)
+        let shadow = WorkspaceRootSeedPlanner.materialize(
+            snapshot: reusable,
+            targetTreeOID: reusable.compatibilityKey.treeOID,
+            treeDelta: [],
+            index: GitIndexManifest(
+                rootPrefix: prefix,
+                entries: [Support.indexEntry("A.swift")],
+                outputByteCount: 0
+            ),
+            status: Support.status([]),
+            verificationFacts: [:],
+            copiedRepositoryRelativePaths: [],
+            prefix: prefix
+        )
+        guard case let .planned(plan) = shadow else {
+            return XCTFail("Expected a shadow plan")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WorkspaceRootSeedPlannerTests-\(UUID().uuidString)", isDirectory: true)
+        let gitDirectory = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = GitRepositoryLayout(
+            workTreeRoot: root,
+            dotGitPath: gitDirectory,
+            gitDir: gitDirectory,
+            commonDir: gitDirectory,
+            isWorktree: false
+        )
+        let repositoryKey = GitWorkspaceAuthorityRepositoryKey(layout: layout)
+        let authoritySnapshot = GitWorkspaceAuthoritySnapshot(
+            repositoryKey: repositoryKey,
+            repositoryNamespace: reusable.compatibilityKey.repositoryNamespace,
+            objectFormat: reusable.compatibilityKey.objectFormat,
+            headCommitOID: Support.oid("b"),
+            treeOID: reusable.compatibilityKey.treeOID,
+            repositoryRelativeRootPrefix: prefix,
+            repositoryBindingEpoch: "repository",
+            worktreeBindingEpoch: "worktree",
+            layoutGeneration: "layout",
+            indexGeneration: "index",
+            checkoutConfigurationGeneration: "checkout",
+            metadataGeneration: "metadata",
+            policyIdentity: reusable.compatibilityKey.policyIdentity
+        )
+        let monitor = GitWorkspaceMetadataMonitor()
+        let token = try await monitor.retain(repositoryKey: repositoryKey, paths: [gitDirectory]) { _ in }
+        let lease = GitWorkspaceAuthorityLease(
+            scopeKey: GitWorkspaceAuthorityScopeKey(
+                repositoryKey: repositoryKey,
+                repositoryRelativeRootPrefix: prefix
+            ),
+            authorityGeneration: 1,
+            invalidationGeneration: 0,
+            acceptedMetadataWatermark: 0,
+            snapshot: authoritySnapshot
+        )
+        let fence = GitWorkspacePendingInitializationAuthorityFence(
+            snapshot: authoritySnapshot,
+            lease: lease,
+            metadataObservationToken: token,
+            acceptedMetadataWatermark: 0,
+            targetLayout: layout,
+            repositoryRelativeRootPrefix: prefix,
+            additionalAuthorityPaths: [],
+            revalidationUsed: false
+        )
+        let serving = WorkspaceRootSeedServingPlanningOutcome.planned(
+            plan: plan,
+            authorityFence: fence
+        )
+        guard case let .planned(servingPlan, finalFence) = serving else {
+            return XCTFail("Expected a serving plan")
+        }
+        XCTAssertEqual(servingPlan, plan)
+        XCTAssertEqual(finalFence.snapshot, authoritySnapshot)
+        XCTAssertEqual(finalFence.lease, lease)
+        XCTAssertEqual(finalFence.acceptedMetadataWatermark, 0)
+        await monitor.release(token)
+    }
+
     func testMaterializerAppliesCommittedIndexAndPorcelainOverlays() throws {
         let snapshot = Support.snapshot(paths: [
             ("Copy.swift", "100644"),

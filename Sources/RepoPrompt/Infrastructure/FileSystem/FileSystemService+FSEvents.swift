@@ -33,6 +33,9 @@ extension FileSystemService {
 
     /// (Re)start the FSEvent stream if needed and drain the pre-crawl replay cut.
     public func startWatchingForChanges() async throws {
+        guard seedInitializationState == nil else {
+            throw FileSystemSeedReplayError.initializationAlreadyActive
+        }
         try startFSEventStream()
         if let stream = fseventStreamRef {
             FSEventStreamFlushSync(stream)
@@ -506,7 +509,17 @@ extension FileSystemService {
             }
         #endif
 
-        let filterResult = service.watcherEarlyFilter.filter(payload)
+        // A wrapped journal can never be proven safe by path filtering. Preserve
+        // the signal so strict seeded replay rejects it even when its path would
+        // otherwise be ignored by the immutable early-filter snapshot.
+        let hasWrappedJournal = payload.entries.contains { entry in
+            (entry.flags & FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped)) != 0
+        }
+        let filterResult = if hasWrappedJournal {
+            FileSystemWatcherEarlyFilter.Result(payload: payload, filteredEntryCount: 0)
+        } else {
+            service.watcherEarlyFilter.filter(payload)
+        }
         guard let retainedPayload = filterResult.payload else { return }
 
         let lifecycleCorrelation = EditFlowPerf.makeLifecycleCorrelationIfActive()
@@ -1479,6 +1492,10 @@ extension FileSystemService {
                 }
             } catch {
                 print("Error during parallel folder scanning: \(error)")
+                if seedReplayRequiresFailClosedRecovery() {
+                    failCurrentSeedReplayForRecovery()
+                    return testMode ? [] : nil
+                }
                 // The serial fallback gets one immediate attempt. Targets that fail
                 // both paths remain explicitly dirty and retain the accepted watermark.
                 pendingQuietFolderScanTargets.subtract(Set(eligibleFolders))

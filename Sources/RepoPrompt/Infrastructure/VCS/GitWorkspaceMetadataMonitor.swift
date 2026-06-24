@@ -125,6 +125,16 @@ actor GitWorkspaceMetadataMonitor {
         acceptedWatermarks.value(for: repositoryKey)
     }
 
+    nonisolated func acceptedWatermarkIsCurrent(
+        for repositoryKey: GitWorkspaceAuthorityRepositoryKey,
+        expected: UInt64
+    ) -> Bool {
+        acceptedWatermarks.withCurrentValue(
+            for: repositoryKey,
+            expected: expected
+        ) { true } ?? false
+    }
+
     /// Serializes an authority install linearization point with synchronous
     /// event acceptance. If an event was accepted during collection, the body
     /// never runs; an event accepted afterward observes the installed value as
@@ -139,6 +149,16 @@ actor GitWorkspaceMetadataMonitor {
             expected: expected,
             body
         )
+    }
+
+    /// Validates a complete multi-root watermark cut while holding the monitor
+    /// lock exactly once. Duplicate repository keys must already have been
+    /// coalesced to one exact expected value by the caller.
+    nonisolated func withCurrentAcceptedWatermarks<T>(
+        _ expected: [GitWorkspaceAuthorityRepositoryKey: UInt64],
+        _ body: () -> T
+    ) -> T? {
+        acceptedWatermarks.withCurrentValues(expected, body)
     }
 
     func retain(
@@ -264,6 +284,17 @@ actor GitWorkspaceMetadataMonitor {
     }
 
     #if DEBUG
+        /// Deterministic callback-equivalent injection. Acceptance advances
+        /// synchronously before actor delivery, matching the real FSEvents
+        /// callback ordering without introducing a polling test seam.
+        func injectAcceptedEventForTesting(
+            repositoryKey: GitWorkspaceAuthorityRepositoryKey,
+            kinds: Set<GitWorkspaceMetadataEventKind>
+        ) {
+            acceptedWatermarks.accept(repositoryKey)
+            acceptedEvent(repositoryKey: repositoryKey, kinds: kinds)
+        }
+
         func flushForTesting(repositoryKey: GitWorkspaceAuthorityRepositoryKey) async {
             records[repositoryKey]?.sourcesByTargetKey.values.forEach { $0.flushSync() }
         }
@@ -372,6 +403,16 @@ private final class GitMetadataAcceptedWatermarks: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard values[key, default: 0] == expected else { return nil }
+        return body()
+    }
+
+    func withCurrentValues<T>(
+        _ expected: [GitWorkspaceAuthorityRepositoryKey: UInt64],
+        _ body: () -> T
+    ) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard expected.allSatisfy({ values[$0.key, default: 0] == $0.value }) else { return nil }
         return body()
     }
 }

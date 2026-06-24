@@ -66,6 +66,13 @@ actor FileSystemService {
         if let watcherAcceptedWatermark {
             lastPublishedWatcherAcceptedWatermark = max(lastPublishedWatcherAcceptedWatermark, watcherAcceptedWatermark)
         }
+        recordSeedReplayPublication(
+            source: source,
+            watcherAcceptedWatermark: watcherAcceptedWatermark,
+            requiresFullResync: requiresFullResync,
+            deltas: deltas,
+            servicePublicationSequence: servicePublicationSequence
+        )
         let publication = FileSystemDeltaPublication(
             servicePublicationSequence: servicePublicationSequence,
             source: source,
@@ -155,6 +162,7 @@ actor FileSystemService {
         }
 
         var watcherActivationFailurePointForTesting: WatcherActivationFailurePoint?
+        var seededPublicationActivationShouldFailForTesting = false
         var folderScanFailuresRemainingForTesting: [String: Int] = [:]
     #endif
 
@@ -183,6 +191,7 @@ actor FileSystemService {
     var nextServicePublicationSequence: UInt64 = 0
     var lastServicePublicationSequence: UInt64 = 0
     var lastPublishedWatcherAcceptedWatermark = FileSystemWatcherIngressMailbox.Watermark.zero
+    var seedInitializationState: FileSystemSeedInitializationState?
     #if DEBUG
         struct FreshnessWorkDiagnosticsSnapshot: Equatable {
             let flushCallCount: Int
