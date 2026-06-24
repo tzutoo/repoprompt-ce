@@ -75,7 +75,7 @@ enum GitBlobCodeMapLocatorWriteResult: Equatable {
 /// Inert persistence for Git-blob-to-artifact associations.
 ///
 /// This owner is deliberately independent of `CodeMapArtifactStore` and is not consulted by
-/// `CodeScanActor` or workspace consumers. An association only becomes visible after a
+/// legacy scanner implementations or workspace consumers. An association only becomes visible after a
 /// checksummed, canonical record has been atomically published under its path-free identity digest.
 actor GitBlobCodeMapLocatorStore {
     private static let directoryMode = mode_t(0o700)

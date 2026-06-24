@@ -354,24 +354,85 @@ actor PromptContextAccountingService {
             }
         #endif
 
+        var operationSourceFileIDs: [UUID] = []
+        var seenOperationSourceFileIDs = Set<UUID>()
+        func appendOperationSource(_ file: WorkspaceFileRecord) {
+            if seenOperationSourceFileIDs.insert(file.id).inserted {
+                operationSourceFileIDs.append(file.id)
+            }
+        }
+        for selectedPathIndex in selectedPathResultsByIndex.keys.sorted() {
+            guard let result = selectedPathResultsByIndex[selectedPathIndex] else { continue }
+            if let file = result.file {
+                appendOperationSource(file)
+            } else if let folder = result.folder {
+                let prefix = folder.standardizedRelativePath
+                let files = await store.files(inRoot: folder.rootID)
+                for file in files where prefix.isEmpty || file.standardizedRelativePath == prefix || file.standardizedRelativePath.hasPrefix(prefix + "/") {
+                    appendOperationSource(file)
+                }
+            }
+        }
+        for path in orderedSlicePaths {
+            if let file = await store.lookupPath(path, profile: profile, rootScope: rootScope)?.file {
+                appendOperationSource(file)
+            }
+        }
+        var manualCodemapFileIDs: [UUID] = []
+        if codeMapUsage == .selected || (codeMapUsage == .auto && !selection.codemapAutoEnabled) {
+            let manualRequests = selection.manualCodemapPaths.map {
+                WorkspacePathLookupRequest(userPath: $0, profile: profile, rootScope: rootScope)
+            }
+            let manualResults = await store.lookupPaths(manualRequests)
+            var seenManualIDs = Set<UUID>()
+            for path in selection.manualCodemapPaths {
+                if let file = manualResults[path]?.file, seenManualIDs.insert(file.id).inserted {
+                    manualCodemapFileIDs.append(file.id)
+                }
+            }
+        }
+        var completeCodemapFileIDs: [UUID] = []
+        if codeMapUsage == .complete {
+            for root in await store.rootRefs(scope: rootScope) {
+                for file in await store.files(inRoot: root.id) {
+                    let fileExtension = (file.name as NSString).pathExtension.lowercased()
+                    if !fileExtension.isEmpty,
+                       SyntaxManager.supportsCodeMap(fileExtension: fileExtension)
+                    {
+                        completeCodemapFileIDs.append(file.id)
+                    }
+                }
+            }
+        }
         if frozenPresentation == nil {
-            let plan = await WorkspaceCodemapPresentationIntentResolver.plan(
-                codeMapUsage: codeMapUsage,
-                selection: selection,
-                store: store,
-                rootScope: rootScope,
-                profile: profile
-            )
+            let intent: WorkspaceCodemapOperationPresentationIntent = switch codeMapUsage {
+            case .none:
+                .none
+            case .selected:
+                .exact(
+                    fileIDs: operationSourceFileIDs + manualCodemapFileIDs.filter {
+                        !operationSourceFileIDs.contains($0)
+                    },
+                    completeRootSet: false
+                )
+            case .auto:
+                selection.codemapAutoEnabled
+                    ? .automatic(sourceFileIDs: operationSourceFileIDs)
+                    : .exact(fileIDs: manualCodemapFileIDs, completeRootSet: false)
+            case .complete:
+                .exact(fileIDs: completeCodemapFileIDs, completeRootSet: true)
+            }
+            let preflightIssues: [WorkspaceCodemapOperationIssue] = []
             do {
                 let presentation = try await WorkspaceCodemapPresentationCoordinator(store: store)
                     .presentation(
-                        for: plan.intent,
+                        for: intent,
                         rootScope: rootScope,
                         logicalRootDisplayNamesByRootID: codemapLogicalRootDisplayNamesByRootID
                     )
                 codemapPresentation = WorkspaceCodemapPresentationIntentResolver.merging(
                     presentation,
-                    preflightIssues: plan.preflightIssues
+                    preflightIssues: preflightIssues
                 )
             } catch {
                 let issue: WorkspaceCodemapOperationIssue = if Task.isCancelled || error is CancellationError {

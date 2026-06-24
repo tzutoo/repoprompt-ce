@@ -133,33 +133,13 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
         _ = try await store.loadRoot(path: root.path)
         let targetLookup = await store.lookupPath(targetURL.path)
         let targetRecord = try XCTUnwrap(targetLookup?.file)
-        let targetAPI = makeFileAPI(
+        let targetAPI = makeSyntaxArtifact(
             path: targetURL.path,
             symbolName: "targetCodemapSymbol",
             className: "TargetType"
         )
         let targetPresentation = try makePresentation(entries: [
-            (targetRecord, targetAPI.getFullAPIDescription(displayPath: "LogicalRoot/Target.swift"))
-        ])
-        await store.applyObservedCodemapResults([
-            WorkspaceObservedCodemapResult(
-                fullPath: selectedURL.path,
-                modificationDate: Date(),
-                fileAPI: makeFileAPI(
-                    path: selectedURL.path,
-                    symbolName: "selectedCodemapSymbol",
-                    referencedTypes: ["TargetType"]
-                )
-            ),
-            WorkspaceObservedCodemapResult(
-                fullPath: targetURL.path,
-                modificationDate: Date(),
-                fileAPI: makeFileAPI(
-                    path: targetURL.path,
-                    symbolName: "targetCodemapSymbol",
-                    className: "TargetType"
-                )
-            )
+            (targetRecord, targetAPI.renderedCodeMap(displayPath: "LogicalRoot/Target.swift"))
         ])
         let lookupContext = WorkspaceLookupContext(rootScope: .allLoaded, bindingProjection: nil)
 
@@ -244,35 +224,15 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
             let rootRecord = try await store.loadRoot(path: root.path)
             let targetLookup = await store.lookupPath(targetURL.path)
             let targetRecord = try XCTUnwrap(targetLookup?.file)
-            let targetAPI = makeFileAPI(
+            let targetAPI = makeSyntaxArtifact(
                 path: targetURL.path,
                 symbolName: "frozenCodemapSentinel"
             )
             let frozenPresentation = try makePresentation(entries: [
-                (targetRecord, targetAPI.getFullAPIDescription(displayPath: "LogicalRoot/Target.swift"))
+                (targetRecord, targetAPI.renderedCodeMap(displayPath: "LogicalRoot/Target.swift"))
             ])
             let loadedFileSystemService = await store.fileSystemServiceForTesting(rootID: rootRecord.id)
             let fileSystemService = try XCTUnwrap(loadedFileSystemService)
-            await store.applyObservedCodemapResults([
-                WorkspaceObservedCodemapResult(
-                    fullPath: selectedURL.path,
-                    modificationDate: Date(),
-                    fileAPI: makeFileAPI(
-                        path: selectedURL.path,
-                        symbolName: "selectedFrozenSourceSymbol",
-                        referencedTypes: ["Target"]
-                    )
-                ),
-                WorkspaceObservedCodemapResult(
-                    fullPath: targetURL.path,
-                    modificationDate: Date(),
-                    fileAPI: makeFileAPI(
-                        path: targetURL.path,
-                        symbolName: "frozenCodemapSentinel",
-                        className: "Target"
-                    )
-                )
-            ])
             let gate = PreAssemblyContentReadGate()
             await fileSystemService.setContentReadChunkHandlerForTesting { _ in
                 await gate.markStartedAndWaitForRelease()
@@ -308,13 +268,11 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
                 )
             }
             await gate.waitUntilStarted()
-            await store.applyObservedCodemapResults([
-                WorkspaceObservedCodemapResult(
-                    fullPath: targetURL.path,
-                    modificationDate: Date(),
-                    fileAPI: nil
-                )
-            ])
+            _ = try await store.editFile(
+                rootID: rootRecord.id,
+                relativePath: "Target.swift",
+                newContent: "struct TargetV2 {}\n"
+            )
             await gate.release()
             let result = await resolveTask.value
             await fileSystemService.setContentReadChunkHandlerForTesting(nil)
@@ -339,10 +297,6 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
             XCTAssertTrue(clipboard.contains("frozenCodemapSentinel"), clipboard)
             XCTAssertTrue(result.codemapPresentation.orderedEntries.contains {
                 $0.text.contains("frozenCodemapSentinel")
-            })
-            let currentBundle = await store.codemapSnapshotBundle()
-            XCTAssertFalse(currentBundle.orderedSnapshots.contains {
-                $0.fileAPI?.apiDescription.contains("frozenCodemapSentinel") == true
             })
         #endif
     }
@@ -1122,14 +1076,13 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
         )
     }
 
-    private func makeFileAPI(
+    private func makeSyntaxArtifact(
         path: String,
         symbolName: String,
         className: String? = nil,
         referencedTypes: [String] = []
-    ) -> FileAPI {
-        FileAPI(
-            filePath: path,
+    ) -> CodeMapSyntaxArtifact {
+        CodeMapSyntaxArtifact(
             imports: [],
             classes: className.map { [ClassInfo(name: $0, methods: [], properties: [])] } ?? [],
             functions: [

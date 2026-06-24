@@ -432,7 +432,6 @@ private struct ReplayRootPassAccumulator {
     let rootKey: String
     var processedDigests: [WorkspaceFilesViewModel.FileSystemDeltaDigest] = []
     var topologyChanged = false
-    var codeScanFilesByID: [UUID: FileViewModel] = [:]
     var sliceRebasesByFullPath: [String: ReplaySliceRebaseRequest] = [:]
 }
 
@@ -503,7 +502,6 @@ class WorkspaceFilesViewModel: ObservableObject {
     var cancellables = Set<AnyCancellable>()
     let folderRefreshPublisher = PassthroughSubject<FolderViewModel, Never>()
     let selectionClearedPublisher = PassthroughSubject<Void, Never>()
-    let codeMapUpdatePublisher = PassthroughSubject<Void, Never>() // New publisher
     let fileSystemChangedPublisher = PassthroughSubject<Void, Never>() // Publisher for file system changes
 
     /// Emitted once after a prepared root delta pass is finalized.
@@ -690,7 +688,15 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     }
 
+    @Published private(set) var manualCodemapFiles: [FileViewModel] = [] {
+        didSet {
+            guard manualCodemapFiles.map(\.id) != oldValue.map(\.id) else { return }
+            selectionStateRevision &+= 1
+        }
+    }
+
     private var autoCodemapFileIDs: Set<UUID> = []
+    private var manualCodemapFileIDs: Set<UUID> = []
     @Published var codemapAutoEnabled: Bool = true {
         didSet {
             guard codemapAutoEnabled != oldValue else { return }
@@ -704,6 +710,7 @@ class WorkspaceFilesViewModel: ObservableObject {
             // Explicit manual files are added only after auto mode is disabled.
             resetAutoCodemapFiles([])
             if codemapAutoEnabled {
+                resetManualCodemapFiles([])
                 scheduleAutoCodemapSync()
             }
         }
@@ -772,11 +779,6 @@ class WorkspaceFilesViewModel: ObservableObject {
     /// Cache of files confirmed to have no slices at `partitionSliceSaveRevision`.
     private var noSlicesKnownRevisionByFullPath: [String: UInt64] = [:]
     private var workspaceSaveDebounceTask: Task<Void, Never>?
-
-    private var isInitialRootLoadScanDeferralActive = false
-    private var deferredInitialRootLoadScanRoots = Set<String>()
-    private var deferredInitialRootLoadScanFlushTask: Task<Void, Never>?
-    private var deferredInitialRootLoadScanFlushTaskID: UUID?
 
     // MARK: - Path Search Caches
 
@@ -910,15 +912,10 @@ class WorkspaceFilesViewModel: ObservableObject {
     private let fileSearchActor = FileSearchActor()
     private let deltaReplayPreparationActor = DeltaReplayPreparationActor()
 
-    @Published var remainingScanCount: Int = 0
-    @Published var totalFilesSeen: Int = 0
-
     // We'll keep your existing references to isLoading, selectedFiles, etc.
     // If you don't need these placeholders, remove them.
     private var currentFolderLoadingTask: Task<Void, Error>?
     private var currentFolderLoadingTaskID: UUID?
-
-    private var scanProgressTask: Task<Void, Never>?
 
     #if !DEBUG
         typealias RootReplayPassPerfSample = Never
@@ -994,8 +991,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             let rebuildCleanupCandidateFolderKeys: Int?
             let rebuildCleanupCandidateFileKeys: Int?
             let rebuildUsedOwnershipFallback: Bool?
-            let codeScanBatchInvocationCount: Int
-            let codeScanBatchFileCount: Int
             let sliceRebaseBatchInvocationCount: Int
             let sliceRebaseCandidateCount: Int
             let invalidateSnapshotDurationMS: Double
@@ -1011,8 +1006,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             let onRootFoldersChangedInvocationCount: Int
             let snapshotInvalidationCount: Int
             let deltaAppliedPublisherInvocationCount: Int
-            let codeScanBatchInvocationCount: Int
-            let codeScanBatchFileCount: Int
             let sliceRebaseBatchInvocationCount: Int
             let sliceRebaseCandidateCount: Int
             let onRootFoldersChangedDurationMS: Double
@@ -1061,10 +1054,8 @@ class WorkspaceFilesViewModel: ObservableObject {
             let totalOnRootFoldersChangedInvocationCount: Int
             let totalSnapshotInvalidationCount: Int
             let totalDeltaAppliedPublisherInvocationCount: Int
-            let totalReplayCodeScanBatchInvocationCount: Int
             let totalReplaySliceRebaseBatchInvocationCount: Int
             let totalRebuildDurationMS: Double
-            let totalCodeScanBatchFileCount: Int
             let totalSliceRebaseCandidateCount: Int
             let totalInvalidateSnapshotDurationMS: Double
             let preReplayServiceFlushes: [ServiceFlushSample]
@@ -1196,7 +1187,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     #endif
     private var workspaceStoreDeltaBridgeTask: Task<Void, Never>?
-    private var workspaceStoreCodemapBridgeTask: Task<Void, Never>?
+    private var codemapSelectionGraphReadinessTask: Task<Void, Never>?
     private let alwaysReadableHomeDirectoryURL: URL
     private let automaticCodemapSelectionRequestPolicy: WorkspaceCodemapAutomaticSelectionRequestPolicy
     private let automaticCodemapSelectionWaiter: WorkspaceCodemapAutomaticSelectionWaiter
@@ -1222,9 +1213,8 @@ class WorkspaceFilesViewModel: ObservableObject {
         // before any FileSystemService instances can be created for loaded folders.
         syncFileSystemPreferencesFromGlobalSettings()
 
-        subscribeToScanProgress()
         subscribeToWorkspaceStoreDeltaEvents()
-        subscribeToWorkspaceStoreCodemapUpdates()
+        subscribeToCodemapSelectionGraphReadinessUpdates()
         subscribeToPartitionStoreSaves()
         subscribeToFileSystemPreferenceChanges()
     }
@@ -1240,9 +1230,8 @@ class WorkspaceFilesViewModel: ObservableObject {
 
     deinit {
         // Cancel the subscriptions if this VM goes away
-        scanProgressTask?.cancel()
         workspaceStoreDeltaBridgeTask?.cancel()
-        workspaceStoreCodemapBridgeTask?.cancel()
+        codemapSelectionGraphReadinessTask?.cancel()
         autoCodemapSyncTask?.cancel()
         for task in sliceRebaseTasksByFullPath.values {
             task.cancel()
@@ -1410,25 +1399,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     #endif
 
-    /// Subscribes to store-owned codemap scan progress.
-    private func subscribeToScanProgress() {
-        scanProgressTask = Task { [weak self] in
-            guard let self else { return }
-            let stream = await workspaceFileContextStore.codemapScanProgressUpdates()
-            for await (remaining, total) in stream {
-                await MainActor.run {
-                    self.updateScanProgress(remaining: remaining, total: total)
-                }
-            }
-        }
-    }
-
-    private func updateScanProgress(remaining: Int, total: Int) {
-        remainingScanCount = remaining
-        totalFilesSeen = total
-        // No extra counter needed – updating the two @Published props is enough
-    }
-
     private func subscribeToWorkspaceStoreDeltaEvents() {
         workspaceStoreDeltaBridgeTask = Task { [weak self] in
             guard let self else { return }
@@ -1439,12 +1409,12 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     }
 
-    private func subscribeToWorkspaceStoreCodemapUpdates() {
-        workspaceStoreCodemapBridgeTask = Task { [weak self] in
+    private func subscribeToCodemapSelectionGraphReadinessUpdates() {
+        codemapSelectionGraphReadinessTask = Task { [weak self] in
             guard let self else { return }
-            let stream = await workspaceFileContextStore.codemapUpdates()
+            let stream = await workspaceFileContextStore.codemapSelectionGraphReadinessUpdates()
             for await event in stream {
-                handleWorkspaceStoreCodemapUpdateEvent(event)
+                handleCodemapSelectionGraphReadiness(event)
             }
         }
     }
@@ -2324,7 +2294,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             guard isCurrentWorkspaceAppliedIndexRoot(for: event, targetRootVM: targetRootVM) else {
                 return false
             }
-            requestCodeScan(for: fileVM)
             scheduleSliceRebasesForModifiedFiles([
                 ReplaySliceRebaseRequest(
                     file: fileVM,
@@ -2390,68 +2359,17 @@ class WorkspaceFilesViewModel: ObservableObject {
     }
 
     @MainActor
-    private func handleWorkspaceStoreCodemapUpdateEvent(_ event: WorkspaceCodemapUpdateEvent) {
-        var updated = false
-        var shouldScheduleAutoSync = event.automaticSelectionReadinessChanged
-
-        for snapshot in event.snapshots {
-            guard let fileVM = findFileByFullPath(snapshot.fullPath) else { continue }
-            let currentApi = validatedFileAPI(for: fileVM)
-            let wasTracked = currentApi != nil
-            let isSelected = selectedFileIDs.contains(fileVM.id)
-            fileVM.setCodeMap(snapshot.fileAPI)
-            let acceptedApi = validatedFileAPI(for: fileVM)
-            guard !codeMapAPIsMatch(currentApi, acceptedApi) else { continue }
-            if acceptedApi != nil {
-                if !wasTracked || !isSelected {
-                    shouldScheduleAutoSync = true
-                }
-            } else if wasTracked {
-                shouldScheduleAutoSync = true
-            }
-            updated = true
-        }
-
-        if !event.removedFileIDs.isEmpty || event.isRootUnload {
-            let removedFileIDs = Set(event.removedFileIDs)
-            let removedFiles = allFilesSnapshot(sorted: false).filter { file in
-                removedFileIDs.contains(file.id)
-                    || (event.isRootUnload && file.standardizedRootFolderPath == event.rootPath)
-            }
-            for file in removedFiles where validatedFileAPI(for: file) != nil {
-                file.setCodeMap(nil)
-                shouldScheduleAutoSync = true
-                updated = true
-            }
-        }
-
-        guard updated || shouldScheduleAutoSync else { return }
-        if updated {
-            codeMapUpdatePublisher.send(())
-        }
-        if shouldScheduleAutoSync {
-            if autoCodemapReadinessRetryPending {
-                scheduleAutoCodemapSync(readinessTriggered: true)
-            } else if autoCodemapReadinessRetryAvailable {
-                scheduleAutoCodemapSync()
-            }
-        }
-    }
-
-    private func codeMapAPIsMatch(_ lhs: FileAPI?, _ rhs: FileAPI?) -> Bool {
-        switch (lhs, rhs) {
-        case (nil, nil):
-            true
-        case let (left?, right?):
-            standardizedAPIFilePath(left) == standardizedAPIFilePath(right)
-                && left.apiDescription == right.apiDescription
-        case (nil, _?), (_?, nil):
-            false
-        }
+    private func handleCodemapSelectionGraphReadiness(
+        _ event: WorkspaceCodemapSelectionGraphReadinessEvent
+    ) {
+        guard codemapAutoEnabled,
+              autoCodemapReadinessRetryPending,
+              visibleRootFolders.contains(where: { $0.id == event.rootEpoch.rootID })
+        else { return }
+        scheduleAutoCodemapSync(readinessTriggered: true)
     }
 
     func cancelAllLoadingTasks() {
-        discardDeferredInitialRootLoadScans()
         invalidateAllRootLoadTokens()
         // Cancel the currently running folder loading task, if any.
         currentFolderLoadingTask?.cancel()
@@ -2813,7 +2731,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         let stdRoot = folder.standardizedFullPath
         let rootKey = rootKey(forPath: folder.fullPath)
         appliedIndexProjectionHandledGenerationByRootID.removeValue(forKey: folder.id)
-        removeDeferredInitialRootLoadScanRoot(stdRoot)
         unregisterExpansionTracking(for: folder)
         dropSelections(underFolderFullPath: folder.fullPath)
         normalizeSelectionState()
@@ -3050,7 +2967,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                 let loadOwnsRootShell = appendedRootFolder != nil || !hadRootShellBeforeLoad
                 if canCleanSharedRootState {
                     await workspaceFileContextStore.cancelRootLoad(path: rootPath)
-                    removeDeferredInitialRootLoadScanRoot(stdRootPath)
                 }
                 if let loadedWorkspaceRootRecord {
                     if canCleanSharedRootState, loadOwnsRootShell {
@@ -3129,10 +3045,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     }
 
-    func onAllFoldersLoaded() async {
-        await rescanAllFilesIfLoaded()
-    }
-
     @MainActor
     func performPostCatalogRootWork(
         for rootRecord: WorkspaceRootRecord,
@@ -3146,8 +3058,8 @@ class WorkspaceFilesViewModel: ObservableObject {
         let rootReplayIngressGeneration = advanceRootReplayIngressGeneration(forRootKey: rootKey)
         await workspaceFileContextStore.registerDeferredReplayRootGeneration(rootReplayIngressGeneration, forRootKey: rootKey)
         // A watcher activation failure must still be surfaced to the caller, but it must not
-        // skip persisted selection-slice hydration or codemap kickoff for an otherwise loaded
-        // root, so the throw is deferred until the remaining post-catalog work completes.
+        // skip persisted selection-slice hydration for an otherwise loaded root, so the throw is
+        // deferred until the remaining post-catalog work completes.
         var deferredWatcherStartError: Error?
         do {
             try await workspaceFileContextStore.startWatchingRoot(id: rootRecord.id)
@@ -3168,17 +3080,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             currentSlicesByRoot[rootRecord.standardizedFullPath] = partitionData
         }
         requestSelectionSliceSnapshotRebuild(reason: "selection.slicesSnapshot")
-
-        if codeScanEnabled, rootKind == .user {
-            if isInitialRootLoadScanDeferralActive {
-                deferredInitialRootLoadScanRoots.insert(rootRecord.standardizedFullPath)
-            } else {
-                enqueueInitialRootLoadRequests(
-                    rootRecords: [rootRecord],
-                    purgeCachesOnEmptyInitialRequests: true
-                )
-            }
-        }
 
         if let deferredWatcherStartError {
             throw deferredWatcherStartError
@@ -3255,9 +3156,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         cleanupSharedRootState: Bool = true
     ) {
         let stdPath = folder.standardizedFullPath
-        if cleanupSharedRootState {
-            removeDeferredInitialRootLoadScanRoot(stdPath)
-        }
+        if cleanupSharedRootState {}
         unregisterExpansionTracking(for: folder)
         if cleanupSharedRootState {
             removeRootFolderReferences(folder)
@@ -3398,7 +3297,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         if didStructurallyRefreshRoots && !didReorderRoots {
             onRootFoldersChanged?()
         }
-        await rescanAllFilesIfLoaded()
         return didStructurallyRefreshRoots || didReorderRoots
     }
 
@@ -3923,7 +3821,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         let shouldFlushPendingInserts = chunk.summary.fileAddedCount > 0
         var dirtyFolderStateStarts: [UUID: FolderViewModel] = [:]
         var requiresFullRootFolderStateRefresh = false
-        var batchedCodeScanFiles: [UUID: FileViewModel] = [:]
         var batchedSliceRebases: [String: ReplaySliceRebaseRequest] = [:]
         #if DEBUG
             let fileAddedCount = chunk.summary.fileAddedCount
@@ -3960,8 +3857,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             var rebuildCleanupCandidateFolderKeys: Int?
             var rebuildCleanupCandidateFileKeys: Int?
             var rebuildUsedOwnershipFallback: Bool?
-            var codeScanBatchInvocationCount = 0
-            var codeScanBatchFileCount = 0
             var sliceRebaseBatchInvocationCount = 0
             var sliceRebaseCandidateCount = 0
             var invalidateSnapshotDurationMS = 0.0
@@ -4059,13 +3954,11 @@ class WorkspaceFilesViewModel: ObservableObject {
                 if let outcome = await handleNewFile(
                     relativePath: rel,
                     onRootFolder: targetRootVM,
-                    requestCodeScanImmediately: false,
                     preparedReplayPathMetadata: replayPathMetadata,
                     recordID: fileRecordID,
                     parentFolderID: parentFolderID
                 ) {
                     observedStoreDeltas.append(prepared)
-                    batchedCodeScanFiles[outcome.file.id] = outcome.file
                     if let parentFolder = outcome.parentFolderForStateRecompute {
                         dirtyFolderStateStarts[parentFolder.id] = parentFolder
                     } else {
@@ -4164,7 +4057,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                             await fileVM.setModificationDate(Date(), forceInvalidation: true)
                         }
                     }
-                    batchedCodeScanFiles[fileVM.id] = fileVM
                     let existingRebase = batchedSliceRebases[fileVM.standardizedFullPath]
                     batchedSliceRebases[fileVM.standardizedFullPath] = ReplaySliceRebaseRequest(
                         file: fileVM,
@@ -4275,9 +4167,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         if topologyChanged {
             accumulator.topologyChanged = true
         }
-        for (fileID, file) in batchedCodeScanFiles {
-            accumulator.codeScanFilesByID[fileID] = file
-        }
         for (fullPath, request) in batchedSliceRebases {
             accumulator.sliceRebasesByFullPath[fullPath] = request
         }
@@ -4325,8 +4214,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                 rebuildCleanupCandidateFolderKeys: rebuildCleanupCandidateFolderKeys,
                 rebuildCleanupCandidateFileKeys: rebuildCleanupCandidateFileKeys,
                 rebuildUsedOwnershipFallback: rebuildUsedOwnershipFallback,
-                codeScanBatchInvocationCount: 0,
-                codeScanBatchFileCount: 0,
                 sliceRebaseBatchInvocationCount: 0,
                 sliceRebaseCandidateCount: 0,
                 invalidateSnapshotDurationMS: invalidateSnapshotDurationMS,
@@ -4368,9 +4255,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         fileSystemDeltasAppliedPublisher.send(
             FileSystemDeltasAppliedEvent(rootKey: accumulator.rootKey, deltas: accumulator.processedDigests)
         )
-        let codeScanFiles = Array(accumulator.codeScanFilesByID.values)
         let sliceRebases = Array(accumulator.sliceRebasesByFullPath.values)
-        flushReplayChunkCodeScanBatch(codeScanFiles)
         scheduleSliceRebasesForModifiedFiles(sliceRebases)
         #if DEBUG
             return RootReplayPassPerfSample(
@@ -4382,8 +4267,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                 onRootFoldersChangedInvocationCount: 1,
                 snapshotInvalidationCount: accumulator.topologyChanged ? 1 : 0,
                 deltaAppliedPublisherInvocationCount: 1,
-                codeScanBatchInvocationCount: codeScanFiles.isEmpty ? 0 : 1,
-                codeScanBatchFileCount: codeScanFiles.count,
                 sliceRebaseBatchInvocationCount: sliceRebases.isEmpty ? 0 : 1,
                 sliceRebaseCandidateCount: sliceRebases.count,
                 onRootFoldersChangedDurationMS: onRootFoldersChangedDurationMS,
@@ -4789,7 +4672,6 @@ class WorkspaceFilesViewModel: ObservableObject {
     private func handleNewFile(
         record: WorkspaceFileRecord,
         onRootFolder root: FolderViewModel,
-        requestCodeScanImmediately: Bool = true,
         useRecordModificationDateForExistingFile: Bool = false
     ) async -> FileAdditionApplyOutcome? {
         let metadata = FileViewModel.PrecomputedPathMetadata.preparedReplay(
@@ -4800,7 +4682,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         return await handleNewFile(
             relativePath: record.standardizedRelativePath,
             onRootFolder: root,
-            requestCodeScanImmediately: requestCodeScanImmediately,
             preparedReplayPathMetadata: metadata,
             recordID: record.id,
             parentFolderID: record.parentFolderID,
@@ -4837,8 +4718,7 @@ class WorkspaceFilesViewModel: ObservableObject {
 
     @MainActor
     private func materializeFileViewModel(
-        record: WorkspaceFileRecord,
-        requestCodeScanImmediately: Bool = false
+        record: WorkspaceFileRecord
     ) async -> FileViewModel? {
         guard !Task.isCancelled else { return nil }
         guard let currentRecord = await workspaceFileContextStore.file(
@@ -4873,8 +4753,7 @@ class WorkspaceFilesViewModel: ObservableObject {
 
         guard let outcome = await handleNewFile(
             record: currentRecord,
-            onRootFolder: rootFolder,
-            requestCodeScanImmediately: requestCodeScanImmediately
+            onRootFolder: rootFolder
         ) else {
             return nil
         }
@@ -4898,7 +4777,6 @@ class WorkspaceFilesViewModel: ObservableObject {
     private func handleNewFile(
         relativePath: String,
         onRootFolder root: FolderViewModel,
-        requestCodeScanImmediately: Bool = true,
         preparedReplayPathMetadata: FileViewModel.PrecomputedPathMetadata? = nil,
         recordID: UUID? = nil,
         parentFolderID: UUID? = nil,
@@ -4964,9 +4842,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                 guard isCurrentAttachedRoot(root, expectedRootID: expectedRootID) else { return nil }
                 await existing.setModificationDate(resolvedModificationDate, forceInvalidation: true)
                 guard isCurrentAttachedRoot(root, expectedRootID: expectedRootID) else { return nil }
-                if requestCodeScanImmediately {
-                    requestCodeScan(for: existing)
-                }
                 if newlyCreatedFilePaths.remove(creationKey) != nil {
                     performSelectionBatch { existing.setIsChecked(true) }
                 }
@@ -5018,9 +4893,6 @@ class WorkspaceFilesViewModel: ObservableObject {
 
         fileHierarchyIndex.insertFile(fileVM, rootKey: root.standardizedFullPath)
 
-        if requestCodeScanImmediately {
-            requestCodeScan(for: fileVM)
-        }
         insertFile(fileVM, under: root, relativePath: relativePath)
 
         if newlyCreatedFilePaths.remove(creationKey) != nil {
@@ -5154,7 +5026,10 @@ class WorkspaceFilesViewModel: ObservableObject {
         if !fileIDs.isDisjoint(with: autoCodemapFileIDs) {
             autoCodemapFileIDs.subtract(fileIDs)
             autoCodemapFiles.removeAll { fileIDs.contains($0.id) }
-            codeMapUpdatePublisher.send(())
+        }
+        if !fileIDs.isDisjoint(with: manualCodemapFileIDs) {
+            manualCodemapFileIDs.subtract(fileIDs)
+            manualCodemapFiles.removeAll { fileIDs.contains($0.id) }
         }
         for file in uniqueFiles {
             if selectionSlicesByFileID.removeValue(forKey: file.id) != nil {
@@ -5254,12 +5129,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         rootKey: String
     ) -> IncrementalRemovedSubtreeCleanupOutcome {
         performBatchedIncrementalRemovedSubtreeCleanup([removed], rootKey: rootKey)
-    }
-
-    @MainActor
-    private func flushReplayChunkCodeScanBatch(_ files: [FileViewModel]) {
-        guard !files.isEmpty else { return }
-        enqueueReplayScanRequests(forFiles: files)
     }
 
     @MainActor
@@ -5632,7 +5501,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         appliedIndexProjectionHandledGenerationByRootID.removeValue(forKey: folder.id)
         defer { WorkspaceExitPerf.end("unloadRootFolder", signpost) }
         let stdRoot = folder.standardizedFullPath
-        removeDeferredInitialRootLoadScanRoot(stdRoot)
         unregisterExpansionTracking(for: folder)
         // Folder expansion state is now stored in the FolderViewModel itself
         // No need to unregister from ExpansionManager
@@ -5788,6 +5656,48 @@ class WorkspaceFilesViewModel: ObservableObject {
         return values.sorted { $0.standardizedFullPath < $1.standardizedFullPath }
     }
 
+    func fileViewModel(id: UUID) -> FileViewModel? {
+        fileHierarchyIndex.filesByID[id]
+    }
+
+    func codemapPreview(for fileID: UUID) async -> WorkspaceCodemapUIPreviewDisposition {
+        guard let file = fileHierarchyIndex.filesByID[fileID] else { return .revoked }
+        let selectionRevision = selectionStateRevision
+        let hierarchyRevision = hierarchyGenerationSignature
+        let presentation: WorkspaceCodemapOperationPresentation
+        do {
+            let rootDisplayNames = await WorkspaceLookupContext(
+                rootScope: .allLoaded,
+                bindingProjection: nil
+            ).logicalRootDisplayNamesByRootID(store: workspaceFileContextStore)
+            presentation = try await WorkspaceCodemapPresentationCoordinator(
+                store: workspaceFileContextStore
+            ).presentation(
+                for: .exact(fileIDs: [fileID], completeRootSet: false),
+                rootScope: .allLoaded,
+                logicalRootDisplayNamesByRootID: rootDisplayNames
+            )
+        } catch {
+            if Task.isCancelled || error is CancellationError {
+                return .revoked
+            }
+            let issue = WorkspaceCodemapOperationIssue.coordinationUnavailable
+            return .unavailable(coverage: .unavailable([issue]), issues: [issue])
+        }
+
+        guard !Task.isCancelled,
+              selectionStateRevision == selectionRevision,
+              hierarchyGenerationSignature == hierarchyRevision,
+              fileHierarchyIndex.filesByID[fileID] === file
+        else { return .revoked }
+
+        let snapshot = WorkspaceCodemapUIPresentationSnapshot(presentation)
+        if let entry = snapshot.entriesByFileID[fileID] {
+            return .ready(entry)
+        }
+        return .unavailable(coverage: snapshot.coverage, issues: snapshot.issues)
+    }
+
     /// Recursively collect all FileViewModels from all root folders.
     func getAllFileViewModels() -> [FileViewModel] {
         var allFiles: [FileViewModel] = []
@@ -5808,16 +5718,6 @@ class WorkspaceFilesViewModel: ObservableObject {
                 allowedRoots.contains($0.standardizedRootFolderPath)
             }
         }
-    }
-
-    /// Collect all files that have codemaps available
-    @MainActor
-    func collectAllFilesWithCodemaps() -> [FileViewModel] {
-        let indexedFiles = allFilesSnapshot(sorted: true)
-        if !indexedFiles.isEmpty || rootFolders.isEmpty {
-            return indexedFiles.filter { $0.fileAPI != nil }
-        }
-        return getAllFileViewModels().filter { $0.fileAPI != nil }
     }
 
     /// 4) Helper to gather FileViewModels recursively
@@ -5959,10 +5859,8 @@ class WorkspaceFilesViewModel: ObservableObject {
             var totalOnRootFoldersChangedInvocationCount = 0
             var totalSnapshotInvalidationCount = 0
             var totalDeltaAppliedPublisherInvocationCount = 0
-            var totalReplayCodeScanBatchInvocationCount = 0
             var totalReplaySliceRebaseBatchInvocationCount = 0
             var totalRebuildDurationMS = 0.0
-            var totalCodeScanBatchFileCount = 0
             var totalSliceRebaseCandidateCount = 0
             var totalInvalidateSnapshotDurationMS = 0.0
             chunkSize = max(deltaReplayChunkSizeOverride ?? baseChunkSize, 1)
@@ -6007,9 +5905,7 @@ class WorkspaceFilesViewModel: ObservableObject {
                 totalOnRootFoldersChangedInvocationCount += sample.onRootFoldersChangedInvocationCount
                 totalSnapshotInvalidationCount += sample.snapshotInvalidationCount
                 totalDeltaAppliedPublisherInvocationCount += sample.deltaAppliedPublisherInvocationCount
-                totalReplayCodeScanBatchInvocationCount += sample.codeScanBatchInvocationCount
                 totalReplaySliceRebaseBatchInvocationCount += sample.sliceRebaseBatchInvocationCount
-                totalCodeScanBatchFileCount += sample.codeScanBatchFileCount
                 totalSliceRebaseCandidateCount += sample.sliceRebaseCandidateCount
                 totalInvalidateSnapshotDurationMS += sample.invalidateSnapshotDurationMS
             }
@@ -6186,10 +6082,8 @@ class WorkspaceFilesViewModel: ObservableObject {
                 totalOnRootFoldersChangedInvocationCount: totalOnRootFoldersChangedInvocationCount,
                 totalSnapshotInvalidationCount: totalSnapshotInvalidationCount,
                 totalDeltaAppliedPublisherInvocationCount: totalDeltaAppliedPublisherInvocationCount,
-                totalReplayCodeScanBatchInvocationCount: totalReplayCodeScanBatchInvocationCount,
                 totalReplaySliceRebaseBatchInvocationCount: totalReplaySliceRebaseBatchInvocationCount,
                 totalRebuildDurationMS: totalRebuildDurationMS,
-                totalCodeScanBatchFileCount: totalCodeScanBatchFileCount,
                 totalSliceRebaseCandidateCount: totalSliceRebaseCandidateCount,
                 totalInvalidateSnapshotDurationMS: totalInvalidateSnapshotDurationMS,
                 preReplayServiceFlushes: preReplayServiceFlushes,
@@ -6207,15 +6101,14 @@ class WorkspaceFilesViewModel: ObservableObject {
         await unloadRootFolder(for: stdURL)
     }
 
-    func unloadAllRootFolders(cancelScans: Bool = true) async {
+    func unloadAllRootFolders() async {
         let signpost = WorkspaceExitPerf.begin("unloadAllRootFolders")
         defer { WorkspaceExitPerf.end("unloadAllRootFolders", signpost) }
-        await unloadAllRootFoldersFast(cancelScans: cancelScans)
+        await unloadAllRootFoldersFast()
     }
 
     @MainActor
-    private func unloadAllRootFoldersFast(cancelScans: Bool) async {
-        clearDeferredInitialRootLoadScanState(keepingActiveDeferral: isInitialRootLoadScanDeferralActive)
+    private func unloadAllRootFoldersFast() async {
         invalidateAllRootLoadTokens()
         currentFolderLoadingTask?.cancel()
         currentFolderLoadingTask = nil
@@ -6268,6 +6161,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         autoCodemapSyncTask?.cancel()
         autoCodemapSyncTask = nil
         resetAutoCodemapFiles([])
+        resetManualCodemapFiles([])
         rootShellLoadedPaths.removeAll()
         rootHierarchyGenerations.removeAll()
         hierarchyGenerationSignature &+= 1
@@ -6276,10 +6170,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         await Task.yield()
 
         await workspaceFileContextStore.unloadRoots(ids: storeRootsToUnload.map(\.id))
-
-        if cancelScans {
-            await cancelAllScans()
-        }
 
         // Preserve a clean final state after actor cleanup and any unload events that
         // raced in from the store bridge.
@@ -6481,6 +6371,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         selectionClearedPublisher.send()
         autoCodemapSyncTask?.cancel()
         resetAutoCodemapFiles([])
+        resetManualCodemapFiles([])
         codemapAutoEnabled = true
 
         guard persistWorkspace else { return }
@@ -8937,12 +8828,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
 
         @MainActor
-        func cachedCodeMapAPIForTesting(fullPath: String) -> FileAPI? {
-            guard let file = findFileByFullPath(StandardizedPath.absolute(fullPath)) else { return nil }
-            return validatedFileAPI(for: file)
-        }
-
-        @MainActor
         func enqueuePendingDeltasForTesting(_ deltas: [FileSystemDelta], forRootFolder folder: FolderViewModel) async {
             _ = await workspaceFileContextStore.enqueueDeferredReplayDeltas(deltas, forRootKey: folder.standardizedFullPath)
         }
@@ -8980,11 +8865,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             @MainActor
             func deferredReplayBufferDiagnosticsForTesting() async -> DeferredReplayBufferDiagnostics {
                 await workspaceFileContextStore.deferredReplayDiagnosticsSnapshot()
-            }
-
-            @MainActor
-            func debugCodemapMemoryCounters() async -> CodeScanActor.CodemapMemoryCounters {
-                await workspaceFileContextStore.codemapMemoryCounters()
             }
         #endif
 
@@ -9066,39 +8946,7 @@ class WorkspaceFilesViewModel: ObservableObject {
         }
     }
 
-    private var codeScanEnabled = true
-
-    // Add at the class level in WorkspaceFilesViewModel
-    private var codeScanTasks: [UUID: Task<Void, Never>] = [:]
-    private var currentBatchScanTask: Task<Void, Never>?
-
-    // NEW: holds the most recent ad-hoc "enqueue scans for files" task
-    private var currentAdhocScanEnqueueTask: Task<Void, Never>?
-    private var replayScanEnqueueTasks: [UUID: Task<Void, Never>] = [:]
-
     @MainActor private var cachedSearchFolderSuffixIndexByScope: [LookupRootScope: (generation: UInt64, index: SearchFolderSuffixIndex<FolderViewModel>)] = [:]
-
-    private struct InitialRootEnqueueTask {
-        let id: UUID
-        let task: Task<Void, Never>
-    }
-
-    // NEW: per-root initial-load enqueue tasks (avoid cross-root cancellation)
-    private var initialRootScanEnqueueTasks: [String: InitialRootEnqueueTask] = [:]
-
-    /// Cancels any currently queued/active scans in the actor, plus any local tasks
-    func setCodeScanEnabled(_ isEnabled: Bool) async {
-        let wasEnabled = codeScanEnabled
-        codeScanEnabled = isEnabled
-        if !wasEnabled, isEnabled {
-            // Just got enabled, rescan if needed
-            await rescanAllFilesIfLoaded()
-        } else if !isEnabled {
-            // Disabled state should always perform comprehensive VM-level cancellation,
-            // even if callers repeat the request while already disabled.
-            await cancelAllScans()
-        }
-    }
 
     // ------------------------------------------------------------------
     // MARK: Unified bulk path selection helpers (files and folders)
@@ -9527,10 +9375,6 @@ class WorkspaceFilesViewModel: ObservableObject {
             return (files, ranges)
         }
     #endif
-
-    private func standardizedAPIFilePath(_ api: FileAPI) -> String {
-        StandardizedPath.absolute(api.filePath)
-    }
 
     @MainActor
     func hydrateSlicesForActiveTab(from tabSelection: StoredSelection) async {
@@ -10338,476 +10182,6 @@ class WorkspaceFilesViewModel: ObservableObject {
         )
     }
 
-    func initCodeScanState(_ isEnabled: Bool) {
-        codeScanEnabled = isEnabled
-    }
-
-    @MainActor
-    func beginDeferringInitialRootLoadScans() {
-        clearDeferredInitialRootLoadScanState(keepingActiveDeferral: false)
-        isInitialRootLoadScanDeferralActive = true
-    }
-
-    @MainActor
-    func discardDeferredInitialRootLoadScans() {
-        clearDeferredInitialRootLoadScanState(keepingActiveDeferral: false)
-    }
-
-    @MainActor
-    func flushDeferredInitialRootLoadScans() {
-        guard isInitialRootLoadScanDeferralActive else {
-            clearDeferredInitialRootLoadScanState(keepingActiveDeferral: false)
-            return
-        }
-
-        isInitialRootLoadScanDeferralActive = false
-        let rootPaths = deferredInitialRootLoadScanRoots
-        deferredInitialRootLoadScanRoots.removeAll()
-        deferredInitialRootLoadScanFlushTask?.cancel()
-        deferredInitialRootLoadScanFlushTask = nil
-        deferredInitialRootLoadScanFlushTaskID = nil
-
-        guard codeScanEnabled, !rootPaths.isEmpty else { return }
-        #if DEBUG
-            WorkspaceRestorePerfLog.event(
-                "codemap.deferredInitialScanFlush.begin",
-                fields: [
-                    "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                    "rootPathCount": "\(rootPaths.count)"
-                ]
-            )
-        #endif
-
-        let taskID = UUID()
-        deferredInitialRootLoadScanFlushTaskID = taskID
-        deferredInitialRootLoadScanFlushTask = Task(priority: .utility) { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                if self.deferredInitialRootLoadScanFlushTaskID == taskID {
-                    self.deferredInitialRootLoadScanFlushTask = nil
-                    self.deferredInitialRootLoadScanFlushTaskID = nil
-                }
-            }
-
-            guard codeScanEnabled else { return }
-            #if DEBUG
-                let flushTotalStartMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
-                let rootRecordsStartMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
-            #endif
-            let rootRecords = await workspaceFileContextStore.rootRecords(
-                forRootFolderPaths: rootPaths.sorted(),
-                includeSystemRoots: false
-            )
-            #if DEBUG
-                WorkspaceRestorePerfLog.event(
-                    "codemap.deferredInitialScanFlush.rootRecords",
-                    fields: [
-                        "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                        "rootPathCount": "\(rootPaths.count)",
-                        "rootRecordCount": "\(rootRecords.count)",
-                        "duration": rootRecordsStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                    ]
-                )
-            #endif
-            guard !Task.isCancelled, codeScanEnabled, !rootRecords.isEmpty else {
-                #if DEBUG
-                    WorkspaceRestorePerfLog.event(
-                        "codemap.deferredInitialScanFlush.end",
-                        fields: [
-                            "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                            "rootPathCount": "\(rootPaths.count)",
-                            "rootRecordCount": "\(rootRecords.count)",
-                            "outcome": Task.isCancelled ? "cancelled" : "skipped",
-                            "duration": flushTotalStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                        ]
-                    )
-                #endif
-                return
-            }
-            enqueueInitialRootLoadRequests(
-                rootRecords: rootRecords,
-                purgeCachesOnEmptyInitialRequests: true
-            )
-            #if DEBUG
-                WorkspaceRestorePerfLog.event(
-                    "codemap.deferredInitialScanFlush.end",
-                    fields: [
-                        "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                        "rootPathCount": "\(rootPaths.count)",
-                        "rootRecordCount": "\(rootRecords.count)",
-                        "outcome": "enqueued",
-                        "duration": flushTotalStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                    ]
-                )
-            #endif
-        }
-    }
-
-    @MainActor
-    private func clearDeferredInitialRootLoadScanState(keepingActiveDeferral: Bool) {
-        deferredInitialRootLoadScanFlushTask?.cancel()
-        deferredInitialRootLoadScanFlushTask = nil
-        deferredInitialRootLoadScanFlushTaskID = nil
-        deferredInitialRootLoadScanRoots.removeAll()
-        if !keepingActiveDeferral {
-            isInitialRootLoadScanDeferralActive = false
-        }
-    }
-
-    @MainActor
-    private func removeDeferredInitialRootLoadScanRoot(_ rootPath: String) {
-        let standardizedRootPath = (rootPath as NSString).standardizingPath
-        deferredInitialRootLoadScanRoots.remove(standardizedRootPath)
-    }
-
-    @MainActor
-    private func loadedUserRootFolder(for rootPath: String) -> FolderViewModel? {
-        let standardizedRootPath = (rootPath as NSString).standardizingPath
-        guard rootShellLoadedPaths.contains(standardizedRootPath) else { return nil }
-        return rootFolders.first {
-            !$0.isSystemRoot && $0.standardizedFullPath == standardizedRootPath
-        }
-    }
-
-    @MainActor
-    private func enqueueOrDeferInitialRootLoadScan(for rootFolder: FolderViewModel) {
-        #if DEBUG
-            let enqueueScanStartMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
-        #endif
-        let rootPath = rootFolder.standardizedFullPath
-        guard !rootFolder.isSystemRoot else {
-            #if DEBUG
-                WorkspaceRestorePerfLog.event(
-                    "folderLoad.enqueueScan",
-                    fields: [
-                        "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                        "rootName": rootFolder.name,
-                        "outcome": "skipped",
-                        "duration": enqueueScanStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                    ]
-                )
-            #endif
-            return
-        }
-        if isInitialRootLoadScanDeferralActive {
-            deferredInitialRootLoadScanRoots.insert(rootPath)
-            #if DEBUG
-                WorkspaceRestorePerfLog.event(
-                    "folderLoad.enqueueScan",
-                    fields: [
-                        "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                        "rootName": rootFolder.name,
-                        "outcome": "deferred",
-                        "duration": enqueueScanStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                    ]
-                )
-            #endif
-            return
-        }
-        let filesToScan = getFilesRecursively(under: rootFolder)
-        requestScans(
-            forFiles: filesToScan,
-            isInitialRootLoad: true,
-            rootFolderPaths: [rootPath]
-        )
-        #if DEBUG
-            WorkspaceRestorePerfLog.event(
-                "folderLoad.enqueueScan",
-                fields: [
-                    "workspaceID": WorkspaceRestorePerfLog.shortID(currentWorkspaceID),
-                    "rootName": rootFolder.name,
-                    "outcome": "enqueued",
-                    "files": "\(filesToScan.count)",
-                    "duration": enqueueScanStartMS.map { WorkspaceRestorePerfLog.formatElapsedMS(since: $0) } ?? "notMeasured"
-                ]
-            )
-        #endif
-    }
-
-    // New: Request scans for a set of files in bulk with minimal MainActor work
-    @MainActor
-    private func requestScans(
-        forFiles files: [FileViewModel],
-        isInitialRootLoad: Bool = false,
-        rootFolderPaths: [String] = []
-    ) {
-        guard codeScanEnabled else { return }
-
-        let rootPaths = Set(
-            files.map(\.standardizedRootFolderPath) +
-                rootFolderPaths.map { ($0 as NSString).standardizingPath }
-        )
-        // Filter supported files up-front
-        let supported = files.compactMap { f -> FileViewModel? in
-            guard let ext = f.fileExtension, SyntaxManager.isSupportedFileExtension(ext) else { return nil }
-            return f
-        }
-        guard !supported.isEmpty else {
-            guard isInitialRootLoad, !rootPaths.isEmpty else { return }
-            enqueueInitialRootLoadRequests(
-                rootPaths: rootPaths,
-                purgeCachesOnEmptyInitialRequests: true
-            )
-            return
-        }
-
-        if isInitialRootLoad {
-            enqueueInitialRootLoadRequests(rootPaths: rootPaths)
-            return
-        }
-
-        // Cancel any previous enqueue task so only one builder runs at a time
-        let fileIDs = supported.map(\.id)
-        currentAdhocScanEnqueueTask?.cancel()
-        currentAdhocScanEnqueueTask = Task { [weak self] in
-            guard let self else { return }
-            for fileID in fileIDs {
-                guard !Task.isCancelled else { return }
-                do {
-                    try await workspaceFileContextStore.requestCodemapScan(fileID: fileID)
-                } catch {
-                    continue
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private func enqueueReplayScanRequests(forFiles files: [FileViewModel]) {
-        guard codeScanEnabled else { return }
-        let supported = files.compactMap { file -> FileViewModel? in
-            guard let ext = file.fileExtension, SyntaxManager.isSupportedFileExtension(ext) else { return nil }
-            return file
-        }
-        guard !supported.isEmpty else { return }
-        let fileIDs = supported.map(\.id)
-        let taskID = UUID()
-        let task = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                Task { @MainActor [weak self] in
-                    self?.replayScanEnqueueTasks[taskID] = nil
-                }
-            }
-            for fileID in fileIDs {
-                guard !Task.isCancelled else { return }
-                do {
-                    try await workspaceFileContextStore.requestCodemapScan(fileID: fileID)
-                } catch {
-                    continue
-                }
-            }
-        }
-        replayScanEnqueueTasks[taskID] = task
-    }
-
-    @MainActor
-    private func enqueueInitialRootLoadRequests(
-        rootPaths: Set<String>,
-        purgeCachesOnEmptyInitialRequests: Bool = false
-    ) {
-        enqueueInitialRootLoadRequests(
-            rootPaths: rootPaths,
-            rootIDs: nil,
-            purgeCachesOnEmptyInitialRequests: purgeCachesOnEmptyInitialRequests
-        )
-    }
-
-    @MainActor
-    private func enqueueInitialRootLoadRequests(
-        rootRecords: [WorkspaceRootRecord],
-        purgeCachesOnEmptyInitialRequests: Bool = false
-    ) {
-        let currentRootRecords = rootRecords.filter { record in
-            workspaceFileContextRootsByRootKey[record.standardizedFullPath]?.id == record.id
-        }
-        let rootPaths = Set(currentRootRecords.map(\.standardizedFullPath))
-        let rootIDs = currentRootRecords.map(\.id)
-        enqueueInitialRootLoadRequests(
-            rootPaths: rootPaths,
-            rootIDs: rootIDs,
-            purgeCachesOnEmptyInitialRequests: purgeCachesOnEmptyInitialRequests
-        )
-    }
-
-    @MainActor
-    private func enqueueInitialRootLoadRequests(
-        rootPaths: Set<String>,
-        rootIDs: [UUID]?,
-        purgeCachesOnEmptyInitialRequests: Bool
-    ) {
-        guard !rootPaths.isEmpty else { return }
-
-        for root in rootPaths {
-            if let existing = initialRootScanEnqueueTasks[root] {
-                existing.task.cancel()
-                initialRootScanEnqueueTasks[root] = nil
-            }
-        }
-
-        let taskID = UUID()
-        let task = Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-
-            func clearInitialRootTasksIfCurrent() async {
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    for root in rootPaths {
-                        if initialRootScanEnqueueTasks[root]?.id == taskID {
-                            initialRootScanEnqueueTasks[root] = nil
-                        }
-                    }
-                }
-            }
-
-            do {
-                if let rootIDs {
-                    try await workspaceFileContextStore.requestInitialRootCodemapScans(
-                        rootIDs: rootIDs,
-                        purgeCachesOnEmptyInitialRequests: purgeCachesOnEmptyInitialRequests
-                    )
-                } else {
-                    try await workspaceFileContextStore.requestInitialRootCodemapScans(
-                        rootFolderPaths: Array(rootPaths),
-                        purgeCachesOnEmptyInitialRequests: purgeCachesOnEmptyInitialRequests
-                    )
-                }
-            } catch {
-                // Root unloads or file read failures during initial load are non-fatal; future
-                // scans and store updates will reconcile codemap state.
-            }
-
-            await clearInitialRootTasksIfCurrent()
-        }
-
-        let entry = InitialRootEnqueueTask(id: taskID, task: task)
-        for root in rootPaths {
-            initialRootScanEnqueueTasks[root] = entry
-        }
-    }
-
-    private func requestCodeScan(for fileVM: FileViewModel) {
-        guard codeScanEnabled else { return }
-        guard let fileExt = fileVM.fileExtension,
-              SyntaxManager.isSupportedFileExtension(fileExt) else { return }
-
-        #if DEBUG
-            MCPApplyEditsRebaseProbeRecorder.recordCodemapRequest(
-                rootID: fileVM.rootIdentifier,
-                fileID: fileVM.id
-            )
-        #endif
-        let id = fileVM.id
-        let scanTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                Task { @MainActor [weak self] in
-                    self?.clearCodeScanTask(id: id)
-                }
-            }
-            guard !Task.isCancelled else { return }
-            do {
-                try await workspaceFileContextStore.requestCodemapScan(fileID: id)
-            } catch {
-                return
-            }
-        }
-
-        codeScanTasks[id] = scanTask
-    }
-
-    @MainActor
-    private func clearCodeScanTask(id: UUID) {
-        codeScanTasks[id] = nil
-    }
-
-    /// Force a codemap scan across all loaded roots through the store-owned scanner.
-    func rescanAllFilesIfLoaded() async {
-        guard codeScanEnabled else { return }
-        currentBatchScanTask?.cancel()
-        currentBatchScanTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await workspaceFileContextStore.requestCodemapScansForAllRoots()
-            } catch {
-                return
-            }
-        }
-    }
-
-    @MainActor
-    func cancelCodeMapScans() async {
-        await cancelAllScans()
-    }
-
-    /// Cancel all scanning tasks
-    func cancelAllScans() async {
-        clearDeferredInitialRootLoadScanState(keepingActiveDeferral: isInitialRootLoadScanDeferralActive)
-        // Cancel the batch scan task if one exists
-        currentBatchScanTask?.cancel()
-        currentBatchScanTask = nil
-
-        // Cancel any individual file scan tasks
-        for task in codeScanTasks.values {
-            task.cancel()
-        }
-        codeScanTasks.removeAll()
-
-        // NEW: Cancel the ad-hoc enqueue task if present
-        currentAdhocScanEnqueueTask?.cancel()
-        currentAdhocScanEnqueueTask = nil
-        for task in replayScanEnqueueTasks.values {
-            task.cancel()
-        }
-        replayScanEnqueueTasks.removeAll()
-
-        for entry in initialRootScanEnqueueTasks.values {
-            entry.task.cancel()
-        }
-        initialRootScanEnqueueTasks.removeAll()
-
-        await workspaceFileContextStore.cancelAllCodemapScans()
-        remainingScanCount = 0
-        totalFilesSeen = 0
-    }
-
-    /// Clear all code map caches and triggers a rescan
-    @MainActor
-    func clearCodeMapCaches() async {
-        // Cancel any ongoing scans first
-        await cancelAllScans()
-
-        // Get all root folder paths
-        let rootPaths = rootFolders.map(\.fullPath)
-
-        await workspaceFileContextStore.clearAllCodemapCaches(rootFolders: rootPaths)
-
-        // Clear the in-memory file APIs and reset scan state
-        for file in getAllFileViewModels() {
-            file.setCodeMap(nil)
-        }
-
-        // Reset scan tracking variables
-        remainingScanCount = 0
-        totalFilesSeen = 0
-
-        // Notify that code map needs update
-        codeMapUpdatePublisher.send()
-
-        // Add a small delay to ensure state is properly reset
-        // try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-
-        // Force a rescan by calling rescanAllFilesIfLoaded
-        // This will re-trigger scans for all files if code scanning is enabled
-        await rescanAllFilesIfLoaded()
-    }
-
-    @MainActor
-    func purgeStaleCodeMapCaches(keepingRoots roots: [String]) async {
-        let normalized = Set(roots.map { ($0 as NSString).standardizingPath })
-        await workspaceFileContextStore.purgeStaleCodemapCaches(keepingRootPaths: Array(normalized))
-    }
-
     func searchFiles(
         pattern: String,
         isRegex: Bool = false,
@@ -11496,8 +10870,12 @@ extension WorkspaceFilesViewModel {
     private func resetAutoCodemapFiles(_ files: [FileViewModel]) {
         autoCodemapFiles = files
         autoCodemapFileIDs = Set(files.map(\.id))
-        // Notify that codemap files changed so token counts can update
-        codeMapUpdatePublisher.send(())
+    }
+
+    @MainActor
+    private func resetManualCodemapFiles(_ files: [FileViewModel]) {
+        manualCodemapFiles = files
+        manualCodemapFileIDs = Set(files.map(\.id))
     }
 
     #if DEBUG
@@ -11507,13 +10885,12 @@ extension WorkspaceFilesViewModel {
         }
 
         @MainActor
-        func handleAutomaticCodemapReadinessForTesting(rootID: UUID, rootPath: String) {
-            handleWorkspaceStoreCodemapUpdateEvent(WorkspaceCodemapUpdateEvent(
-                rootID: rootID,
-                rootPath: rootPath,
-                snapshots: [],
-                automaticSelectionReadinessChanged: true
-            ))
+        func handleAutomaticCodemapReadinessForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) {
+            handleCodemapSelectionGraphReadiness(
+                WorkspaceCodemapSelectionGraphReadinessEvent(rootEpoch: rootEpoch)
+            )
         }
 
         @MainActor
@@ -11551,6 +10928,11 @@ extension WorkspaceFilesViewModel {
     }
 
     @MainActor
+    func isManualCodemapFile(_ file: FileViewModel) -> Bool {
+        manualCodemapFileIDs.contains(file.id)
+    }
+
+    @MainActor
     func enterManualCodemapMode() {
         autoCodemapSyncTask?.cancel()
         autoCodemapSyncTask = nil
@@ -11558,34 +10940,6 @@ extension WorkspaceFilesViewModel {
         if !autoCodemapFiles.isEmpty {
             resetAutoCodemapFiles([])
         }
-    }
-
-    @MainActor
-    func validatedFileAPI(for file: FileViewModel) -> FileAPI? {
-        guard file.hasAcceptedCodeMap, let api = file.fileAPI else { return nil }
-        return api
-    }
-
-    @MainActor
-    func validatedCurrentFileAPIs(from apis: [FileAPI]) -> [FileAPI] {
-        guard !apis.isEmpty else { return [] }
-
-        var seen = Set<String>()
-        var validated: [FileAPI] = []
-        validated.reserveCapacity(apis.count)
-
-        for api in apis {
-            let standardized = standardizedAPIFilePath(api)
-            guard seen.insert(standardized).inserted,
-                  let file = findFileByFullPath(standardized),
-                  let attachedAPI = validatedFileAPI(for: file),
-                  standardizedAPIFilePath(attachedAPI) == standardized
-            else { continue }
-
-            validated.append(attachedAPI)
-        }
-
-        return validated
     }
 
     @MainActor
@@ -11724,6 +11078,7 @@ extension WorkspaceFilesViewModel {
         }
         return StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: manualCodemapFiles.map(\.standardizedFullPath),
             slices: slicesByPath,
             codemapAutoEnabled: codemapAutoEnabled
         )
@@ -11824,6 +11179,25 @@ extension WorkspaceFilesViewModel {
         #endif
 
         resetAutoCodemapFiles([])
+        let manualFilesByPath = await findFiles(
+            atPaths: stored.manualCodemapPaths,
+            profile: .mcpSelection
+        )
+        let selectedIDs = Set(selectedFiles.map(\.id))
+        var manualFilesByFullPath: [String: FileViewModel] = [:]
+        for file in manualFilesByPath.values {
+            manualFilesByFullPath[file.standardizedFullPath] = file
+        }
+        var seenManualIDs = Set<UUID>()
+        let orderedManualFiles = stored.manualCodemapPaths.compactMap { path -> FileViewModel? in
+            let standardized = standardizedStoredSelectionPath(path)
+            guard let file = manualFilesByFullPath[standardized],
+                  !selectedIDs.contains(file.id),
+                  seenManualIDs.insert(file.id).inserted
+            else { return nil }
+            return file
+        }
+        resetManualCodemapFiles(orderedManualFiles)
 
         let storedSlicePaths = Array(standardizedStoredSelectionSlices(stored.slices).keys)
         if !storedSlicePaths.isEmpty {
@@ -11875,15 +11249,25 @@ extension WorkspaceFilesViewModel {
     }
 
     @MainActor
-    func setFileAsCodemap(_: FileViewModel) {
-        // Manual codemap-only state is intentionally unsupported and never persisted.
+    func setFileAsCodemap(_ file: FileViewModel) {
         enterManualCodemapMode()
+        performSelectionBatch {
+            if file.isChecked {
+                file.setIsChecked(false)
+            }
+        }
+        selectionSlicesByFileID.removeValue(forKey: file.id)
+        guard manualCodemapFileIDs.insert(file.id).inserted else { return }
+        manualCodemapFiles.append(file)
     }
 
     @MainActor
     func removeCodemapFile(_ file: FileViewModel) {
-        guard isAutoCodemapFile(file) else { return }
-        enterManualCodemapMode()
+        if isAutoCodemapFile(file) {
+            enterManualCodemapMode()
+        }
+        guard manualCodemapFileIDs.remove(file.id) != nil else { return }
+        manualCodemapFiles.removeAll { $0.id == file.id }
     }
 
     @MainActor
@@ -12442,59 +11826,19 @@ extension WorkspaceFilesViewModel {
     func applyCodemapOnlySelection(paths: [String]) async {
         guard !paths.isEmpty else { return }
 
-        var filesToScan: [FileViewModel] = []
-        var seen = Set<UUID>()
-        var didResolveAny = false
-
         for raw in paths {
-            var handled = false
             if let file = await resolveFileForUserInput(raw) {
-                handled = true
-                if !didResolveAny {
-                    enterManualCodemapMode()
-                    didResolveAny = true
-                }
-                if seen.insert(file.id).inserted {
-                    if file.fileAPI == nil {
-                        filesToScan.append(file)
-                    }
-                    setFileAsCodemap(file)
-                }
-            } else {
-                let folderResolution = await resolveFilesForFolderInput(raw, rootScope: .visibleWorkspace)
-                if folderResolution.handled {
-                    handled = true
-                    if !didResolveAny {
-                        enterManualCodemapMode()
-                        didResolveAny = true
-                    }
-                }
+                setFileAsCodemap(file)
+                continue
+            }
+            let folderResolution = await resolveFilesForFolderInput(raw, rootScope: .visibleWorkspace)
+            if folderResolution.handled {
                 for file in folderResolution.files {
-                    if seen.insert(file.id).inserted {
-                        if file.fileAPI == nil {
-                            filesToScan.append(file)
-                        }
+                    let fileExtension = (file.name as NSString).pathExtension
+                    if SyntaxManager.supportsCodeMap(fileExtension: fileExtension) {
                         setFileAsCodemap(file)
                     }
                 }
-            }
-
-            if !handled {
-                continue
-            }
-        }
-
-        await requestStoreCodemapScans(for: filesToScan)
-    }
-
-    private func requestStoreCodemapScans(for files: [FileViewModel]) async {
-        guard !files.isEmpty else { return }
-        var seen = Set<UUID>()
-        for file in files where seen.insert(file.id).inserted {
-            do {
-                try await workspaceFileContextStore.requestCodemapScan(fileID: file.id)
-            } catch {
-                continue
             }
         }
     }

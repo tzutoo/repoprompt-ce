@@ -512,12 +512,6 @@
             try withIsolatedCaptureCase("testReadFileAutoSelectionQueueRecorderCapturesSanitizedStagesAndLifecycle") {
                 try scenarioReadFileAutoSelectionQueueRecorderCapturesSanitizedStagesAndLifecycle()
             }
-            try withIsolatedCaptureCase("testAcceptedFileAPIFilterInnerAttributionRecorderCapturesEmptyDimensions") {
-                try scenarioAcceptedFileAPIFilterInnerAttributionRecorderCapturesEmptyDimensions()
-            }
-            try withIsolatedCaptureCase("testAllCodemapFileAPIsActorBodyAttributionRecorderCapturesEmptyDimensions") {
-                try scenarioAllCodemapFileAPIsActorBodyAttributionRecorderCapturesEmptyDimensions()
-            }
         }
 
         func testStaleCaptureStateCannotContaminateSubsequentIntervalOrLifecycleCapture() throws {
@@ -1564,51 +1558,6 @@
             XCTAssertEqual(snapshot.retainedLifecycleEventCount, 7)
             XCTAssertTrue(snapshot.stages.allSatisfy { !$0.sanitizedDimensions.contains("/") })
             XCTAssertTrue(snapshot.lifecycleEvents.allSatisfy { !$0.sanitizedDimensions.contains("/") })
-        }
-
-        private func scenarioAcceptedFileAPIFilterInnerAttributionRecorderCapturesEmptyDimensions() throws {
-            _ = startedCapture(label: "accepted-file-api-filter-inner", maxSamples: 100)
-            let stages: [(StaticString, String)] = [
-                (EditFlowPerf.Stage.ReadFile.AutoSelect.AcceptedFileAPIFilter.pathGrouping, "EditFlow.ReadFile.AutoSelect.AcceptedFileAPIFilter.PathGrouping"),
-                (EditFlowPerf.Stage.ReadFile.AutoSelect.AcceptedFileAPIFilter.selectedRecordProjection, "EditFlow.ReadFile.AutoSelect.AcceptedFileAPIFilter.SelectedRecordProjection")
-            ]
-            for (stage, _) in stages {
-                EditFlowPerf.measure(stage) {}
-            }
-
-            let snapshot = EditFlowPerf.debugCaptureSnapshot(finish: true)
-            XCTAssertFalse(snapshot.active)
-            XCTAssertFalse(EditFlowPerf.isDebugCaptureActive)
-            XCTAssertEqual(snapshot.retainedSampleCount, stages.count)
-            XCTAssertEqual(snapshot.droppedSampleCount, 0)
-            for (_, stageName) in stages {
-                let row = try XCTUnwrap(snapshot.stages.first { $0.stageName == stageName })
-                XCTAssertEqual(row.sampleCount, 1)
-                XCTAssertEqual(row.sanitizedDimensions, "")
-            }
-        }
-
-        private func scenarioAllCodemapFileAPIsActorBodyAttributionRecorderCapturesEmptyDimensions() throws {
-            _ = startedCapture(label: "all-codemap-file-apis-actor-body", maxSamples: 100)
-            let stages: [(StaticString, String)] = [
-                (EditFlowPerf.Stage.ReadFile.AutoSelect.AllCodemapFileAPIs.actorBodyTotal, "EditFlow.ReadFile.AutoSelect.AllCodemapFileAPIs.ActorBodyTotal"),
-                (EditFlowPerf.Stage.ReadFile.AutoSelect.AllCodemapFileAPIs.stateSnapshot, "EditFlow.ReadFile.AutoSelect.AllCodemapFileAPIs.StateSnapshot"),
-                (EditFlowPerf.Stage.ReadFile.AutoSelect.AllCodemapFileAPIs.materialization, "EditFlow.ReadFile.AutoSelect.AllCodemapFileAPIs.Materialization")
-            ]
-            for (stage, _) in stages {
-                EditFlowPerf.measure(stage) {}
-            }
-
-            let snapshot = EditFlowPerf.debugCaptureSnapshot(finish: true)
-            XCTAssertFalse(snapshot.active)
-            XCTAssertFalse(EditFlowPerf.isDebugCaptureActive)
-            XCTAssertEqual(snapshot.retainedSampleCount, stages.count)
-            XCTAssertEqual(snapshot.droppedSampleCount, 0)
-            for (_, stageName) in stages {
-                let row = try XCTUnwrap(snapshot.stages.first { $0.stageName == stageName })
-                XCTAssertEqual(row.sampleCount, 1)
-                XCTAssertEqual(row.sanitizedDimensions, "")
-            }
         }
 
         func testCaptureRejectsConcurrentStartAndFinishDisablesCapture() {

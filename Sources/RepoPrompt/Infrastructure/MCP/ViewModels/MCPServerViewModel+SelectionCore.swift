@@ -347,10 +347,14 @@ extension MCPServerViewModel {
             let selected = resolution.entries.compactMap { entry -> SelectedEntry? in
                 entry.isCodemap ? nil : SelectedEntry(entry: entry)
             }
+            let manualCodemapPaths = Set(
+                StoredSelectionPathNormalization.standardizedPaths(selection.manualCodemapPaths)
+            )
             let codemap = resolution.entries.compactMap { entry -> CodemapEntry? in
                 guard entry.isCodemap else { return nil }
                 let origin: CodemapOrigin = switch usage {
-                case .selected: .selectedMode
+                case .selected:
+                    manualCodemapPaths.contains(entry.file.standardizedFullPath) ? .manual : .selectedMode
                 case .complete: .auto
                 case .auto: selection.codemapAutoEnabled ? .auto : .manual
                 case .none: .manual

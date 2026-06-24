@@ -119,8 +119,6 @@ private actor WorkspaceCodemapAutomaticSelectionDemandOwnership {
 }
 
 struct WorkspaceSelectionMutationService {
-    private static let manualCodemapUnsupportedMessage = "manual codemap-only selections are no longer stored."
-
     let store: WorkspaceFileContextStore
     let codemapsGloballyDisabled: Bool
     let codemapsGloballyDisabledMessage: String
@@ -159,10 +157,19 @@ struct WorkspaceSelectionMutationService {
         rootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async -> WorkspaceBuildSelectionResult {
         if mode == "codemap_only" {
+            let resolution = await resolveCodemapOnlyCandidates(
+                paths: paths,
+                rawPaths: paths,
+                expandFolders: true,
+                rootScope: rootScope
+            )
             return WorkspaceBuildSelectionResult(
-                selection: existing,
-                invalidPaths: sliceErrors + [Self.manualCodemapUnsupportedMessage],
-                codemapUnavailable: []
+                selection: StoredSelection(
+                    manualCodemapPaths: resolution.candidates.map(\.standardizedFullPath),
+                    codemapAutoEnabled: false
+                ),
+                invalidPaths: sliceErrors + resolution.invalidPaths,
+                codemapUnavailable: resolution.codemapUnavailable
             )
         }
 
@@ -314,6 +321,7 @@ struct WorkspaceSelectionMutationService {
 
         return StoredSelection(
             selectedPaths: selected,
+            manualCodemapPaths: base.manualCodemapPaths.filter { !selectedSet.contains($0) },
             slices: slices,
             codemapAutoEnabled: base.codemapAutoEnabled
         )
@@ -413,6 +421,7 @@ struct WorkspaceSelectionMutationService {
         }
         let nextSelection = StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: base.manualCodemapPaths.filter { !selectedSet.contains($0) },
             slices: slices,
             codemapAutoEnabled: base.codemapAutoEnabled
         )
@@ -432,13 +441,44 @@ struct WorkspaceSelectionMutationService {
         mode: String,
         rootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async -> WorkspaceAddSelectionResult {
-        guard mode != "codemap_only" else {
+        if mode == "codemap_only" {
+            let resolution = await resolveCodemapOnlyCandidates(
+                paths: paths,
+                rawPaths: rawPaths,
+                expandFolders: true,
+                rootScope: rootScope
+            )
+            guard !resolution.candidates.isEmpty else {
+                return WorkspaceAddSelectionResult(
+                    selection: existing,
+                    invalidPaths: resolution.invalidPaths,
+                    resolvedMap: resolution.resolvedMap,
+                    mutated: false,
+                    codemapUnavailable: resolution.codemapUnavailable
+                )
+            }
+            var selectedPaths = StoredSelectionPathNormalization.standardizedPaths(existing.selectedPaths)
+            var slices = StoredSelectionPathNormalization.standardizedSlices(existing.slices)
+            var manualPaths = StoredSelectionPathNormalization.standardizedPaths(existing.manualCodemapPaths)
+            var manualSet = Set(manualPaths)
+            for file in resolution.candidates {
+                let path = file.standardizedFullPath
+                selectedPaths.removeAll { $0 == path }
+                slices.removeValue(forKey: path)
+                if manualSet.insert(path).inserted { manualPaths.append(path) }
+            }
+            let selection = StoredSelection(
+                selectedPaths: selectedPaths,
+                manualCodemapPaths: manualPaths,
+                slices: slices,
+                codemapAutoEnabled: false
+            )
             return WorkspaceAddSelectionResult(
-                selection: existing,
-                invalidPaths: [Self.manualCodemapUnsupportedMessage],
-                resolvedMap: [:],
-                mutated: false,
-                codemapUnavailable: []
+                selection: selection,
+                invalidPaths: resolution.invalidPaths,
+                resolvedMap: resolution.resolvedMap,
+                mutated: selection != existing,
+                codemapUnavailable: resolution.codemapUnavailable
             )
         }
         let candidateResolutionTotal = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.AutoSelect.candidateResolutionTotal)
@@ -459,6 +499,7 @@ struct WorkspaceSelectionMutationService {
         }
         let selection = StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: existing.manualCodemapPaths.filter { !selectedSet.contains($0) },
             slices: slices,
             codemapAutoEnabled: existing.codemapAutoEnabled
         )
@@ -479,12 +520,26 @@ struct WorkspaceSelectionMutationService {
         mode: String = "full",
         rootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async -> WorkspaceRemoveSelectionResult {
-        guard mode != "codemap_only" else {
+        if mode == "codemap_only" {
+            let resolution = await resolveSelectionCandidates(
+                paths: paths,
+                rawPaths: rawPaths,
+                expandFolders: true,
+                allowEmptyFolderExpansion: true,
+                rootScope: rootScope
+            )
+            let removedPaths = Set(resolution.candidates.map(\.standardizedFullPath))
+            let selection = StoredSelection(
+                selectedPaths: existing.selectedPaths,
+                manualCodemapPaths: existing.manualCodemapPaths.filter { !removedPaths.contains($0) },
+                slices: existing.slices,
+                codemapAutoEnabled: existing.codemapAutoEnabled
+            )
             return WorkspaceRemoveSelectionResult(
-                selection: existing,
-                invalidPaths: [Self.manualCodemapUnsupportedMessage],
-                resolvedMap: [:],
-                mutated: false
+                selection: selection,
+                invalidPaths: resolution.invalidPaths,
+                resolvedMap: resolution.resolvedMap,
+                mutated: selection != existing
             )
         }
         let resolution = await resolveSelectionCandidates(
@@ -502,6 +557,7 @@ struct WorkspaceSelectionMutationService {
         }
         let selection = StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: existing.manualCodemapPaths,
             slices: slices,
             codemapAutoEnabled: existing.codemapAutoEnabled
         )
@@ -521,6 +577,7 @@ struct WorkspaceSelectionMutationService {
     ) async -> (selection: StoredSelection, invalidPaths: [String], mutated: Bool) {
         let resolution = await resolveSelectionCandidates(paths: paths, rawPaths: rawPaths, expandFolders: false, rootScope: rootScope)
         var selectedPaths = existing.selectedPaths
+        var manualCodemapPaths = existing.manualCodemapPaths
         var slices = existing.slices
         var selectedSet = Set(selectedPaths)
         var mutated = false
@@ -532,11 +589,13 @@ struct WorkspaceSelectionMutationService {
                 selectedSet.insert(path)
                 mutated = true
             }
+            manualCodemapPaths.removeAll { $0 == path }
             if removeSliceEntries(for: file, in: &slices) { mutated = true }
         }
 
         let selection = StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: manualCodemapPaths,
             slices: slices,
             codemapAutoEnabled: existing.codemapAutoEnabled
         )
@@ -545,15 +604,45 @@ struct WorkspaceSelectionMutationService {
 
     func demotePaths(
         existing: StoredSelection,
-        paths _: [String],
-        rawPaths _: [String],
-        rootScope _: WorkspaceLookupRootScope = .visibleWorkspace
+        paths: [String],
+        rawPaths: [String],
+        rootScope: WorkspaceLookupRootScope = .visibleWorkspace
     ) async -> WorkspaceDemoteSelectionResult {
-        WorkspaceDemoteSelectionResult(
-            selection: existing,
-            invalidPaths: [Self.manualCodemapUnsupportedMessage],
-            codemapUnavailable: [],
-            mutated: false
+        let resolution = await resolveCodemapOnlyCandidates(
+            paths: paths,
+            rawPaths: rawPaths,
+            expandFolders: false,
+            rootScope: rootScope
+        )
+        guard !resolution.candidates.isEmpty else {
+            return WorkspaceDemoteSelectionResult(
+                selection: existing,
+                invalidPaths: resolution.invalidPaths,
+                codemapUnavailable: resolution.codemapUnavailable,
+                mutated: false
+            )
+        }
+        var selectedPaths = existing.selectedPaths
+        var slices = existing.slices
+        var manualCodemapPaths = existing.manualCodemapPaths
+        var manualSet = Set(manualCodemapPaths)
+        for file in resolution.candidates {
+            let path = file.standardizedFullPath
+            selectedPaths.removeAll { $0 == path }
+            _ = removeSliceEntries(for: file, in: &slices)
+            if manualSet.insert(path).inserted { manualCodemapPaths.append(path) }
+        }
+        let selection = StoredSelection(
+            selectedPaths: selectedPaths,
+            manualCodemapPaths: manualCodemapPaths,
+            slices: slices,
+            codemapAutoEnabled: false
+        )
+        return WorkspaceDemoteSelectionResult(
+            selection: selection,
+            invalidPaths: resolution.invalidPaths,
+            codemapUnavailable: resolution.codemapUnavailable,
+            mutated: selection != existing
         )
     }
 

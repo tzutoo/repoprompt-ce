@@ -66,3 +66,22 @@ struct WorkspaceCodemapGitCapabilityRequest: Equatable {
         self.loadedRootURL = loadedRootURL.resolvingSymlinksInPath().standardizedFileURL
     }
 }
+
+enum WorkspaceCodemapGitEligibilityPreflightResult: Equatable {
+    case eligible
+    case terminalUnavailable(WorkspaceCodemapGitTerminalUnavailableReason)
+    case transientUnavailable(WorkspaceCodemapGitTransientUnavailableReason)
+}
+
+struct WorkspaceCodemapGitEligibilityProbe {
+    let resolve: @Sendable (URL) async -> WorkspaceCodemapGitEligibilityPreflightResult
+
+    static func production(gitService: GitService = GitService()) -> Self {
+        Self { rootURL in
+            await WorkspaceCodemapGitCapabilityService.eligibilityPreflight(
+                gitService: gitService,
+                loadedRootURL: rootURL
+            )
+        }
+    }
+}

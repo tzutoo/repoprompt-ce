@@ -8,15 +8,18 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
 
         let selectedA = root.appendingPathComponent("A.swift")
         let selectedB = root.appendingPathComponent("B.swift")
+        let manual = root.appendingPathComponent("Manual.swift")
         try write("struct A {}", to: selectedA)
         try write("struct B {}", to: selectedB)
+        try write("struct Manual {}", to: manual)
 
         let store = WorkspaceFileContextStore()
         let loaded = try await store.loadRoot(path: root.path)
         let service = WorkspaceSelectionMutationService(store: store)
         let initial = StoredSelection(
             selectedPaths: [selectedA.path],
-            codemapAutoEnabled: true
+            manualCodemapPaths: [manual.path],
+            codemapAutoEnabled: false
         )
 
         let added = await service.addPaths(
@@ -26,7 +29,8 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
             mode: "full"
         )
         XCTAssertEqual(added.selection.selectedPaths, [selectedA.path, selectedB.path])
-        XCTAssertTrue(added.selection.codemapAutoEnabled)
+        XCTAssertEqual(added.selection.manualCodemapPaths, [manual.path])
+        XCTAssertFalse(added.selection.codemapAutoEnabled)
 
         let sliced = await service.mutateSlices(
             base: added.selection,
@@ -42,10 +46,11 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
             sliced.selection.slices[selectedA.path],
             [LineRange(start: 1, end: 1)]
         )
+        XCTAssertEqual(sliced.selection.manualCodemapPaths, [manual.path])
         await store.unloadRoot(id: loaded.id)
     }
 
-    func testManualCodemapOnlyMutationsFailClosed() async throws {
+    func testManualCodemapOnlyMutationsPersistAcrossAddPromoteDemoteAndRemove() async throws {
         let root = try makeRoot(named: #function)
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("Selected.swift")
@@ -55,15 +60,16 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
         let loaded = try await store.loadRoot(path: root.path)
         let service = WorkspaceSelectionMutationService(store: store)
         let initial = StoredSelection(selectedPaths: [file.path], codemapAutoEnabled: true)
-        let expectedMessage = "manual codemap-only selections are no longer stored."
 
         let built = await service.buildSelection(
             paths: [file.path],
             mode: "codemap_only",
             existing: initial
         )
-        XCTAssertEqual(built.selection, initial)
-        XCTAssertEqual(built.invalidPaths, [expectedMessage])
+        XCTAssertEqual(built.selection.selectedPaths, [])
+        XCTAssertEqual(built.selection.manualCodemapPaths, [file.path])
+        XCTAssertFalse(built.selection.codemapAutoEnabled)
+        XCTAssertTrue(built.invalidPaths.isEmpty)
 
         let added = await service.addPaths(
             existing: initial,
@@ -71,35 +77,44 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
             rawPaths: [file.path],
             mode: "codemap_only"
         )
-        XCTAssertEqual(added.selection, initial)
-        XCTAssertEqual(added.invalidPaths, [expectedMessage])
-        XCTAssertFalse(added.mutated)
+        XCTAssertEqual(added.selection.manualCodemapPaths, [file.path])
+        XCTAssertEqual(added.selection.selectedPaths, [])
+        XCTAssertFalse(added.selection.codemapAutoEnabled)
+        XCTAssertTrue(added.mutated)
+
+        let promoted = await service.promotePaths(
+            existing: added.selection,
+            paths: [file.path],
+            rawPaths: [file.path]
+        )
+        XCTAssertEqual(promoted.selection.selectedPaths, [file.path])
+        XCTAssertTrue(promoted.selection.manualCodemapPaths.isEmpty)
+
+        let demoted = await service.demotePaths(
+            existing: promoted.selection,
+            paths: [file.path],
+            rawPaths: [file.path]
+        )
+        XCTAssertTrue(demoted.selection.selectedPaths.isEmpty)
+        XCTAssertEqual(demoted.selection.manualCodemapPaths, [file.path])
+        XCTAssertFalse(demoted.selection.codemapAutoEnabled)
 
         let removed = await service.removePaths(
-            existing: initial,
+            existing: demoted.selection,
             paths: [file.path],
             rawPaths: [file.path],
             mode: "codemap_only"
         )
-        XCTAssertEqual(removed.selection, initial)
-        XCTAssertEqual(removed.invalidPaths, [expectedMessage])
-        XCTAssertFalse(removed.mutated)
-
-        let demoted = await service.demotePaths(
-            existing: initial,
-            paths: [file.path],
-            rawPaths: [file.path]
-        )
-        XCTAssertEqual(demoted.selection, initial)
-        XCTAssertEqual(demoted.invalidPaths, [expectedMessage])
-        XCTAssertFalse(demoted.mutated)
+        XCTAssertTrue(removed.selection.manualCodemapPaths.isEmpty)
+        XCTAssertTrue(removed.mutated)
     }
 
-    func testStoredSelectionDiscardsLegacyCodemapPathKeyAndNeverEmitsIt() throws {
+    func testStoredSelectionPersistsManualPathsButDiscardsLegacyInferredPathKey() throws {
         let legacyJSON = try XCTUnwrap(
             """
             {
               "selectedPaths": ["/workspace/Source.swift"],
+              "manualCodemapPaths": ["/workspace/Manual.swift"],
               "autoCodemapPaths": ["/workspace/Legacy.swift"],
               "slices": {},
               "codemapAutoEnabled": false
@@ -109,12 +124,20 @@ final class WorkspaceSelectionAutoCodemapInvariantTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(StoredSelection.self, from: legacyJSON)
         XCTAssertEqual(decoded.selectedPaths, ["/workspace/Source.swift"])
+        XCTAssertEqual(decoded.manualCodemapPaths, ["/workspace/Manual.swift"])
         XCTAssertFalse(decoded.codemapAutoEnabled)
 
         let encoded = try JSONEncoder().encode(decoded)
         let encodedText = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        let encodedObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
         XCTAssertFalse(encodedText.contains("autoCodemapPaths"))
         XCTAssertFalse(encodedText.contains("/workspace/Legacy.swift"))
+        XCTAssertEqual(
+            encodedObject["manualCodemapPaths"] as? [String],
+            ["/workspace/Manual.swift"]
+        )
     }
 
     func testSelectionProductionPathContainsNoLegacyRelationshipCalls() throws {

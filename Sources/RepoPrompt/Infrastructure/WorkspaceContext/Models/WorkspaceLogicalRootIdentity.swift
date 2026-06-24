@@ -4,6 +4,7 @@ enum WorkspaceLogicalRootIdentity {
     struct RootDescriptor {
         let physicalRootID: UUID
         let rootEpoch: WorkspaceCodemapRootEpoch
+        let preferredName: String
     }
 
     static func label(for rootEpoch: WorkspaceCodemapRootEpoch) -> String {
@@ -11,6 +12,9 @@ enum WorkspaceLogicalRootIdentity {
     }
 
     static func labels(for descriptors: [RootDescriptor]) -> [UUID: String] {
+        let nameCounts = Dictionary(grouping: descriptors) {
+            $0.preferredName.lowercased()
+        }.mapValues(\.count)
         let ordered = descriptors.sorted { lhs, rhs in
             let lhsLabel = label(for: lhs.rootEpoch)
             let rhsLabel = label(for: rhs.rootEpoch)
@@ -19,9 +23,28 @@ enum WorkspaceLogicalRootIdentity {
             }
             return lhs.physicalRootID.uuidString < rhs.physicalRootID.uuidString
         }
+        let preferredLabels = Dictionary(
+            uniqueKeysWithValues: ordered.map { descriptor in
+                let preferredName = descriptor.preferredName
+                let usePreferredName = !preferredName.isEmpty
+                    && nameCounts[preferredName.lowercased()] == 1
+                return (
+                    descriptor.physicalRootID,
+                    usePreferredName ? preferredName : label(for: descriptor.rootEpoch)
+                )
+            }
+        )
+        let labelCounts = Dictionary(grouping: preferredLabels.values) {
+            $0.lowercased()
+        }.mapValues(\.count)
         return Dictionary(
-            uniqueKeysWithValues: ordered.map {
-                ($0.physicalRootID, label(for: $0.rootEpoch))
+            uniqueKeysWithValues: ordered.map { descriptor in
+                let preferredLabel = preferredLabels[descriptor.physicalRootID]
+                    ?? label(for: descriptor.rootEpoch)
+                let resolvedLabel = labelCounts[preferredLabel.lowercased()] == 1
+                    ? preferredLabel
+                    : label(for: descriptor.rootEpoch)
+                return (descriptor.physicalRootID, resolvedLabel)
             }
         )
     }
@@ -33,11 +56,18 @@ extension WorkspaceLookupContext {
     ) async -> [UUID: String] {
         let physicalRoots = await store.rootRefs(scope: rootScope)
         let rootEpochs = await store.codemapRootEpochs(scope: rootScope)
+        let boundLogicalNames = Dictionary(
+            (bindingProjection?.boundRootsForMetadata ?? []).map {
+                ($0.physicalRoot.id, $0.logicalRoot.name)
+            },
+            uniquingKeysWith: { current, _ in current }
+        )
         return WorkspaceLogicalRootIdentity.labels(for: physicalRoots.compactMap { physicalRoot in
             guard let rootEpoch = rootEpochs[physicalRoot.id] else { return nil }
             return WorkspaceLogicalRootIdentity.RootDescriptor(
                 physicalRootID: physicalRoot.id,
-                rootEpoch: rootEpoch
+                rootEpoch: rootEpoch,
+                preferredName: boundLogicalNames[physicalRoot.id] ?? physicalRoot.name
             )
         })
     }

@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class WorkspaceFilesAutoCodemapModeTests: XCTestCase {
-    func testExplicitCodemapOnlyIntentFailsClosedAndClearsAutomaticProjection() {
+    func testExplicitCodemapOnlyIntentSelectsRequestedManualFileAndDisablesAuto() {
         let fixture = makeFixture(fileName: "Present.swift")
         XCTAssertTrue(fixture.viewModel.codemapAutoEnabled)
 
@@ -13,6 +13,10 @@ final class WorkspaceFilesAutoCodemapModeTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.autoCodemapFiles.isEmpty)
         XCTAssertFalse(fixture.viewModel.isAutoCodemapFile(fixture.file))
         XCTAssertTrue(fixture.viewModel.snapshotSelection().selectedPaths.isEmpty)
+        XCTAssertEqual(
+            fixture.viewModel.snapshotSelection().manualCodemapPaths,
+            [fixture.file.standardizedFullPath]
+        )
     }
 
     func testOrdinaryFileRemovalPreservesAutoAndFullClearRestoresIt() async {
@@ -52,9 +56,60 @@ final class WorkspaceFilesAutoCodemapModeTests: XCTestCase {
         let encodedText = try XCTUnwrap(String(data: encoded, encoding: .utf8))
         XCTAssertFalse(encodedText.contains("autoCodemapPaths"))
 
+        fixture.viewModel.setAutoCodemapFilesForTesting([fixture.file])
+        XCTAssertEqual(fixture.viewModel.autoCodemapFiles.map(\.id), [fixture.file.id])
         fixture.viewModel.enterManualCodemapMode()
         XCTAssertFalse(fixture.viewModel.codemapAutoEnabled)
         XCTAssertTrue(fixture.viewModel.autoCodemapFiles.isEmpty)
+        XCTAssertTrue(fixture.viewModel.manualCodemapFiles.isEmpty)
+        XCTAssertTrue(fixture.viewModel.snapshotSelection().manualCodemapPaths.isEmpty)
+    }
+
+    func testGraphReadinessDoesNotMutateManualMode() {
+        let fixture = makeFixture(fileName: "Manual.swift")
+        fixture.viewModel.enterManualCodemapMode()
+
+        fixture.viewModel.handleAutomaticCodemapReadinessForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch(
+                rootID: fixture.file.rootIdentifier,
+                rootLifetimeID: UUID()
+            )
+        )
+
+        XCTAssertFalse(fixture.viewModel.codemapAutoEnabled)
+        XCTAssertTrue(fixture.viewModel.autoCodemapFiles.isEmpty)
+    }
+
+    func testMilestoneDProductionCallersContainNoEagerCodemapOrCacheActions() throws {
+        let repoRoot = try RepoRoot.url()
+        let relativePaths = [
+            "Sources/RepoPrompt/Features/WorkspaceFiles/ViewModels/WorkspaceFilesViewModel.swift",
+            "Sources/RepoPrompt/Features/Workspaces/ViewModels/WorkspaceManagerViewModel.swift",
+            "Sources/RepoPrompt/Features/Workspaces/WorkspaceCheckoutRefreshService.swift",
+            "Sources/RepoPrompt/Features/AgentMode/ViewModels/AgentModeViewModel.swift",
+            "Sources/RepoPrompt/Features/AgentMode/ViewModels/AgentModeViewModel+WorktreeMerge.swift",
+            "Sources/RepoPrompt/Infrastructure/MCP/Agent/AgentMCPStartWorktreeCoordinator.swift",
+            "Sources/RepoPrompt/Infrastructure/WorkspaceContext/WorkspaceRootBindingProjection.swift"
+        ]
+        let forbidden = [
+            "initializeCodemapsForSessionWorktreeRoots",
+            "requestCodemapScans",
+            "repairMissingCodemapSnapshots",
+            "purgeStaleCodemapCaches",
+            "clearCodeMapCache",
+            "codeMapUpdatePublisher",
+            "codemapUpdates()"
+        ]
+
+        for relativePath in relativePaths {
+            let source = try String(
+                contentsOf: repoRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            for symbol in forbidden {
+                XCTAssertFalse(source.contains(symbol), "\(relativePath) still references \(symbol)")
+            }
+        }
     }
 
     func testPublicationRevalidationIsFinalAwaitBeforeSynchronousCommit() throws {

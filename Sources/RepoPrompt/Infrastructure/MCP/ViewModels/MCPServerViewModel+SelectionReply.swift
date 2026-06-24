@@ -623,6 +623,7 @@ extension MCPServerViewModel {
         }
         return StoredSelection(
             selectedPaths: selection.selectedPaths.filter { !isConsumed($0) },
+            manualCodemapPaths: selection.manualCodemapPaths,
             slices: selection.slices.filter { !isConsumed($0.key) },
             codemapAutoEnabled: selection.codemapAutoEnabled
         )

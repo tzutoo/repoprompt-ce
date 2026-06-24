@@ -2280,61 +2280,6 @@ final class CodeMapRootManifestStoreTests: XCTestCase {
         }
     }
 
-    func testStoreIgnoresLegacyVersionSixCacheNamespace() async throws {
-        let root = try makeSecureRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let legacy = root
-            .appendingPathComponent("CodeMapCaches", isDirectory: true)
-            .appendingPathComponent("v6", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: legacy,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let legacyFile = legacy.appendingPathComponent(String(repeating: "a", count: 64) + ".json")
-        let legacyData = Data("{\"version\":6,\"source\":\"legacy\"}".utf8)
-        try legacyData.write(to: legacyFile)
-        var legacyBefore = stat()
-        XCTAssertEqual(lstat(legacyFile.path, &legacyBefore), 0)
-        let artifactStore = try CodeMapArtifactStore(rootURL: root)
-        let fixture = try await makeFixture(
-            root: root,
-            artifactStore: artifactStore,
-            namespaceScope: #function,
-            worktreeByte: 0xA1,
-            prefix: "",
-            path: "Sources/App.swift",
-            text: "struct Modern {}"
-        )
-        let store = try CodeMapRootManifestStore(rootURL: root)
-        let result = try await store.loadCurrentManifest(
-            namespace: fixture.namespace,
-            currentAuthority: fixture.authority
-        )
-        XCTAssertEqual(result, .miss)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: legacyFile.path))
-        _ = try await store.replaceCurrentManifest(
-            namespace: fixture.namespace,
-            authority: fixture.authority,
-            records: [fixture.record],
-            lastAccessEpochSeconds: 1
-        )
-        _ = try await store.maintain()
-        let removed = try await store.removeNamespace(fixture.namespace)
-        XCTAssertTrue(removed)
-        let accounting = try await store.accounting()
-        XCTAssertEqual(accounting.manifestCount, 0)
-        XCTAssertEqual(accounting.recordCount, 0)
-        XCTAssertEqual(try Data(contentsOf: legacyFile), legacyData)
-        var legacyAfter = stat()
-        XCTAssertEqual(lstat(legacyFile.path, &legacyAfter), 0)
-        XCTAssertEqual(legacyAfter.st_dev, legacyBefore.st_dev)
-        XCTAssertEqual(legacyAfter.st_ino, legacyBefore.st_ino)
-        XCTAssertEqual(legacyAfter.st_size, legacyBefore.st_size)
-        XCTAssertEqual(legacyAfter.st_mtimespec.tv_sec, legacyBefore.st_mtimespec.tv_sec)
-        XCTAssertEqual(legacyAfter.st_mtimespec.tv_nsec, legacyBefore.st_mtimespec.tv_nsec)
-    }
-
     private func makeFixture(
         root: URL,
         artifactStore: CodeMapArtifactStore,

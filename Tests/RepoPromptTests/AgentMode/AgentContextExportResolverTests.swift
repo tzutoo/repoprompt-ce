@@ -305,7 +305,9 @@ final class AgentContextExportResolverTests: XCTestCase {
         XCTAssertEqual(row.displayPath, "App.swift")
         XCTAssertEqual(row.directoryDisplay, rendered.logicalPath.rootDisplayName)
         XCTAssertEqual(rendered.rootEpoch.rootID, row.rootID)
-        XCTAssertTrue(rendered.logicalPath.rootDisplayName.hasPrefix("root@"))
+        XCTAssertFalse(rendered.logicalPath.rootDisplayName.isEmpty)
+        XCTAssertFalse(rendered.logicalPath.rootDisplayName.contains(worktreeRoot.path))
+        XCTAssertFalse(rendered.logicalPath.rootDisplayName.contains(worktreeRoot.lastPathComponent))
         XCTAssertEqual(rendered.tokenCount, TokenCalculationService.estimateTokens(for: rendered.text))
         XCTAssertFalse(rendered.text.contains(worktreeRoot.path), rendered.text)
         XCTAssertFalse(rendered.text.contains(worktreeRoot.lastPathComponent), rendered.text)
@@ -1072,27 +1074,6 @@ final class AgentContextExportResolverTests: XCTestCase {
             visualColorHex: "#3366FF",
             boundAt: Date(timeIntervalSinceReferenceDate: 123),
             source: "test"
-        )
-    }
-
-    private func makeFileAPI(path: String, symbol: String) -> FileAPI {
-        FileAPI(
-            filePath: path,
-            imports: [],
-            classes: [],
-            functions: [
-                FunctionInfo(
-                    name: symbol,
-                    parameters: [],
-                    returnType: nil,
-                    definitionLine: "func \(symbol)()",
-                    lineNumber: 1
-                )
-            ],
-            enums: [],
-            globalVars: [],
-            macros: [],
-            referencedTypes: []
         )
     }
 

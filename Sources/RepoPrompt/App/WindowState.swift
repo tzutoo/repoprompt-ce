@@ -1329,9 +1329,6 @@ class WindowState: ObservableObject {
         // Stop the local MCP server
         await mcpServer.stopServer()
 
-        // Release per-window codemap work before the closed window can contend with later windows.
-        await workspaceFilesViewModel.cancelAllScans()
-
         // Cancel any ongoing AI query
         aiQueriesService.cancelQuery()
 

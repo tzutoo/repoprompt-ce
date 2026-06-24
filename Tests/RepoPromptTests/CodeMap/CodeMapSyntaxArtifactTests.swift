@@ -211,25 +211,8 @@ final class CodeMapSyntaxArtifactTests: XCTestCase {
                 language: .java
             )
         )
-        let firstLegacy = try XCTUnwrap(
-            CodeMapGenerator.generateCodeMap(
-                from: captures,
-                content: javaContent,
-                fullPath: "/private/sentinel/First.java"
-            )
-        )
-        let secondLegacy = try XCTUnwrap(
-            CodeMapGenerator.generateCodeMap(
-                from: captures,
-                content: javaContent,
-                fullPath: "/another/location/Second.java"
-            )
-        )
         XCTAssertEqual(modern.functions.map(\.name), ["helper"])
         XCTAssertTrue(modern.classes.isEmpty)
-        XCTAssertEqual(firstLegacy.classes.map(\.name), ["First"])
-        XCTAssertEqual(secondLegacy.classes.map(\.name), ["Second"])
-        XCTAssertTrue(firstLegacy.functions.isEmpty)
     }
 
     func testUnsupportedExtensionsRemainOutsideArtifactOutcomes() {

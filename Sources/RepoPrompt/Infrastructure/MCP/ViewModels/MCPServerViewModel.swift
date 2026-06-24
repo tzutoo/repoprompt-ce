@@ -6203,14 +6203,21 @@ final class MCPServerViewModel: ObservableObject {
     func selectionSnapshot() async throws -> (selected: [WorkspaceFileRecord], codemap: [WorkspaceFileRecord], slices: [UUID: [LineRange]], autoEnabled: Bool) {
         let selection = try await storedSelectionForCurrentTabContext(includeCodemapPathsWhenSelectedUsage: false)
         let selectedPaths = StoredSelectionPathNormalization.standardizedPaths(selection.selectedPaths)
-        let resolved = await promptVM.workspaceFileContextStore.lookupFiles(atPaths: selectedPaths, profile: .mcpSelection, rootScope: .allLoaded)
+        let manualCodemapPaths = StoredSelectionPathNormalization.standardizedPaths(
+            selection.manualCodemapPaths
+        )
+        let resolved = await promptVM.workspaceFileContextStore.lookupFiles(
+            atPaths: selectedPaths + manualCodemapPaths,
+            profile: .mcpSelection,
+            rootScope: .allLoaded
+        )
         var sliceSnapshot: [UUID: [LineRange]] = [:]
         for (path, ranges) in StoredSelectionPathNormalization.standardizedSlices(selection.slices) {
             if let file = resolved[path] { sliceSnapshot[file.id] = ranges }
         }
         return (
             selected: selectedPaths.compactMap { resolved[$0] },
-            codemap: [],
+            codemap: manualCodemapPaths.compactMap { resolved[$0] },
             slices: sliceSnapshot,
             autoEnabled: selection.codemapAutoEnabled
         )

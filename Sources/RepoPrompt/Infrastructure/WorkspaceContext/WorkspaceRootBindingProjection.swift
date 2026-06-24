@@ -265,6 +265,9 @@ struct WorkspaceRootBindingProjection: Equatable {
         }
         return StoredSelection(
             selectedPaths: selection.selectedPaths.map { logicalDisplayPath(forPhysicalPath: $0, display: .full) },
+            manualCodemapPaths: selection.manualCodemapPaths.map {
+                logicalDisplayPath(forPhysicalPath: $0, display: .full)
+            },
             slices: slices,
             codemapAutoEnabled: selection.codemapAutoEnabled
         )
@@ -278,6 +281,7 @@ struct WorkspaceRootBindingProjection: Equatable {
         }
         return StoredSelection(
             selectedPaths: selection.selectedPaths.map { translateInputPath($0) },
+            manualCodemapPaths: selection.manualCodemapPaths.map { translateInputPath($0) },
             slices: slices,
             codemapAutoEnabled: selection.codemapAutoEnabled
         )
@@ -420,13 +424,6 @@ struct WorkspaceRootBindingProjectionMaterializer {
         )
     }
 
-    func initializeCodemaps(for projection: WorkspaceRootBindingProjection?) async {
-        guard let projection else { return }
-        _ = await store.initializeCodemapsForSessionWorktreeRoots(
-            rootIDs: projection.physicalRootRefs.map(\.id)
-        )
-    }
-
     func abort(_ preparation: WorkspaceRootBindingProjectionPreparation) async {
         await store.abortSessionWorktreeOwnership(preparation.ownership)
     }
@@ -456,7 +453,6 @@ struct WorkspaceRootBindingProjectionMaterializer {
             let materializationStart = WorkspaceFileSearchDebugTiming.now()
             var prepareNanoseconds: UInt64 = 0
             var commitNanoseconds: UInt64 = 0
-            var codemapKickoffNanoseconds: UInt64 = 0
         #endif
         let visibleRoots = await store.rootRefs(scope: .visibleWorkspace)
         do {
@@ -484,22 +480,13 @@ struct WorkspaceRootBindingProjectionMaterializer {
                         since: commitStart,
                         through: WorkspaceFileSearchDebugTiming.now()
                     )
-                    let codemapKickoffStart = WorkspaceFileSearchDebugTiming.now()
-                #endif
-                await initializeCodemaps(for: projection)
-                #if DEBUG
-                    codemapKickoffNanoseconds = WorkspaceFileSearchDebugTiming.elapsed(
-                        since: codemapKickoffStart,
-                        through: WorkspaceFileSearchDebugTiming.now()
-                    )
                     coldStartCollector?.recordMaterialization(
                         totalNanoseconds: WorkspaceFileSearchDebugTiming.elapsed(
                             since: materializationStart,
                             through: WorkspaceFileSearchDebugTiming.now()
                         ),
                         prepareNanoseconds: prepareNanoseconds,
-                        commitNanoseconds: commitNanoseconds,
-                        codemapKickoffNanoseconds: codemapKickoffNanoseconds
+                        commitNanoseconds: commitNanoseconds
                     )
                 #endif
                 return projection
@@ -512,8 +499,7 @@ struct WorkspaceRootBindingProjectionMaterializer {
                             through: WorkspaceFileSearchDebugTiming.now()
                         ),
                         prepareNanoseconds: prepareNanoseconds,
-                        commitNanoseconds: commitNanoseconds,
-                        codemapKickoffNanoseconds: codemapKickoffNanoseconds
+                        commitNanoseconds: commitNanoseconds
                     )
                 #endif
                 return failClosedProjection(
@@ -530,8 +516,7 @@ struct WorkspaceRootBindingProjectionMaterializer {
                         through: WorkspaceFileSearchDebugTiming.now()
                     ),
                     prepareNanoseconds: prepareNanoseconds,
-                    commitNanoseconds: commitNanoseconds,
-                    codemapKickoffNanoseconds: codemapKickoffNanoseconds
+                    commitNanoseconds: commitNanoseconds
                 )
             #endif
             return failClosedProjection(

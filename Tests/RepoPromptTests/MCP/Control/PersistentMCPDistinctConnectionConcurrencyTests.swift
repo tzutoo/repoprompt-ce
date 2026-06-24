@@ -1524,8 +1524,6 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
             await contextA.window.mcpServer.shutdownListener()
             ServiceRegistry.unregister(contextB.catalogService)
             ServiceRegistry.unregister(contextA.catalogService)
-            await contextB.window.workspaceFilesViewModel.cancelAllScans()
-            await contextA.window.workspaceFilesViewModel.cancelAllScans()
             await contextB.window.workspaceFileContextStore.unloadRoot(id: contextB.rootID)
             await contextA.window.workspaceFileContextStore.unloadRoot(id: contextA.rootID)
             contextB.window.workspaceManager.workspaces.removeAll { $0.id == contextB.workspaceID }

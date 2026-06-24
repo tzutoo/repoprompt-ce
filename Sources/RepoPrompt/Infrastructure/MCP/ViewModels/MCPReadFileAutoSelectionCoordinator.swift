@@ -151,6 +151,15 @@ final class MCPReadFileAutoSelectionCoordinator {
         let expectedSelectedPaths = Set(StoredSelectionPathNormalization.standardizedPaths(expected.selectedPaths))
         let candidateSelectedPaths = Set(StoredSelectionPathNormalization.standardizedPaths(candidate.selectedPaths))
         guard expectedSelectedPaths.isSubset(of: candidateSelectedPaths) else { return false }
+        let expectedManualCodemapPaths = Set(
+            StoredSelectionPathNormalization.standardizedPaths(expected.manualCodemapPaths)
+        )
+        let candidateManualCodemapPaths = Set(
+            StoredSelectionPathNormalization.standardizedPaths(candidate.manualCodemapPaths)
+        )
+        guard expectedManualCodemapPaths.isSubset(
+            of: candidateManualCodemapPaths.union(candidateSelectedPaths)
+        ) else { return false }
 
         guard expected.codemapAutoEnabled == candidate.codemapAutoEnabled else { return false }
 

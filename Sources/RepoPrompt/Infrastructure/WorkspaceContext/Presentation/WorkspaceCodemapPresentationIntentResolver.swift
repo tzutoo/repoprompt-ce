@@ -8,20 +8,26 @@ enum WorkspaceCodemapPresentationIntentResolver {
         rootScope: WorkspaceLookupRootScope,
         profile: PathLocateProfile
     ) async -> WorkspaceCodemapOperationPresentationPlan {
-        guard codeMapUsage != .none,
-              codeMapUsage != .auto || selection.codemapAutoEnabled
-        else {
+        guard codeMapUsage != .none else {
             return WorkspaceCodemapOperationPresentationPlan(intent: .none, preflightIssues: [])
         }
 
         let roots = await store.rootRefs(scope: rootScope)
         let rootsByID = Dictionary(uniqueKeysWithValues: roots.map { ($0.id, $0) })
         var sourceFilesByID: [UUID: WorkspaceFileRecord] = [:]
-        let selectedRequests = selection.selectedPaths.map {
+        let sourcePaths: [String] = switch codeMapUsage {
+        case .auto where !selection.codemapAutoEnabled:
+            selection.manualCodemapPaths
+        case .selected:
+            selection.selectedPaths + selection.manualCodemapPaths
+        case .auto, .complete, .none:
+            selection.selectedPaths
+        }
+        let selectedRequests = sourcePaths.map {
             WorkspacePathLookupRequest(userPath: $0, profile: profile, rootScope: rootScope)
         }
         let selectedResults = await store.lookupPaths(selectedRequests)
-        for path in selection.selectedPaths {
+        for path in sourcePaths {
             let result: WorkspacePathLookupResult? = if let batched = selectedResults[path] {
                 batched
             } else {
@@ -41,9 +47,11 @@ enum WorkspaceCodemapPresentationIntentResolver {
                 }
             }
         }
-        for path in selection.slices.keys.sorted(by: utf8Precedes) {
-            if let file = await store.lookupPath(path, profile: profile, rootScope: rootScope)?.file {
-                sourceFilesByID[file.id] = file
+        if codeMapUsage != .auto || selection.codemapAutoEnabled {
+            for path in selection.slices.keys.sorted(by: utf8Precedes) {
+                if let file = await store.lookupPath(path, profile: profile, rootScope: rootScope)?.file {
+                    sourceFilesByID[file.id] = file
+                }
             }
         }
 
@@ -76,24 +84,15 @@ enum WorkspaceCodemapPresentationIntentResolver {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        let gitRootIDs = Set(roots.compactMap { root in
-            isInsideGitWorktree(URL(fileURLWithPath: root.standardizedFullPath)) ? root.id : nil
-        })
-        var eligibleFileIDs: [UUID] = []
-        var issues: [WorkspaceCodemapOperationIssue] = []
-        for file in orderedFiles {
-            if gitRootIDs.contains(file.rootID) {
-                eligibleFileIDs.append(file.id)
-            } else {
-                issues.append(.unavailable(fileID: file.id, reason: .gitTerminal(.nonGit)))
-            }
-        }
-        let intent: WorkspaceCodemapOperationPresentationIntent = if codeMapUsage == .auto {
-            .automatic(sourceFileIDs: eligibleFileIDs)
+        let fileIDs = orderedFiles.map(\.id)
+        let intent: WorkspaceCodemapOperationPresentationIntent = if codeMapUsage == .auto,
+                                                                     selection.codemapAutoEnabled
+        {
+            .automatic(sourceFileIDs: fileIDs)
         } else {
-            .exact(fileIDs: eligibleFileIDs, completeRootSet: completeRootSet)
+            .exact(fileIDs: fileIDs, completeRootSet: completeRootSet)
         }
-        return WorkspaceCodemapOperationPresentationPlan(intent: intent, preflightIssues: issues)
+        return WorkspaceCodemapOperationPresentationPlan(intent: intent, preflightIssues: [])
     }
 
     static func merging(
@@ -119,16 +118,6 @@ enum WorkspaceCodemapPresentationIntentResolver {
             issues: issues,
             publicationReceipt: presentation.publicationReceipt
         )
-    }
-
-    private static func isInsideGitWorktree(_ rootURL: URL) -> Bool {
-        var candidate = rootURL.standardizedFileURL
-        while true {
-            if GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: candidate) != nil { return true }
-            let parent = candidate.deletingLastPathComponent().standardizedFileURL
-            if parent.path == candidate.path { return false }
-            candidate = parent
-        }
     }
 
     private static func utf8Precedes(_ lhs: String, _ rhs: String) -> Bool {

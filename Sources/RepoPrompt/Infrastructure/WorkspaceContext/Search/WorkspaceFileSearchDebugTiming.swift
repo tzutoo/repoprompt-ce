@@ -401,7 +401,6 @@
             let totalMicroseconds: UInt64
             let prepareMicroseconds: UInt64
             let commitMicroseconds: UInt64
-            let codemapKickoffMicroseconds: UInt64
         }
 
         struct RootCrawl: Equatable {
@@ -463,7 +462,6 @@
             var materializationNanoseconds: UInt64 = 0
             var prepareNanoseconds: UInt64 = 0
             var commitNanoseconds: UInt64 = 0
-            var codemapKickoffNanoseconds: UInt64 = 0
             var rootCrawlCount = 0
             var rootCrawlNanoseconds: UInt64 = 0
             var maximumRootCrawlNanoseconds: UInt64 = 0
@@ -492,14 +490,12 @@
         func recordMaterialization(
             totalNanoseconds: UInt64,
             prepareNanoseconds: UInt64,
-            commitNanoseconds: UInt64,
-            codemapKickoffNanoseconds: UInt64
+            commitNanoseconds: UInt64
         ) {
             withState {
                 $0.materializationNanoseconds &+= totalNanoseconds
                 $0.prepareNanoseconds &+= prepareNanoseconds
                 $0.commitNanoseconds &+= commitNanoseconds
-                $0.codemapKickoffNanoseconds &+= codemapKickoffNanoseconds
             }
         }
 
@@ -610,8 +606,7 @@
                 materialization: .init(
                     totalMicroseconds: WorkspaceFileSearchDebugTiming.microseconds(captured.materializationNanoseconds),
                     prepareMicroseconds: WorkspaceFileSearchDebugTiming.microseconds(captured.prepareNanoseconds),
-                    commitMicroseconds: WorkspaceFileSearchDebugTiming.microseconds(captured.commitNanoseconds),
-                    codemapKickoffMicroseconds: WorkspaceFileSearchDebugTiming.microseconds(captured.codemapKickoffNanoseconds)
+                    commitMicroseconds: WorkspaceFileSearchDebugTiming.microseconds(captured.commitNanoseconds)
                 ),
                 rootCrawl: .init(
                     count: captured.rootCrawlCount,

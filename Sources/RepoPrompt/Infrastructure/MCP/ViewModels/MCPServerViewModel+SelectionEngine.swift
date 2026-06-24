@@ -31,6 +31,7 @@ struct WorkspaceGitDiffArtifactSelectionService {
         return WorkspaceGitDiffArtifactSelectionMergeResult(
             selection: StoredSelection(
                 selectedPaths: selectedPaths,
+                manualCodemapPaths: existing.manualCodemapPaths,
                 slices: existing.slices,
                 codemapAutoEnabled: existing.codemapAutoEnabled
             ),

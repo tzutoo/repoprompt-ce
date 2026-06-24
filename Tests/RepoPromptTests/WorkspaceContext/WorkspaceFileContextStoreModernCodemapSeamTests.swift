@@ -1509,34 +1509,47 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
             "Sources/Feature.swift": "struct Feature {}\n"
         ])
         let graphProbe = ModernCodemapSelectionGraphProbe()
-        let store = fixture.makeStore(selectionGraphFactory: graphProbe.factory)
+        let preflightCount = ModernCodemapLockedCounter()
+        let store = fixture.makeStore(
+            codemapGitEligibilityProbe: WorkspaceCodemapGitEligibilityProbe { _ in
+                preflightCount.increment()
+                return .terminalUnavailable(.nonGit)
+            },
+            selectionGraphFactory: graphProbe.factory
+        )
         let loaded = try await store.loadRoot(path: root.path)
         let loadedFiles = await store.files(inRoot: loaded.id)
         let file = try XCTUnwrap(loadedFiles.first)
-        let ticket = try await pendingTicket(
-            store.requestCodemapArtifact(forFileID: file.id)
-        )
+        let first = await store.requestCodemapArtifact(forFileID: file.id)
+        let second = await store.requestCodemapArtifact(forFileID: file.id)
+        assertNonGitTerminal(first)
+        assertNonGitTerminal(second)
+        XCTAssertEqual(preflightCount.value, 1)
+        let firstOperationCounts = await store.codemapPresentationOperationCountsForTesting()
+        XCTAssertEqual(firstOperationCounts.setupTasksCreated, 0)
+        XCTAssertEqual(firstOperationCounts.demandTasksCreated, 0)
 
-        let settled = try await settledResult(store: store, ticket: ticket)
-        assertNonGitTerminal(settled)
-        let runtime = try fixture.runtime()
-        let engine = try runtime.bindingEngine()
-        let accounting = await engine.accounting()
-        let coordinator = await runtime.coordinator.accounting()
-
-        XCTAssertEqual(accounting.counters.capabilityResolutions, 1)
-        XCTAssertEqual(accounting.counters.classifications, 0)
-        XCTAssertEqual(accounting.counters.validatedWorktreeReads, 0)
-        XCTAssertEqual(accounting.counters.builds, 0)
-        XCTAssertEqual(accounting.counters.manifestLoads, 0)
-        XCTAssertEqual(accounting.counters.manifestWrites, 0)
-        XCTAssertEqual(accounting.counters.materializations, 0)
+        XCTAssertEqual(fixture.providerAccessCount.value, 0)
+        XCTAssertEqual(fixture.runtimeFactoryCount.value, 0)
+        XCTAssertEqual(fixture.engineFactoryCount.value, 0)
         XCTAssertEqual(fixture.manifestReadCount.value, 0)
         XCTAssertEqual(fixture.buildCount.value, 0)
-        XCTAssertEqual(coordinator.counters.requests, 0)
         XCTAssertEqual(graphProbe.factoryCount, 0)
 
         await store.unloadRoot(id: loaded.id)
+        let reloaded = try await store.loadRoot(path: root.path)
+        let reloadedFiles = await store.files(inRoot: reloaded.id)
+        let reloadedFile = try XCTUnwrap(reloadedFiles.first)
+        await assertNonGitTerminal(store.requestCodemapArtifact(forFileID: reloadedFile.id))
+        XCTAssertEqual(preflightCount.value, 2)
+        XCTAssertEqual(fixture.providerAccessCount.value, 0)
+        XCTAssertEqual(fixture.runtimeFactoryCount.value, 0)
+        XCTAssertEqual(fixture.engineFactoryCount.value, 0)
+        XCTAssertEqual(graphProbe.factoryCount, 0)
+        let reloadedOperationCounts = await store.codemapPresentationOperationCountsForTesting()
+        XCTAssertEqual(reloadedOperationCounts.setupTasksCreated, 0)
+        XCTAssertEqual(reloadedOperationCounts.demandTasksCreated, 0)
+        await store.unloadRoot(id: reloaded.id)
     }
 
     func testNonGitPresentationPlanStartsNoModernRuntimeDemandBuildOrCASWork() async throws {
@@ -2210,13 +2223,11 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
         )
         let fixture = try ModernCodemapStoreFixture(name: #function)
         let graphProbe = ModernCodemapSelectionGraphProbe()
-        let scanStarts = ModernCodemapLockedCounter()
         addTeardownBlock {
             await fixture.shutdown()
             repositoryFixture.cleanup()
         }
         let store = fixture.makeStore(selectionGraphFactory: graphProbe.factory)
-        await store.setCodemapScanWillStartHandlerForTesting { _ in scanStarts.increment() }
         let loaded = try await store.loadRoot(path: root.path)
         let loadedFiles = await store.files(inRoot: loaded.id)
         let feature = try XCTUnwrap(loadedFiles.first)
@@ -2252,7 +2263,6 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
         try await assertEngineRootCount(1, fixture: fixture)
         let oldGraphAccounting = await oldGraph.accounting()
         XCTAssertEqual(oldGraphAccounting.activeRebuildCount, 0)
-        XCTAssertEqual(scanStarts.value, 0)
 
         let successorFileValue = await store.file(
             rootID: loaded.id,
@@ -3213,7 +3223,6 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
         addTeardownBlock { @MainActor in
             await manager.unloadAllRootFolders()
         }
-        await manager.setCodeScanEnabled(false)
         let workspace = WorkspaceModel(name: #function, repoPaths: [root.path])
         try await manager.loadFolder(at: root, for: workspace)
         let materializedSource = await manager.materializeFileForUserInput(
@@ -3247,8 +3256,7 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
         XCTAssertTrue(sourceGraphPublished)
 
         manager.handleAutomaticCodemapReadinessForTesting(
-            rootID: source.rootIdentifier,
-            rootPath: source.standardizedRootFolderPath
+            rootEpoch: sourceTicket.rootEpoch
         )
         await manager.waitForAutoCodemapSyncForTesting()
         XCTAssertEqual(manager.autoCodemapFiles.map(\.id), [target.id])
@@ -3323,11 +3331,9 @@ final class WorkspaceFileContextStoreModernCodemapSeamTests: XCTestCase {
             return XCTFail("Expected graph admission to report busy")
         }
 
-        let updates = await store.codemapUpdates()
+        let updates = await store.codemapSelectionGraphReadinessUpdates()
         let readiness = Task {
-            for await event in updates where
-                event.rootID == selection.id && event.automaticSelectionReadinessChanged
-            {
+            for await event in updates where event.rootEpoch.rootID == selection.id {
                 return true
             }
             return false
@@ -4247,6 +4253,7 @@ private final class ModernCodemapStoreFixture: @unchecked Sendable {
     }
 
     func makeStore(
+        codemapGitEligibilityProbe: WorkspaceCodemapGitEligibilityProbe = .production(),
         selectionGraphFactory: WorkspaceCodemapSelectionGraphFactory = .production,
         selectionGraphQueryBudgetPolicy: WorkspaceCodemapStoreSelectionGraphQueryBudgetPolicy = .initial,
         automaticSelectionAccountingMaximum: Int = .max,
@@ -4271,6 +4278,7 @@ private final class ModernCodemapStoreFixture: @unchecked Sendable {
                 providerAccessCount.increment()
                 return try runtimeProvider.runtime()
             },
+            codemapGitEligibilityProbe: codemapGitEligibilityProbe,
             selectionGraphFactory: selectionGraphFactory,
             selectionGraphQueryBudgetPolicy: selectionGraphQueryBudgetPolicy,
             automaticSelectionAccountingMaximum: automaticSelectionAccountingMaximum,

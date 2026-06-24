@@ -239,8 +239,7 @@ struct AgentMCPStartWorktreeCoordinator {
             bindingFingerprint: bindingFingerprint,
             physicalRootPaths: physicalRootPaths
         )
-        if let alreadyInstalled {
-            _ = await store.initializeCodemapsForSessionWorktreeRoots(rootIDs: alreadyInstalled.map(\.id))
+        if alreadyInstalled != nil {
             return
         }
 

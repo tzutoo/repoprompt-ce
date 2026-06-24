@@ -332,167 +332,19 @@
         }
     }
 
-    struct WorkspaceLegacyCodemapCohortSample {
-        let cohort: LegacyCodeMapTelemetryCohort
-        let semantic: String
-        let rootRole: LegacyCodeMapTelemetryRootRole
-        let demandToReadyMilliseconds: Double?
-        let metrics: LegacyCodeMapTelemetryMetrics?
-        let conservation: LegacyCodeMapTelemetryConservation
-        let actualCrossStoreParseAvoidanceCount: Int
-        let actualCrossWorktreeParseAvoidanceCount: Int
-        let sameBlobAssociationOpportunityCount: Int
-        let actualGitLocatorHitCount: Int
-        let gitBlobByteCount: UInt64
-        let validityIssues: [WorkspaceBenchmarkValidityIssue]
-
-        var isValid: Bool {
-            conservation.isValid && validityIssues.isEmpty
-        }
-    }
-
-    struct WorkspaceLegacyCodemapBenchmarkSample {
-        let ordinal: Int
-        let phase: String
-        let cohorts: [WorkspaceLegacyCodemapCohortSample]
-        let validityIssues: [WorkspaceBenchmarkValidityIssue]
-
-        var isValid: Bool {
-            validityIssues.isEmpty && cohorts.allSatisfy(\.isValid)
-        }
-    }
-
-    struct WorkspaceLegacyCodemapConvergenceSample {
-        let ordinal: Int
-        let phase: String
-        let supportedFileCount: Int
-        let firstReadyMilliseconds: Double?
-        let quarterReadyMilliseconds: Double?
-        let halfReadyMilliseconds: Double?
-        let threeQuarterReadyMilliseconds: Double?
-        let allReadyMilliseconds: Double?
-        let quiescentMilliseconds: Double?
-        let metrics: LegacyCodeMapTelemetryMetrics?
-        let conservation: LegacyCodeMapTelemetryConservation
-        let validityIssues: [WorkspaceBenchmarkValidityIssue]
-
-        var isValid: Bool {
-            conservation.isValid && validityIssues.isEmpty
-        }
-
-        var milestoneValues: [String: Double?] {
-            [
-                "first": firstReadyMilliseconds,
-                "quarter": quarterReadyMilliseconds,
-                "half": halfReadyMilliseconds,
-                "threeQuarter": threeQuarterReadyMilliseconds,
-                "all": allReadyMilliseconds,
-                "quiescent": quiescentMilliseconds
-            ]
-        }
-    }
-
-    struct WorkspaceLegacyCodemapBenchmarkAggregate {
-        static let reuseScenario = "legacy-codemap-reuse-and-demand"
-        static let convergenceScenario = "legacy-eager-background-convergence"
-
-        let warmup: WorkspaceLegacyCodemapBenchmarkSample
-        let measured: [WorkspaceLegacyCodemapBenchmarkSample]
-        let convergenceWarmup: WorkspaceLegacyCodemapConvergenceSample
-        let convergenceMeasured: [WorkspaceLegacyCodemapConvergenceSample]
-        let validityIssues: [WorkspaceBenchmarkValidityIssue]
-        let demandLatencyStatistics: [String: WorkspaceBenchmarkDistribution]
-        let convergenceStatistics: [String: WorkspaceBenchmarkDistribution]
-
-        init(
-            warmup: WorkspaceLegacyCodemapBenchmarkSample,
-            measured: [WorkspaceLegacyCodemapBenchmarkSample],
-            convergenceWarmup: WorkspaceLegacyCodemapConvergenceSample,
-            convergenceMeasured: [WorkspaceLegacyCodemapConvergenceSample]
-        ) {
-            self.warmup = warmup
-            self.measured = measured
-            self.convergenceWarmup = convergenceWarmup
-            self.convergenceMeasured = convergenceMeasured
-
-            var issues: [WorkspaceBenchmarkValidityIssue] = []
-            if measured.count != 5 {
-                issues.append(.init(code: "reuse-sample-count", detail: "Expected five retained reuse samples; found \(measured.count)."))
-            }
-            if convergenceMeasured.count != 5 {
-                issues.append(.init(code: "convergence-sample-count", detail: "Expected five retained convergence samples; found \(convergenceMeasured.count)."))
-            }
-            for sample in [warmup] + measured where !sample.isValid {
-                issues.append(.init(code: "reuse-sample-invalid", detail: "\(sample.phase) sample \(sample.ordinal) is invalid."))
-            }
-            for sample in [convergenceWarmup] + convergenceMeasured where !sample.isValid {
-                issues.append(.init(code: "convergence-sample-invalid", detail: "\(sample.phase) sample \(sample.ordinal) is invalid."))
-            }
-            validityIssues = issues
-
-            var demand: [String: [Double]] = [:]
-            for sample in measured {
-                for cohort in sample.cohorts {
-                    guard let latency = cohort.demandToReadyMilliseconds else { continue }
-                    demand[cohort.cohort.rawValue, default: []].append(latency)
-                }
-            }
-            demandLatencyStatistics = demand.mapValues(WorkspaceBenchmarkDistribution.init)
-
-            var convergence: [String: [Double]] = [:]
-            for sample in convergenceMeasured {
-                for (milestone, value) in sample.milestoneValues {
-                    if let value {
-                        convergence[milestone, default: []].append(value)
-                    }
-                }
-            }
-            convergenceStatistics = convergence.mapValues(WorkspaceBenchmarkDistribution.init)
-        }
-
-        var isValid: Bool {
-            validityIssues.isEmpty
-        }
-    }
-
     enum WorkspaceCodeMapPhase2BenchmarkMetric: String, CaseIterable {
         case validatedRawRead
         case envelopeHashAndDecode
         case explicitLanguageQueryParse
         case pathFreeArtifactGeneration
         case modernEnvelopeToReadyArtifact
-        case legacyExtensionQueryParse
-        case legacyFileAPIGeneration
-        case legacyParseAndFileAPITotal
-        case modernTerminalDelta
-        case modernTerminalRatio
-        case modernTotalDelta
-        case modernTotalRatio
 
         var unit: String {
-            switch self {
-            case .modernTerminalRatio, .modernTotalRatio: "ratio"
-            default: "milliseconds"
-            }
+            "milliseconds"
         }
 
         var supportsThreadCPU: Bool {
-            switch self {
-            case .envelopeHashAndDecode,
-                 .explicitLanguageQueryParse,
-                 .pathFreeArtifactGeneration,
-                 .modernEnvelopeToReadyArtifact,
-                 .legacyExtensionQueryParse,
-                 .legacyFileAPIGeneration,
-                 .legacyParseAndFileAPITotal:
-                true
-            case .validatedRawRead,
-                 .modernTerminalDelta,
-                 .modernTerminalRatio,
-                 .modernTotalDelta,
-                 .modernTotalRatio:
-                false
-            }
+            self != .validatedRawRead
         }
     }
 
@@ -699,7 +551,6 @@
         let coldWorktree: WorkspaceFileSearchIndexBenchmarkAggregate
         let productionEquivalent: WorkspaceFileSearchIndexBenchmarkAggregate
         let incrementalRebuild: WorkspaceFileSearchIndexBenchmarkAggregate
-        let legacyCodemap: WorkspaceLegacyCodemapBenchmarkAggregate
         let phase2Model: WorkspaceCodeMapPhase2BenchmarkAggregate
         let phase3Storage: WorkspaceCodeMapPhase3BenchmarkAggregate
         let phase4GitIdentityLocator: WorkspaceCodeMapPhase4BenchmarkAggregate
@@ -707,8 +558,7 @@
         let sortDiagnostic: WorkspaceFileSearchIndexSortDiagnostic?
 
         var validityIssues: [WorkspaceBenchmarkValidityIssue] {
-            var issues = legacyCodemap.validityIssues
-                + phase2Model.validityIssues
+            var issues = phase2Model.validityIssues
                 + phase3Storage.validityIssues
                 + phase4GitIdentityLocator.validityIssues
                 + phase5Coordinator.validityIssues
@@ -828,7 +678,6 @@
                 actorCountRows(incrementalRebuild).joined(separator: "\n")
             ])
             lines.append(contentsOf: coldStartRows(productionEquivalent))
-            lines.append(contentsOf: legacyCodemapMarkdown())
             if let sortDiagnostic {
                 lines.append(contentsOf: sortDiagnosticMarkdown(sortDiagnostic))
             }
@@ -873,7 +722,6 @@
                     aggregateDictionary(productionEquivalent),
                     aggregateDictionary(incrementalRebuild)
                 ],
-                "legacyCodemap": legacyCodemapDictionary(),
                 "phase2Model": phase2ModelDictionary(),
                 "phase3Storage": phase3StorageDictionary(),
                 "phase4GitIdentityLocator": phase4GitIdentityLocatorDictionary(),
@@ -939,8 +787,7 @@
                 "materialization": [
                     "totalMicroseconds": snapshot.materialization.totalMicroseconds,
                     "prepareMicroseconds": snapshot.materialization.prepareMicroseconds,
-                    "commitMicroseconds": snapshot.materialization.commitMicroseconds,
-                    "codemapKickoffMicroseconds": snapshot.materialization.codemapKickoffMicroseconds
+                    "commitMicroseconds": snapshot.materialization.commitMicroseconds
                 ],
                 "rootCrawl": [
                     "count": snapshot.rootCrawl.count,
@@ -976,30 +823,6 @@
                     "scansCompleted": snapshot.codemap.scansCompleted,
                     "scansCancelled": snapshot.codemap.scansCancelled,
                     "scanMicroseconds": snapshot.codemap.scanMicroseconds
-                ]
-            ]
-        }
-
-        private func legacyCodemapDictionary() -> [String: Any] {
-            [
-                "reuseScenario": WorkspaceLegacyCodemapBenchmarkAggregate.reuseScenario,
-                "convergenceScenario": WorkspaceLegacyCodemapBenchmarkAggregate.convergenceScenario,
-                "valid": legacyCodemap.isValid,
-                "validityIssues": legacyCodemap.validityIssues.map(validityIssueDictionary),
-                "reuse": [
-                    "warmupSampleCount": 1,
-                    "measuredSampleCount": legacyCodemap.measured.count,
-                    "warmup": legacySampleDictionary(legacyCodemap.warmup),
-                    "measured": legacyCodemap.measured.map(legacySampleDictionary),
-                    "demandLatencyStatistics": legacyCodemap.demandLatencyStatistics.mapValues(distributionDictionary),
-                    "measuredCountTotalsByCohort": legacyMeasuredCountTotals()
-                ],
-                "convergence": [
-                    "warmupSampleCount": 1,
-                    "measuredSampleCount": legacyCodemap.convergenceMeasured.count,
-                    "warmup": convergenceSampleDictionary(legacyCodemap.convergenceWarmup),
-                    "measured": legacyCodemap.convergenceMeasured.map(convergenceSampleDictionary),
-                    "milestoneStatistics": legacyCodemap.convergenceStatistics.mapValues(distributionDictionary)
                 ]
             ]
         }
@@ -1087,116 +910,6 @@
             return value
         }
 
-        private func legacySampleDictionary(_ sample: WorkspaceLegacyCodemapBenchmarkSample) -> [String: Any] {
-            [
-                "ordinal": sample.ordinal,
-                "phase": sample.phase,
-                "valid": sample.isValid,
-                "validityIssues": sample.validityIssues.map(validityIssueDictionary),
-                "cohorts": sample.cohorts.map(legacyCohortDictionary)
-            ]
-        }
-
-        private func legacyCohortDictionary(_ sample: WorkspaceLegacyCodemapCohortSample) -> [String: Any] {
-            [
-                "cohort": sample.cohort.rawValue,
-                "semantic": sample.semantic,
-                "rootRole": sample.rootRole.rawValue,
-                "demandToReadyMilliseconds": sample.demandToReadyMilliseconds.map { $0 as Any } ?? NSNull(),
-                "metrics": sample.metrics.map(legacyTelemetryDictionary) ?? NSNull(),
-                "reuse": [
-                    "actualCrossStoreParseAvoidanceCount": sample.actualCrossStoreParseAvoidanceCount,
-                    "actualCrossWorktreeParseAvoidanceCount": sample.actualCrossWorktreeParseAvoidanceCount,
-                    "sameBlobAssociationOpportunityCount": sample.sameBlobAssociationOpportunityCount,
-                    "actualGitLocatorHitCount": sample.actualGitLocatorHitCount,
-                    "gitBlobByteCount": sample.gitBlobByteCount
-                ],
-                "conservation": [
-                    "valid": sample.conservation.isValid,
-                    "issues": sample.conservation.issues
-                ],
-                "valid": sample.isValid,
-                "validityIssues": sample.validityIssues.map(validityIssueDictionary)
-            ]
-        }
-
-        private func convergenceSampleDictionary(_ sample: WorkspaceLegacyCodemapConvergenceSample) -> [String: Any] {
-            [
-                "ordinal": sample.ordinal,
-                "phase": sample.phase,
-                "supportedFileCount": sample.supportedFileCount,
-                "milestonesMilliseconds": sample.milestoneValues.mapValues { $0.map { $0 as Any } ?? NSNull() },
-                "metrics": sample.metrics.map(legacyTelemetryDictionary) ?? NSNull(),
-                "conservation": [
-                    "valid": sample.conservation.isValid,
-                    "issues": sample.conservation.issues
-                ],
-                "valid": sample.isValid,
-                "validityIssues": sample.validityIssues.map(validityIssueDictionary)
-            ]
-        }
-
-        private func legacyTelemetryDictionary(_ metrics: LegacyCodeMapTelemetryMetrics) -> [String: Any] {
-            [
-                "requestedFileCount": metrics.requestedFileCount,
-                "supportedFileCount": metrics.supportedFileCount,
-                "source": [
-                    "requestCount": metrics.sourceRequestCount,
-                    "terminalOutcomes": Dictionary(uniqueKeysWithValues: LegacyCodeMapSourceTerminalOutcome.allCases.map {
-                        ($0.rawValue, metrics.sourceTerminalOutcomes[$0, default: 0])
-                    }),
-                    "successfulOpenCount": metrics.successfulOpenCount,
-                    "nominalOpenedByteCount": metrics.nominalOpenedByteCount,
-                    "actualReadByteCount": metrics.actualReadByteCount,
-                    "decodedFileCount": metrics.decodedFileCount,
-                    "decodeWallNanoseconds": metrics.decodeWallNanoseconds,
-                    "decodedUTF8ByteCount": metrics.decodedUTF8ByteCount
-                ],
-                "hash": [
-                    "uniqueFileCount": metrics.uniqueHashedFileCount,
-                    "lookupOperationCount": metrics.lookupHashOperationCount,
-                    "persistenceOperationCount": metrics.persistenceHashOperationCount,
-                    "utf8ByteCount": metrics.hashedUTF8ByteCount
-                ],
-                "cache": [
-                    "results": Dictionary(uniqueKeysWithValues: LegacyCodeMapCacheResult.allCases.map {
-                        ($0.rawValue, metrics.cacheResults[$0, default: 0])
-                    }),
-                    "unusableReasons": Dictionary(uniqueKeysWithValues: LegacyCodeMapCacheUnusableReason.allCases.map {
-                        ($0.rawValue, metrics.unusableCacheReasons[$0, default: 0])
-                    }),
-                    "rootLoadOutcomes": Dictionary(uniqueKeysWithValues: LegacyCodeMapRootCacheLoadOutcome.allCases.map {
-                        ($0.rawValue, metrics.rootCacheLoadOutcomes[$0, default: 0])
-                    }),
-                    "rootLoadEncodedByteCount": metrics.rootCacheLoadEncodedByteCount,
-                    "rootLoadWallNanoseconds": metrics.rootCacheLoadWallNanoseconds,
-                    "rootSaveAttemptCount": metrics.rootCacheSaveAttemptCount,
-                    "rootSaveSuccessCount": metrics.rootCacheSaveSuccessCount,
-                    "rootSaveFailureCount": metrics.rootCacheSaveFailureCount,
-                    "rootSaveEncodedByteCount": metrics.rootCacheSaveEncodedByteCount,
-                    "rootSaveEntryCount": metrics.rootCacheSaveEntryCount,
-                    "rootSaveWallNanoseconds": metrics.rootCacheSaveWallNanoseconds
-                ],
-                "parse": [
-                    "attemptCount": metrics.parseAttemptCount,
-                    "terminalOutcomes": Dictionary(uniqueKeysWithValues: LegacyCodeMapParseTerminalOutcome.allCases.map {
-                        ($0.rawValue, metrics.parseTerminalOutcomes[$0, default: 0])
-                    }),
-                    "wallNanoseconds": metrics.parseWallNanoseconds,
-                    "threadCPUNanoseconds": metrics.parseThreadCPUNanoseconds.map { $0 as Any } ?? NSNull(),
-                    "threadCPUUnavailableCount": metrics.parseThreadCPUUnavailableCount,
-                    "generatorWallNanoseconds": metrics.generatorWallNanoseconds,
-                    "generatorThreadCPUNanoseconds": metrics.generatorThreadCPUNanoseconds.map { $0 as Any } ?? NSNull(),
-                    "generatorThreadCPUUnavailableCount": metrics.generatorThreadCPUUnavailableCount,
-                    "duplicateParseCount": metrics.duplicateParseCount
-                ],
-                "publication": [
-                    "acceptedReadyCount": metrics.acceptedReadyPublicationCount,
-                    "droppedCount": metrics.droppedPublicationCount
-                ]
-            ]
-        }
-
         private func distributionDictionary(_ distribution: WorkspaceBenchmarkDistribution) -> [String: Any] {
             [
                 "retainedSampleCount": distribution.rawValues.count,
@@ -1214,36 +927,6 @@
 
         private func validityIssueDictionary(_ issue: WorkspaceBenchmarkValidityIssue) -> [String: Any] {
             ["code": issue.code, "detail": issue.detail]
-        }
-
-        private func legacyMeasuredCountTotals() -> [String: Any] {
-            var cohorts: [String: [WorkspaceLegacyCodemapCohortSample]] = [:]
-            for sample in legacyCodemap.measured {
-                for cohort in sample.cohorts {
-                    cohorts[cohort.cohort.rawValue, default: []].append(cohort)
-                }
-            }
-            return cohorts.mapValues { samples in
-                let metrics = samples.compactMap(\.metrics)
-                return [
-                    "sampleCount": samples.count,
-                    "requestedFiles": metrics.reduce(0) { $0 + $1.requestedFileCount },
-                    "successfulOpens": metrics.reduce(0) { $0 + $1.successfulOpenCount },
-                    "actualReadBytes": metrics.reduce(UInt64(0)) { $0 + $1.actualReadByteCount },
-                    "memoryHits": metrics.reduce(0) { $0 + $1.cacheResults[.memoryHit, default: 0] },
-                    "diskHits": metrics.reduce(0) { $0 + $1.cacheResults[.diskHit, default: 0] },
-                    "cacheMisses": metrics.reduce(0) { $0 + $1.cacheMissCount },
-                    "parseAttempts": metrics.reduce(0) { $0 + $1.parseAttemptCount },
-                    "duplicateParses": metrics.reduce(0) { $0 + $1.duplicateParseCount },
-                    "acceptedReadyPublications": metrics.reduce(0) { $0 + $1.acceptedReadyPublicationCount },
-                    "droppedPublications": metrics.reduce(0) { $0 + $1.droppedPublicationCount },
-                    "actualCrossStoreParseAvoidance": samples.reduce(0) { $0 + $1.actualCrossStoreParseAvoidanceCount },
-                    "actualCrossWorktreeParseAvoidance": samples.reduce(0) { $0 + $1.actualCrossWorktreeParseAvoidanceCount },
-                    "sameBlobAssociationOpportunity": samples.reduce(0) { $0 + $1.sameBlobAssociationOpportunityCount },
-                    "actualGitLocatorHits": samples.reduce(0) { $0 + $1.actualGitLocatorHitCount },
-                    "gitBlobBytes": samples.reduce(UInt64(0)) { $0 + $1.gitBlobByteCount }
-                ] as [String: Any]
-            }
         }
 
         private func phaseDictionary(_ phases: WorkspaceFileSearchPhaseSnapshot) -> [String: Any] {
@@ -1587,114 +1270,6 @@
             }
         }
 
-        private func legacyCodemapMarkdown() -> [String] {
-            var lines = [
-                "",
-                "## Legacy codemap reuse and demand",
-                "",
-                "Scenario validity: \(legacyCodemap.isValid ? "valid" : "INVALID — diagnostic only")  ",
-                "Memory-hit classification is a DEBUG-only forced-residency request; pin preload is attributed to the separate `setup` cohort. Git/blob association is prospective only: legacy production performs no Git locator lookup or Git blob read.",
-                "",
-                "| Cohort | Retained N | Raw demand-to-ready ms | Mean | Median | Nearest-rank p95 | Sample variance | Sample stddev | CV | Min/max |",
-                "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
-            ]
-            for key in legacyCodemap.demandLatencyStatistics.keys.sorted() {
-                guard let statistics = legacyCodemap.demandLatencyStatistics[key] else { continue }
-                lines.append(
-                    "| \(key) | \(statistics.rawValues.count) | \(formatValues(statistics.rawValues)) | \(formatMS(statistics.mean)) | \(formatMS(statistics.median)) | \(formatMS(statistics.nearestRankP95)) | \(String(format: "%.6f", statistics.sampleVariance)) | \(formatMS(statistics.sampleStandardDeviation)) | \(statistics.coefficientOfVariation.map(formatPercent) ?? "unavailable") | \(formatMS(statistics.minimum))/\(formatMS(statistics.maximum)) |"
-                )
-            }
-
-            lines.append(contentsOf: [
-                "",
-                "| Phase | Sample | Cohort | Semantic | Demand-ready ms | Requests/supported | Opens | Nominal/read bytes | Decoded files/bytes | Hash unique/lookup/store/bytes | Cache memory/disk/absent/unusable | Root loads/bytes | Root saves ok/fail/bytes/entries |",
-                "| --- | ---: | --- | --- | ---: | --- | ---: | --- | --- | --- | --- | --- | --- |"
-            ])
-            for sample in [legacyCodemap.warmup] + legacyCodemap.measured {
-                for cohort in sample.cohorts {
-                    guard let metrics = cohort.metrics else {
-                        lines.append("| \(sample.phase) | \(sample.ordinal) | \(cohort.cohort.rawValue) | \(markdownEscaped(cohort.semantic)) | \(cohort.demandToReadyMilliseconds.map(formatMS) ?? "n/a") | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |")
-                        continue
-                    }
-                    lines.append(
-                        "| \(sample.phase) | \(sample.ordinal) | \(cohort.cohort.rawValue) | \(markdownEscaped(cohort.semantic)) | \(cohort.demandToReadyMilliseconds.map(formatMS) ?? "n/a") | \(metrics.requestedFileCount)/\(metrics.supportedFileCount) | \(metrics.successfulOpenCount) | \(metrics.nominalOpenedByteCount)/\(metrics.actualReadByteCount) | \(metrics.decodedFileCount)/\(metrics.decodedUTF8ByteCount) | \(metrics.uniqueHashedFileCount)/\(metrics.lookupHashOperationCount)/\(metrics.persistenceHashOperationCount)/\(metrics.hashedUTF8ByteCount) | \(metrics.cacheResults[.memoryHit, default: 0])/\(metrics.cacheResults[.diskHit, default: 0])/\(metrics.cacheResults[.absentMiss, default: 0])/\(metrics.cacheResults[.unusableMiss, default: 0]) | \(metrics.rootCacheLoadAttemptCount)/\(metrics.rootCacheLoadEncodedByteCount) | \(metrics.rootCacheSaveSuccessCount)/\(metrics.rootCacheSaveFailureCount)/\(metrics.rootCacheSaveEncodedByteCount)/\(metrics.rootCacheSaveEntryCount) |"
-                    )
-                }
-            }
-
-            lines.append(contentsOf: [
-                "",
-                "| Phase | Sample | Cohort | Parse attempts/terminal | Parse wall/thread CPU ms | Generator wall/thread CPU ms | CPU unavailable parse/generator | Duplicate parses | Publications accepted/dropped | Cross-store avoided | Cross-worktree avoided | Same-blob opportunity | Git locator hits/blob bytes | Conservation | Validity |",
-                "| --- | ---: | --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | --- | --- |"
-            ])
-            for sample in [legacyCodemap.warmup] + legacyCodemap.measured {
-                for cohort in sample.cohorts {
-                    guard let metrics = cohort.metrics else {
-                        lines.append("| \(sample.phase) | \(sample.ordinal) | \(cohort.cohort.rawValue) | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | \(cohort.actualCrossStoreParseAvoidanceCount) | \(cohort.actualCrossWorktreeParseAvoidanceCount) | \(cohort.sameBlobAssociationOpportunityCount) | \(cohort.actualGitLocatorHitCount)/\(cohort.gitBlobByteCount) | FAIL | INVALID |")
-                        continue
-                    }
-                    let parseCPU = metrics.parseThreadCPUNanoseconds.map(formatNanoseconds) ?? "unavailable"
-                    let generatorCPU = metrics.generatorThreadCPUNanoseconds.map(formatNanoseconds) ?? "unavailable"
-                    lines.append(
-                        "| \(sample.phase) | \(sample.ordinal) | \(cohort.cohort.rawValue) | \(metrics.parseAttemptCount)/\(metrics.parseTerminalCount) | \(formatNanoseconds(metrics.parseWallNanoseconds))/\(parseCPU) | \(formatNanoseconds(metrics.generatorWallNanoseconds))/\(generatorCPU) | \(metrics.parseThreadCPUUnavailableCount)/\(metrics.generatorThreadCPUUnavailableCount) | \(metrics.duplicateParseCount) | \(metrics.acceptedReadyPublicationCount)/\(metrics.droppedPublicationCount) | \(cohort.actualCrossStoreParseAvoidanceCount) | \(cohort.actualCrossWorktreeParseAvoidanceCount) | \(cohort.sameBlobAssociationOpportunityCount) | \(cohort.actualGitLocatorHitCount)/\(cohort.gitBlobByteCount) | \(cohort.conservation.isValid ? "pass" : "FAIL") | \(cohort.isValid ? "valid" : "INVALID") |"
-                    )
-                }
-            }
-
-            lines.append(contentsOf: [
-                "",
-                "| Cohort measured totals | Requested | Opens | Actual read bytes | Memory hits | Disk hits | Misses | Parses | Duplicate parses | Publications accepted/dropped | Cross-store/worktree avoided | Same-blob opportunity | Git locator hits/blob bytes |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- |"
-            ])
-            let grouped = Dictionary(grouping: legacyCodemap.measured.flatMap(\.cohorts), by: { $0.cohort.rawValue })
-            for key in grouped.keys.sorted() {
-                let samples = grouped[key] ?? []
-                let metrics = samples.compactMap(\.metrics)
-                lines.append(
-                    "| \(key) | \(metrics.reduce(0) { $0 + $1.requestedFileCount }) | \(metrics.reduce(0) { $0 + $1.successfulOpenCount }) | \(metrics.reduce(UInt64(0)) { $0 + $1.actualReadByteCount }) | \(metrics.reduce(0) { $0 + $1.cacheResults[.memoryHit, default: 0] }) | \(metrics.reduce(0) { $0 + $1.cacheResults[.diskHit, default: 0] }) | \(metrics.reduce(0) { $0 + $1.cacheMissCount }) | \(metrics.reduce(0) { $0 + $1.parseAttemptCount }) | \(metrics.reduce(0) { $0 + $1.duplicateParseCount }) | \(metrics.reduce(0) { $0 + $1.acceptedReadyPublicationCount })/\(metrics.reduce(0) { $0 + $1.droppedPublicationCount }) | \(samples.reduce(0) { $0 + $1.actualCrossStoreParseAvoidanceCount })/\(samples.reduce(0) { $0 + $1.actualCrossWorktreeParseAvoidanceCount }) | \(samples.reduce(0) { $0 + $1.sameBlobAssociationOpportunityCount }) | \(samples.reduce(0) { $0 + $1.actualGitLocatorHitCount })/\(samples.reduce(UInt64(0)) { $0 + $1.gitBlobByteCount }) |"
-                )
-            }
-
-            lines.append(contentsOf: [
-                "",
-                "## Eager legacy background convergence",
-                "",
-                "These are deterministic eager legacy milestones, not the future idle 1/5/30/60-second curve.",
-                "",
-                "| Phase | Sample | Supported | First ms | 25% ms | 50% ms | 75% ms | 100% ms | Quiescent ms | Source opens/read bytes | Cache misses | Parses | Publications accepted/dropped | Conservation | Validity |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- |"
-            ])
-            for sample in [legacyCodemap.convergenceWarmup] + legacyCodemap.convergenceMeasured {
-                let milestone = { (value: Double?) in value.map(formatMS) ?? "unreached" }
-                if let metrics = sample.metrics {
-                    lines.append(
-                        "| \(sample.phase) | \(sample.ordinal) | \(sample.supportedFileCount) | \(milestone(sample.firstReadyMilliseconds)) | \(milestone(sample.quarterReadyMilliseconds)) | \(milestone(sample.halfReadyMilliseconds)) | \(milestone(sample.threeQuarterReadyMilliseconds)) | \(milestone(sample.allReadyMilliseconds)) | \(milestone(sample.quiescentMilliseconds)) | \(metrics.successfulOpenCount)/\(metrics.actualReadByteCount) | \(metrics.cacheMissCount) | \(metrics.parseAttemptCount) | \(metrics.acceptedReadyPublicationCount)/\(metrics.droppedPublicationCount) | \(sample.conservation.isValid ? "pass" : "FAIL") | \(sample.isValid ? "valid" : "INVALID") |"
-                    )
-                } else {
-                    lines.append(
-                        "| \(sample.phase) | \(sample.ordinal) | \(sample.supportedFileCount) | \(milestone(sample.firstReadyMilliseconds)) | \(milestone(sample.quarterReadyMilliseconds)) | \(milestone(sample.halfReadyMilliseconds)) | \(milestone(sample.threeQuarterReadyMilliseconds)) | \(milestone(sample.allReadyMilliseconds)) | \(milestone(sample.quiescentMilliseconds)) | unavailable | unavailable | unavailable | unavailable | FAIL | INVALID |"
-                    )
-                }
-            }
-            lines.append(contentsOf: [
-                "",
-                "| Convergence milestone | Retained N | Raw measured ms | Mean | Median | Nearest-rank p95 | Sample variance | Sample stddev | CV |",
-                "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
-            ])
-            for key in legacyCodemap.convergenceStatistics.keys.sorted() {
-                guard let statistics = legacyCodemap.convergenceStatistics[key] else { continue }
-                lines.append(
-                    "| \(key) | \(statistics.rawValues.count) | \(formatValues(statistics.rawValues)) | \(formatMS(statistics.mean)) | \(formatMS(statistics.median)) | \(formatMS(statistics.nearestRankP95)) | \(String(format: "%.6f", statistics.sampleVariance)) | \(formatMS(statistics.sampleStandardDeviation)) | \(statistics.coefficientOfVariation.map(formatPercent) ?? "unavailable") |"
-                )
-            }
-
-            if !validityIssues.isEmpty {
-                lines.append(contentsOf: ["", "### Invalid-run issues"])
-                lines.append(contentsOf: validityIssues.map { "- `\($0.code)`: \($0.detail)" })
-            }
-            return lines
-        }
-
         private func phase2ModelMarkdown() -> [String] {
             var lines = [
                 "",
@@ -1733,15 +1308,15 @@
                 "",
                 "Validated raw reads use detached/asynchronous filesystem work, so thread CPU is intentionally unavailable for that span. CPU values are best-effort current-thread measurements for synchronous hash/decode, parse, and terminal spans; scheduler/process CPU is not captured.",
                 "",
-                "| Phase | Sample | Raw read ms | Envelope ms | Explicit parse ms | Modern terminal ms | Modern total ms | Legacy parse ms | Legacy terminal ms | Legacy total ms | Terminal delta/ratio | Total delta/ratio | Serialized bytes | Correctness | Validity |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | --- |"
+                "| Phase | Sample | Raw read ms | Envelope ms | Explicit parse ms | Path-free artifact ms | Envelope-to-ready ms | Serialized bytes | Correctness | Validity |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
             ])
             for sample in [phase2Model.warmup] + phase2Model.measured {
                 func value(_ metric: WorkspaceCodeMapPhase2BenchmarkMetric) -> String {
                     sample.wallValues[metric].map { formatPhase2Value($0, unit: metric.unit) } ?? "unavailable"
                 }
                 lines.append(
-                    "| \(sample.phase) | \(sample.ordinal) | \(value(.validatedRawRead)) | \(value(.envelopeHashAndDecode)) | \(value(.explicitLanguageQueryParse)) | \(value(.pathFreeArtifactGeneration)) | \(value(.modernEnvelopeToReadyArtifact)) | \(value(.legacyExtensionQueryParse)) | \(value(.legacyFileAPIGeneration)) | \(value(.legacyParseAndFileAPITotal)) | \(value(.modernTerminalDelta))/\(value(.modernTerminalRatio)) | \(value(.modernTotalDelta))/\(value(.modernTotalRatio)) | \(sample.serializedArtifactBytes.map(String.init) ?? "unavailable") | \(sample.correctnessPassed ? "pass" : "FAIL") | \(sample.isValid ? "valid" : "INVALID") |"
+                    "| \(sample.phase) | \(sample.ordinal) | \(value(.validatedRawRead)) | \(value(.envelopeHashAndDecode)) | \(value(.explicitLanguageQueryParse)) | \(value(.pathFreeArtifactGeneration)) | \(value(.modernEnvelopeToReadyArtifact)) | \(sample.serializedArtifactBytes.map(String.init) ?? "unavailable") | \(sample.correctnessPassed ? "pass" : "FAIL") | \(sample.isValid ? "valid" : "INVALID") |"
                 )
             }
 
@@ -1750,7 +1325,7 @@
                 "",
                 "Serialized artifact size is diagnostic only: attempted \(size.attemptedSampleCount), retained \(size.retainedSampleCount), excluded \(size.excludedSampleCount), raw bytes \(size.distribution.map { formatPhase2Values($0.rawValues, unit: "bytes") } ?? "unavailable"), median \(size.distribution.map { formatPhase2Value($0.median, unit: "bytes") } ?? "unavailable"), nearest-rank p95 \(size.distribution.map { formatPhase2Value($0.nearestRankP95, unit: "bytes") } ?? "unavailable"), CV \(size.coefficientOfVariation.map(formatPercent) ?? "unavailable"), reliability \(size.reliability).",
                 "",
-                "Correctness/parity checks are outside timed spans and cover exact raw bytes/count, stable digest, ready artifact and expected symbol, path/identity-free serialization, modern/legacy rendered parity, and binding acceptance/duplicate/stale fencing.",
+                "Correctness checks are outside timed spans and cover exact raw bytes/count, stable digest, ready artifact and expected symbol, path/identity-free serialization, round-trip rendering parity, and binding acceptance/duplicate/stale fencing.",
                 "",
                 "Limitations: single DEBUG SwiftPM process and synthetic Swift fixture; this aggregate is diagnostics rather than a pass/fail latency threshold; measurements do not include CAS, Git identity, persistence, coordinator, publication, production serving, or idle scheduling; sub-millisecond spans are sensitive to host noise; raw-read thread CPU is unavailable and synchronous thread CPU excludes detached/scheduler work."
             ])

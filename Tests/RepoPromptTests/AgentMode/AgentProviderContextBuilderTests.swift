@@ -63,17 +63,10 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         XCTAssertFalse(missingSnapshotBlock.contains("let branchOnly = true"), missingSnapshotBlock)
         XCTAssertFalse(missingSnapshotBlock.contains("<file_map>"), missingSnapshotBlock)
 
-        await fixture.store.applyObservedCodemapResults([
-            WorkspaceObservedCodemapResult(
-                fullPath: worktreeCodemapURL.path,
-                modificationDate: Date(),
-                fileAPI: makeFileAPI(path: worktreeCodemapURL.path, symbolName: "branchOnlyCodemapSymbol")
-            )
-        ])
         let presentation = try await makePresentation(
             store: fixture.store,
             fileURL: worktreeCodemapURL,
-            api: makeFileAPI(path: worktreeCodemapURL.path, symbolName: "branchOnlyCodemapSymbol")
+            artifact: makeSyntaxArtifact(path: worktreeCodemapURL.path, symbolName: "branchOnlyCodemapSymbol")
         )
 
         let block = await AgentProviderContextBuilder.forkFileContentsBlock(
@@ -102,27 +95,20 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         let lookupContext = await makeLookupContext(fixture: fixture)
         let logicalURL = fixture.logicalRoot.appendingPathComponent("Sources/BranchOnly.swift")
         let worktreeURL = fixture.worktreeRoot.appendingPathComponent("Sources/BranchOnly.swift")
-        let api = makeFileAPI(
+        let artifact = makeSyntaxArtifact(
             path: worktreeURL.path,
             symbolName: "forkCapCodemapSentinel",
             imports: ["Foundation", "Combine"]
         )
-        await fixture.store.applyObservedCodemapResults([
-            WorkspaceObservedCodemapResult(
-                fullPath: worktreeURL.path,
-                modificationDate: Date(),
-                fileAPI: api
-            )
-        ])
         let selection = StoredSelection(
             codemapAutoEnabled: true
         )
-        let rendered = api.getFullAPIDescription(displayPath: "Sources/BranchOnly.swift")
+        let rendered = artifact.renderedCodeMap(displayPath: "Sources/BranchOnly.swift")
         let renderedTokens = TokenCalculationService.estimateTokens(for: rendered)
         let presentation = try await makePresentation(
             store: fixture.store,
             fileURL: worktreeURL,
-            api: api
+            artifact: artifact
         )
 
         let atCap = await AgentProviderContextBuilder.forkFileContentsBlock(
@@ -136,13 +122,6 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         XCTAssertTrue(atCap.contains("  - Foundation"), atCap)
         XCTAssertFalse(atCap.contains(fixture.worktreeRoot.path), atCap)
 
-        await fixture.store.applyObservedCodemapResults([
-            WorkspaceObservedCodemapResult(
-                fullPath: worktreeURL.path,
-                modificationDate: Date(),
-                fileAPI: nil
-            )
-        ])
         let summaryCalls = AgentProviderLockedCounter()
         let overCap = await AgentProviderContextBuilder.forkFileContentsBlock(
             selection: selection,
@@ -227,11 +206,11 @@ final class AgentProviderContextBuilderTests: XCTestCase {
     private func makePresentation(
         store: WorkspaceFileContextStore,
         fileURL: URL,
-        api: FileAPI
+        artifact: CodeMapSyntaxArtifact
     ) async throws -> WorkspaceCodemapOperationPresentation {
         let lookup = await store.lookupPath(fileURL.path, rootScope: .allLoaded)
         let file = try XCTUnwrap(lookup?.file)
-        let rendered = api.getFullAPIDescription(displayPath: file.standardizedRelativePath)
+        let rendered = artifact.renderedCodeMap(displayPath: file.standardizedRelativePath)
         let pipeline = try SyntaxManager().pipelineIdentity(
             for: .swift,
             decoderPolicy: .workspaceAutomaticV1
@@ -381,13 +360,12 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         try content.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func makeFileAPI(
+    private func makeSyntaxArtifact(
         path: String,
         symbolName: String,
         imports: [String] = []
-    ) -> FileAPI {
-        FileAPI(
-            filePath: path,
+    ) -> CodeMapSyntaxArtifact {
+        CodeMapSyntaxArtifact(
             imports: imports,
             classes: [],
             functions: [

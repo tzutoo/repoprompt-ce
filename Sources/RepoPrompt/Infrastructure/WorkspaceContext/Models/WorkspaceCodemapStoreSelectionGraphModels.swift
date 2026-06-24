@@ -40,6 +40,10 @@ struct WorkspaceCodemapStoreSelectionGraphQuery: Hashable {
     let selectedSources: [WorkspaceCodemapStoreSelectionGraphSourceIdentity]
 }
 
+struct WorkspaceCodemapSelectionGraphReadinessEvent: Hashable {
+    let rootEpoch: WorkspaceCodemapRootEpoch
+}
+
 struct WorkspaceCodemapStoreSelectionGraphQueryBudgetPolicy: Hashable {
     static let initial = Self(
         maximumTargetCount: 100_000,

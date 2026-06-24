@@ -725,6 +725,7 @@ extension MCPServerViewModel {
                     if wasManual && incomingSelection.codemapAutoEnabled == true {
                         incomingSelection = StoredSelection(
                             selectedPaths: incomingSelection.selectedPaths,
+                            manualCodemapPaths: bound.selection.manualCodemapPaths,
                             slices: incomingSelection.slices,
                             codemapAutoEnabled: false
                         )
@@ -1858,6 +1859,9 @@ extension MCPServerViewModel {
         let logicalExpectedBaseSelection = lookupContext.logicalizeSelection(expectedBaseSelection)
         let expectedBaseForPreservation = StoredSelection(
             selectedPaths: StoredSelectionPathNormalization.standardizedPaths(logicalExpectedBaseSelection.selectedPaths),
+            manualCodemapPaths: StoredSelectionPathNormalization.standardizedPaths(
+                logicalExpectedBaseSelection.manualCodemapPaths
+            ),
             slices: StoredSelectionPathNormalization.standardizedSlices(logicalExpectedBaseSelection.slices).mapValues {
                 SliceRangeMath.normalize($0)
             },
@@ -1865,6 +1869,9 @@ extension MCPServerViewModel {
         )
         let persistedSelection = StoredSelection(
             selectedPaths: StoredSelectionPathNormalization.standardizedPaths(logicalSelection.selectedPaths),
+            manualCodemapPaths: StoredSelectionPathNormalization.standardizedPaths(
+                logicalSelection.manualCodemapPaths
+            ),
             slices: StoredSelectionPathNormalization.standardizedSlices(logicalSelection.slices).mapValues {
                 SliceRangeMath.normalize($0)
             },

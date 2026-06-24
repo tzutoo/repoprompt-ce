@@ -95,36 +95,10 @@ final class FileSystemContentLoadingConcurrencyTests: XCTestCase {
         try data.write(to: root.appendingPathComponent(relativePath))
         let expectedFingerprint = try await service.contentFingerprint(ofRelativePath: relativePath)
 
-        #if DEBUG
-            let collector = LegacyCodeMapTelemetryCollector()
-            let context = LegacyCodeMapTelemetryContext(
-                collector: collector,
-                sampleID: UUID(),
-                cohort: .canonicalExplicitMiss,
-                storeID: UUID(),
-                rootRole: .canonical
-            )
-            let operation = context.operation(fileID: UUID())
-            let snapshot = try await LegacyCodeMapTelemetryContext.$currentOperation.withValue(operation) {
-                try await service.loadValidatedRawContent(
-                    ofRelativePath: relativePath,
-                    expectedFingerprint: expectedFingerprint
-                )
-            }
-            let metrics = try XCTUnwrap(
-                collector.snapshot().metrics(for: .canonicalExplicitMiss)
-            )
-            XCTAssertEqual(metrics.sourceRequestCount, 1)
-            XCTAssertEqual(metrics.successfulOpenCount, 1)
-            XCTAssertEqual(metrics.actualReadByteCount, UInt64(data.count))
-            XCTAssertEqual(metrics.decodedFileCount, 0)
-            XCTAssertEqual(metrics.sourceTerminalOutcomes[.loaded], 1)
-        #else
-            let snapshot = try await service.loadValidatedRawContent(
-                ofRelativePath: relativePath,
-                expectedFingerprint: expectedFingerprint
-            )
-        #endif
+        let snapshot = try await service.loadValidatedRawContent(
+            ofRelativePath: relativePath,
+            expectedFingerprint: expectedFingerprint
+        )
 
         XCTAssertEqual(snapshot.data, data)
         XCTAssertEqual(snapshot.fingerprint, expectedFingerprint)
@@ -360,114 +334,6 @@ final class FileSystemContentLoadingConcurrencyTests: XCTestCase {
     }
 
     #if DEBUG
-        func testLegacyCodemapTelemetryAttributesActualReadsDecodeAndCancellationTerminals() async throws {
-            let root = try temporaryRoots.makeRoot(suiteName: "LegacyCodemapContentTelemetry")
-            let service = try await makeService(root: root)
-            let relativePath = "Telemetry.source"
-            let bytes = Data(repeating: 0x61, count: 12000)
-            try bytes.write(to: root.appendingPathComponent(relativePath))
-            let sampleID = UUID()
-
-            let loadedCollector = LegacyCodeMapTelemetryCollector()
-            let loadedContext = LegacyCodeMapTelemetryContext(
-                collector: loadedCollector,
-                sampleID: sampleID,
-                cohort: .canonicalExplicitMiss,
-                storeID: UUID(),
-                rootRole: .canonical
-            )
-            let loadedOperation = loadedContext.operation(fileID: UUID())
-            let content = try await LegacyCodeMapTelemetryContext.$currentOperation.withValue(
-                loadedOperation
-            ) {
-                try await service.loadContent(
-                    ofRelativePath: relativePath,
-                    workloadClass: .codemap
-                )
-            }
-            XCTAssertEqual(content?.utf8.count, bytes.count)
-            let loaded = try XCTUnwrap(
-                loadedCollector.snapshot().metrics(for: .canonicalExplicitMiss)
-            )
-            XCTAssertEqual(loaded.sourceRequestCount, 1)
-            XCTAssertEqual(loaded.sourceTerminalOutcomes[.loaded], 1)
-            XCTAssertEqual(loaded.successfulOpenCount, 1)
-            XCTAssertEqual(loaded.nominalOpenedByteCount, UInt64(bytes.count))
-            XCTAssertEqual(loaded.actualReadByteCount, UInt64(bytes.count + 8192))
-            XCTAssertEqual(loaded.decodedFileCount, 1)
-            XCTAssertEqual(loaded.decodedUTF8ByteCount, UInt64(bytes.count))
-
-            let cancellationRelativePath = "Cancellation.source"
-            try bytes.write(to: root.appendingPathComponent(cancellationRelativePath))
-            let cancellationGate = AsyncGate()
-            await service.setContentReadChunkHandlerForTesting { path in
-                guard path == cancellationRelativePath else { return }
-                await cancellationGate.markStartedAndWaitForRelease()
-            }
-            let cancelledCollector = LegacyCodeMapTelemetryCollector()
-            let cancelledContext = LegacyCodeMapTelemetryContext(
-                collector: cancelledCollector,
-                sampleID: sampleID,
-                cohort: .setup,
-                storeID: UUID(),
-                rootRole: .canonical
-            )
-            let cancelledOperation = cancelledContext.operation(fileID: UUID())
-            let cancelledTask = LegacyCodeMapTelemetryContext.$currentOperation.withValue(
-                cancelledOperation
-            ) {
-                Task {
-                    try await service.loadContent(
-                        ofRelativePath: cancellationRelativePath,
-                        workloadClass: .codemap
-                    )
-                }
-            }
-            await cancellationGate.waitUntilStarted()
-            cancelledTask.cancel()
-            await cancellationGate.release()
-            do {
-                _ = try await cancelledTask.value
-                XCTFail("Expected cancellation")
-            } catch is CancellationError {
-                // Expected.
-            }
-            await service.setContentReadChunkHandlerForTesting(nil)
-
-            let cancelled = try XCTUnwrap(
-                cancelledCollector.snapshot().metrics(for: .setup)
-            )
-            XCTAssertEqual(cancelled.sourceRequestCount, 1)
-            XCTAssertEqual(cancelled.sourceTerminalOutcomes[.cancelled], 1)
-            XCTAssertEqual(cancelled.successfulOpenCount, 1)
-            XCTAssertEqual(cancelled.actualReadByteCount, 0)
-            XCTAssertTrue(cancelledCollector.snapshot().conservation().isValid)
-
-            let invalidCollector = LegacyCodeMapTelemetryCollector()
-            let invalidContext = LegacyCodeMapTelemetryContext(
-                collector: invalidCollector,
-                sampleID: sampleID,
-                cohort: .untracked,
-                storeID: UUID(),
-                rootRole: .canonical
-            )
-            let invalidOperation = invalidContext.operation(fileID: UUID())
-            let fingerprint = CodeMapContentFingerprint(content: "struct Invalid {}")
-            invalidOperation.recordRequested(supported: true)
-            invalidOperation.recordHash(kind: .lookup, fingerprint: fingerprint)
-            invalidOperation.recordCacheResult(.absentMiss)
-            invalidOperation.recordParseAttempt(fingerprint: fingerprint)
-            invalidOperation.recordParseTerminal(.completed)
-            invalidOperation.recordPublication(accepted: true)
-            let invalidConservation = invalidCollector.snapshot().conservation(
-                requireReadyPublications: true,
-                expectedFreshMisses: 2
-            )
-            XCTAssertFalse(invalidConservation.isValid)
-            XCTAssertTrue(invalidConservation.issues.contains {
-                $0.contains("fresh miss count does not match expectation")
-            })
-        }
     #endif
 
     func testSlowSameRootContentReadDoesNotDelayAcceptedWatcherFlush() async throws {

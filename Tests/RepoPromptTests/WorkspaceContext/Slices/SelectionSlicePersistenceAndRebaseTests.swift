@@ -534,7 +534,6 @@ final class SelectionSlicePersistenceAndRebaseTests: XCTestCase {
             let attachedPublisherIngress = try await store.attachPublisherIngressWithoutStartingWatcherForTesting(rootID: root.id)
             XCTAssertTrue(attachedPublisherIngress)
             let manager = WorkspaceFilesViewModel(workspaceFileContextStore: store)
-            await manager.setCodeScanEnabled(false)
             _ = try manager.attachRootShell(for: root, workspaceID: UUID())
             manager.setActiveTabID(UUID())
             addTeardownBlock {
@@ -804,7 +803,6 @@ final class SelectionSlicePersistenceAndRebaseTests: XCTestCase {
                 .attachPublisherIngressWithoutStartingWatcherForTesting(rootID: rootID)
             XCTAssertTrue(attachedPublisherIngress)
             let manager = WorkspaceFilesViewModel(workspaceFileContextStore: store)
-            await manager.setCodeScanEnabled(false)
             _ = try manager.attachRootShell(for: root, workspaceID: UUID())
             manager.setActiveTabID(UUID())
             addTeardownBlock {

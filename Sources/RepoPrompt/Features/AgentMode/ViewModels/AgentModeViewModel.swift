@@ -5612,17 +5612,11 @@ final class AgentModeViewModel: ObservableObject {
                 }
             }
 
-            let projection: WorkspaceRootBindingProjection?
             if let materializer, let preparation {
-                projection = try await materializer.commit(preparation)
+                _ = try await materializer.commit(preparation)
                 ownershipCommitted = true
-            } else {
-                projection = nil
             }
             _ = commitWorktreeBindings(desiredBindings, to: session)
-            if let materializer {
-                await materializer.initializeCodemaps(for: projection)
-            }
             return session.worktreeBindings
         } catch {
             if !ownershipCommitted, let materializer, let preparation {
@@ -13064,11 +13058,15 @@ final class AgentModeViewModel: ObservableObject {
 
         let normalizedSelection = StoredSelection(
             selectedPaths: existingPaths,
+            manualCodemapPaths: logicalSelection.manualCodemapPaths,
             slices: existingSlices,
             codemapAutoEnabled: selection.codemapAutoEnabled
         )
         let updatedSelection = StoredSelection(
             selectedPaths: mergedPaths,
+            manualCodemapPaths: logicalSelection.manualCodemapPaths.filter {
+                !promotedKeys.contains(physicalizedSelectionKey($0, lookupContext: lookupContext))
+            },
             slices: filteredSlices,
             codemapAutoEnabled: selection.codemapAutoEnabled
         )

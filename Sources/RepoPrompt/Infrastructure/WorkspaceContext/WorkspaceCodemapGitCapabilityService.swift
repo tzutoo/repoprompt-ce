@@ -276,6 +276,42 @@ actor WorkspaceCodemapGitCapabilityService {
         self.historicalRecordLimit = historicalRecordLimit
     }
 
+    nonisolated static func eligibilityPreflight(
+        gitService: GitService,
+        loadedRootURL: URL
+    ) async -> WorkspaceCodemapGitEligibilityPreflightResult {
+        let loadedRoot = loadedRootURL.standardizedFileURL
+        guard loadedRoot.isFileURL, loadedRoot.path.hasPrefix("/") else {
+            return .terminalUnavailable(.invalidLoadedRootContainment)
+        }
+        switch directoryState(at: loadedRoot) {
+        case .valid:
+            break
+        case .missing:
+            return .transientUnavailable(.repositoryChanging)
+        case .permissionDenied:
+            return .transientUnavailable(.permissionFailure)
+        case .invalid:
+            return .terminalUnavailable(.invalidLoadedRootContainment)
+        }
+
+        do {
+            if try await gitService.findGitRoot(from: loadedRoot) != nil {
+                return .eligible
+            }
+            return switch try await gitService.gitRepositoryKind(at: loadedRoot) {
+            case .nonGit:
+                .terminalUnavailable(.nonGit)
+            case .bare:
+                .terminalUnavailable(.bareRepository)
+            case .worktree:
+                .terminalUnavailable(.invalidLayout)
+            }
+        } catch {
+            return .transientUnavailable(transientReason(for: error))
+        }
+    }
+
     func state(for rootEpoch: WorkspaceCodemapRootEpoch) -> WorkspaceCodemapGitCapabilityState {
         if let state = records[rootEpoch]?.state { return state }
         if historicalRecords[rootEpoch] != nil { return .terminalUnavailable(.releasedRootEpoch) }

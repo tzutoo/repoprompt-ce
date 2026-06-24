@@ -291,47 +291,6 @@ struct CodeMapGenerator {
         let interfacesByLine: [Int: InterfaceInfo]
     }
 
-    /// Generates a `FileAPI` from Tree-sitter captures.
-    ///
-    /// • Deduplicates import/export lines.
-    /// • Supports new buckets: `exports`, `interfaces`, `aliases`, `literalUnions`.
-    /// • Detects trivial literal-union type-aliases.
-    /// • Keeps previous heavyweight/lightweight extraction logic for other languages.
-    static func generateCodeMap(
-        from namedRanges: [NamedRange],
-        content: String,
-        fullPath: String,
-        perfOptions: CodeMapPerfOptions = .disabled,
-        perfStats: CodeMapPerfStats? = nil
-    ) -> FileAPI? {
-        let normalizedURL = URL(fileURLWithPath: fullPath.trimmingCharacters(in: .whitespacesAndNewlines))
-            .standardizedFileURL
-        let fileExt = normalizedURL.pathExtension.lowercased()
-        guard let supportedLanguage = supportedLang(for: fileExt) else {
-            if debugLogging {
-                print("🔍 [CodeMapGenerator] Unsupported file extension: '\(fileExt)' for file: \(fullPath)")
-            }
-            return nil
-        }
-
-        let output = extractCodeMap(
-            from: namedRanges,
-            content: content,
-            language: supportedLanguage,
-            terminator: declarationTerminator(for: supportedLanguage),
-            perfOptions: perfOptions,
-            perfStats: perfStats
-        )
-        return makeLegacyFileAPI(
-            from: output,
-            fullPath: fullPath,
-            normalizedURL: normalizedURL,
-            language: supportedLanguage,
-            perfOptions: perfOptions,
-            perfStats: perfStats
-        )
-    }
-
     static func generateSyntaxArtifact(
         from namedRanges: [NamedRange],
         content: String,
@@ -1981,84 +1940,6 @@ struct CodeMapGenerator {
             classesByLine: classesByLine,
             interfacesByLine: interfaceBoundaries
         )
-    }
-
-    private static func makeLegacyFileAPI(
-        from output: GenerationOutput,
-        fullPath: String,
-        normalizedURL: URL,
-        language: LanguageType,
-        perfOptions: CodeMapPerfOptions,
-        perfStats: CodeMapPerfStats?
-    ) -> FileAPI? {
-        var classesByLine = output.classesByLine
-        var globalFunctions = output.globalFunctions
-        var globalVariables = output.globalVariables
-        let mainClassName = normalizedURL.deletingPathExtension().lastPathComponent
-        let mainClassFound = classesByLine.values.contains { $0.name == mainClassName }
-        let skipSyntheticClass = shouldSkipSyntheticMainClass(for: language)
-
-        if !skipSyntheticClass {
-            if mainClassFound {
-                for key in classesByLine.keys where classesByLine[key]?.name == mainClassName {
-                    classesByLine[key]?.methods.append(contentsOf: globalFunctions)
-                    classesByLine[key]?.properties.append(contentsOf: globalVariables.map {
-                        PropertyInfo(name: $0.name, typeName: $0.typeName)
-                    })
-                }
-                globalFunctions.removeAll()
-                globalVariables.removeAll()
-            } else if !globalFunctions.isEmpty || !globalVariables.isEmpty {
-                classesByLine[-1] = ClassInfo(
-                    name: mainClassName,
-                    methods: globalFunctions,
-                    properties: globalVariables.map {
-                        PropertyInfo(name: $0.name, typeName: $0.typeName)
-                    }
-                )
-                globalFunctions.removeAll()
-                globalVariables.removeAll()
-            }
-        }
-
-        let classes = finalizedClasses(classesByLine)
-        let interfaces = finalizedInterfaces(output.interfacesByLine)
-        let functions = skipSyntheticClass || classes.isEmpty ? globalFunctions : []
-        let globalVars = skipSyntheticClass || classes.isEmpty ? globalVariables : []
-        guard hasMeaningfulContent(
-            output: output,
-            classes: classes,
-            interfaces: interfaces,
-            functions: functions,
-            globalVars: globalVars
-        ) else {
-            return nil
-        }
-
-        let activePerfOptions = CodeMapPerfRuntime.activeOptions(perfOptions)
-        let activePerfStats = CodeMapPerfRuntime.activeStats(perfStats)
-        let fileAPIToken = Signpost.begin("codemap.fileapi_init")
-        let fileAPIStart = activePerfOptions.enabled ? CFAbsoluteTimeGetCurrent() : 0
-        let api = FileAPI(
-            filePath: fullPath,
-            imports: output.imports,
-            exports: output.exports,
-            classes: classes,
-            interfaces: interfaces,
-            aliases: output.aliases,
-            literalUnions: output.literalUnions,
-            functions: functions,
-            enums: output.enums,
-            globalVars: globalVars,
-            macros: output.macros,
-            referencedTypes: output.referencedTypes
-        )
-        if activePerfOptions.enabled {
-            activePerfStats?.fileAPIInitDuration += (CFAbsoluteTimeGetCurrent() - fileAPIStart)
-        }
-        Signpost.end("codemap.fileapi_init", fileAPIToken)
-        if debug { api.printAPI() }
-        return api
     }
 
     private static func makeSyntaxArtifact(from output: GenerationOutput) -> CodeMapSyntaxArtifact? {

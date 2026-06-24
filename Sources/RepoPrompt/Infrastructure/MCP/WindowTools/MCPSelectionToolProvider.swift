@@ -219,7 +219,7 @@ final class MCPSelectionToolProvider: MCPWindowToolProviding {
         switch op {
         case "get":
             let ctx = resolvedContext.snapshot
-            selectionLog("[Virtual] manage_selection op=get tab=\(ctx.tabID) selected=\(ctx.selection.selectedPaths.count) slices=\(ctx.selection.slices.count)")
+            selectionLog("[Virtual] manage_selection op=get tab=\(ctx.tabID) selected=\(ctx.selection.selectedPaths.count) manualCodemaps=\(ctx.selection.manualCodemapPaths.count) slices=\(ctx.selection.slices.count)")
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionConstruction, transition: .completed)
             try Task.checkCancellation()
             await MCPToolExecutionHandlerPhaseContext.report(.manageSelectionReplyConstruction)
@@ -554,7 +554,11 @@ final class MCPSelectionToolProvider: MCPWindowToolProviding {
             let baseContext = resolvedContext.snapshot
             selectionLog("[Virtual] manage_selection op=clear mode=\(mode) tab=\(baseContext.tabID)")
             let clearedSelection = mode == "codemap_only"
-                ? baseContext.selection
+                ? StoredSelection(
+                    selectedPaths: baseContext.selection.selectedPaths,
+                    slices: baseContext.selection.slices,
+                    codemapAutoEnabled: false
+                )
                 : StoredSelection()
             return try await persistAndReply(resolvedContext: &resolvedContext, metadata: metadata, lookupContext: lookupContext, baseContext: baseContext, selection: clearedSelection, includeBlocks: includeBlocks, display: display, extraInvalid: extraInvalid, view: view)
         default:
@@ -669,6 +673,6 @@ final class MCPSelectionToolProvider: MCPWindowToolProviding {
     }
 
     private static func selectionSummary(_ selection: StoredSelection) -> String {
-        "selected=\(selection.selectedPaths.count), slices=\(selection.slices.count), auto=\(selection.codemapAutoEnabled)"
+        "selected=\(selection.selectedPaths.count), manualCodemaps=\(selection.manualCodemapPaths.count), slices=\(selection.slices.count), auto=\(selection.codemapAutoEnabled)"
     }
 }

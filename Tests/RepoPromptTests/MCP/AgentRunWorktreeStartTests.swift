@@ -1370,7 +1370,7 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
         XCTAssertEqual(viewModel.executionLocationProps(tabID: tabID)?.isEnabled, true)
     }
 
-    func testBindingTransitionMaterializesAndInitializesSessionWorktreeCodemap() async throws {
+    func testBindingTransitionMaterializesSessionWorktreeWithoutCodemapWork() async throws {
         let root = try makeTemporaryDirectory(named: "transition-root")
         let worktree = try makeTemporaryDirectory(named: "transition-worktree")
         let sourceFile = worktree.appendingPathComponent("Sources/Transition.swift")
@@ -1389,7 +1389,6 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
         session.hasLoadedPersistedState = true
         session.hasSentFirstMessage = true
         let binding = makeBinding(logicalRoot: root.path, worktreeRoot: worktree.path, worktreeID: "transition")
-
         _ = try await viewModel.transitionWorktreeBindings(
             [binding],
             forSessionID: sessionID,
@@ -1403,32 +1402,10 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
         )
         let projection = try XCTUnwrap(materializedProjection)
         let physicalRoot = try XCTUnwrap(projection.physicalRootRefs.first)
-        let redundantInitialization = await window.workspaceFileContextStore.initializeCodemapsForSessionWorktreeRoots(
-            rootIDs: [physicalRoot.id]
-        )
-        XCTAssertTrue(redundantInitialization.isEmpty)
-        let result = await window.workspaceFileContextStore.lookupPath(
-            sourceFile.path,
-            profile: .mcpRead,
-            rootScope: projection.lookupRootScope
-        )
-        let file = try XCTUnwrap(result?.file)
-        let repair = try await window.workspaceFileContextStore.repairMissingCodemapSnapshots(
-            for: [file],
-            timeout: .seconds(6)
-        )
-        let immediateSnapshot = repair.snapshotsByFileID[file.id]
-        let snapshot: WorkspaceCodemapSnapshot
-        if immediateSnapshot == nil {
-            XCTAssertEqual(repair.pendingFileIDs, [file.id])
-            snapshot = try await waitForCodemapSnapshot(
-                store: window.workspaceFileContextStore,
-                fileID: file.id
-            )
-        } else {
-            snapshot = try XCTUnwrap(immediateSnapshot)
-        }
-        XCTAssertTrue(snapshot.fileAPI?.apiDescription.contains("TransitionWorktreeType") == true)
+        await Task.yield()
+        let operations = await window.workspaceFileContextStore.codemapPresentationOperationCountsForTesting()
+        XCTAssertEqual(operations.artifactDemandRequests, 0)
+        XCTAssertEqual(operations.presentationFreezeRequests, 0)
 
         let activeDiagnostics = await window.workspaceFileContextStore.readSearchRootDiagnosticsSnapshot()
         let activeRoot = try XCTUnwrap(activeDiagnostics.first { $0.rootID == physicalRoot.id })
@@ -2712,23 +2689,6 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
 
     private func samePath(_ lhs: String, _ rhs: String) -> Bool {
         URL(fileURLWithPath: lhs).standardizedFileURL.path == URL(fileURLWithPath: rhs).standardizedFileURL.path
-    }
-
-    private func waitForCodemapSnapshot(
-        store: WorkspaceFileContextStore,
-        fileID: UUID,
-        timeout: Duration = .seconds(6)
-    ) async throws -> WorkspaceCodemapSnapshot {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if let snapshot = await store.codemapSnapshot(fileID: fileID) {
-                return snapshot
-            }
-            try await Task.sleep(for: .milliseconds(25))
-        }
-        XCTFail("Timed out waiting for codemap snapshot")
-        throw NSError(domain: "AgentRunWorktreeStartTests", code: 1)
     }
 
     private func makeWindow(root: URL) async throws -> WindowState {

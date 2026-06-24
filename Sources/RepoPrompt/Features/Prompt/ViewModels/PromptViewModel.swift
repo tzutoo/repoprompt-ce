@@ -707,10 +707,6 @@ class PromptViewModel: ObservableObject {
 
                 isDirty = true
             }
-
-            Task {
-                await refreshCodeScanEnabledForEffectiveState()
-            }
         }
     }
 
@@ -783,10 +779,6 @@ class PromptViewModel: ObservableObject {
             }
 
             isDirty = true
-
-            Task {
-                await refreshCodeScanEnabledForEffectiveState()
-            }
         }
     }
 
@@ -908,10 +900,6 @@ class PromptViewModel: ObservableObject {
         lastNonManualCopyPresetID = copySettings.lastNonManualCopyPresetID
         lastNonManualChatPresetID = chatSettings.lastNonManualChatPresetID
         lastNonManualChatPresetName = chatSettings.lastNonManualChatPresetName ?? ""
-
-        Task {
-            await refreshCodeScanEnabledForEffectiveState()
-        }
         gitViewModel.gitDiffInclusionMode = gitDiffInclusionModeForCopy
     }
 
@@ -2058,7 +2046,6 @@ class PromptViewModel: ObservableObject {
             await self.refreshAvailableModels()
         }
 
-        self.fileManager.initCodeScanState(shouldEnableCodeScanning())
         syncSettingsFromSettingsManager()
 
         // Initialize/migrate prompt-packaging settings without marking a new tab dirty on launch.
@@ -2126,6 +2113,16 @@ class PromptViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        fileManager.$manualCodemapFiles
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.workspaceManager?.markWorkspaceDirty()
+                self?.updateActiveTabDirtyState()
+                self?.bumpChatPromptEntriesAutoCodemapVersion()
+            }
+            .store(in: &cancellables)
+
         GlobalSettingsStore.shared.$codeMapsGloballyDisabled
             .dropFirst()
             .removeDuplicates()
@@ -2143,15 +2140,9 @@ class PromptViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // New subscription for code map updates
-        fileManager.codeMapUpdatePublisher
+        tokenCountingViewModel.tokenCalculationCompletedPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
-                self?.isDirty = true
-                // ⬇️ Heavy changes (code-map impacts baseline)
-                self?.tokenCountingViewModel.markDirty(.codeMap)
-                self?.workspaceManager?.markWorkspaceDirty()
-                self?.updateActiveTabDirtyState()
                 self?.bumpChatPromptEntriesCodemapAuthorityVersion()
             }
             .store(in: &cancellables)
@@ -3746,7 +3737,7 @@ class PromptViewModel: ObservableObject {
                 localFolder // legacy behaviour
             }
             groups[key, default: []].append(file)
-            let tokenCount = tokenInfoByID[file.id]?.count ?? (file.cachedTokenCount ?? 0)
+            let tokenCount = tokenInfoByID[file.id]?.count ?? 0
             folderTokenSums[key, default: 0] += tokenCount
         }
 
@@ -3844,15 +3835,15 @@ class PromptViewModel: ObservableObject {
             case .nameDescending:
                 return isNameDescending(lhs, rhs)
             case .tokenAscending:
-                let lhsTokens = tokenInfo[lhs.id]?.count ?? (lhs.cachedTokenCount ?? 0)
-                let rhsTokens = tokenInfo[rhs.id]?.count ?? (rhs.cachedTokenCount ?? 0)
+                let lhsTokens = tokenInfo[lhs.id]?.count ?? 0
+                let rhsTokens = tokenInfo[rhs.id]?.count ?? 0
                 if lhsTokens != rhsTokens {
                     return lhsTokens < rhsTokens
                 }
                 return isNameAscending(lhs, rhs)
             case .tokenDescending:
-                let lhsTokens = tokenInfo[lhs.id]?.count ?? (lhs.cachedTokenCount ?? 0)
-                let rhsTokens = tokenInfo[rhs.id]?.count ?? (rhs.cachedTokenCount ?? 0)
+                let lhsTokens = tokenInfo[lhs.id]?.count ?? 0
+                let rhsTokens = tokenInfo[rhs.id]?.count ?? 0
                 if lhsTokens != rhsTokens {
                     return lhsTokens > rhsTokens
                 }
@@ -4654,13 +4645,6 @@ class PromptViewModel: ObservableObject {
             }
         }
 
-        // Ensure codemap scanning runs when the newly selected preset requires it.
-        let preset = CopyPresetManager.shared.preset(with: id) ?? BuiltInCopyPresets.standard
-        let cfg = resolvePromptContext(preset, custom: workingCopyCustomizations)
-        if cfg.codeMapUsage != .none {
-            Task { await fileManager.setCodeScanEnabled(true) }
-        }
-
         // Only force-sync when switching to a non-manual preset
         if !willBeManual {
             syncPromptSelectionToPreset(for: .copy, force: true)
@@ -5242,45 +5226,11 @@ class PromptViewModel: ObservableObject {
 
     // MARK: - Code Map Methods
 
-    private var hasEffectiveCodeMapAccess: Bool {
-        true && !codeMapsGloballyDisabled
-    }
-
-    private func shouldEnableCodeScanning() -> Bool {
-        hasEffectiveCodeMapAccess && (codeMapUsage != .none || codeMapUsageForChat != .none)
-    }
-
-    @MainActor
-    private func refreshCodeScanEnabledForEffectiveState() async {
-        await fileManager.setCodeScanEnabled(shouldEnableCodeScanning())
-    }
-
-    @MainActor
-    func cancelCodeMapScans() async {
-        await fileManager.cancelCodeMapScans()
-    }
-
     private func handleCodeMapsGloballyDisabledChanged(_ disabled: Bool) {
         guard codeMapsGloballyDisabled != disabled else { return }
         codeMapsGloballyDisabled = disabled
         tokenCountingViewModel.markDirty(.codeMap.union(.fileTree))
         isDirty = true
-        Task {
-            await refreshCodeScanEnabledForEffectiveState()
-        }
-    }
-
-    func updateCodeMapEffectiveState() {
-        Task {
-            await refreshCodeScanEnabledForEffectiveState()
-        }
-    }
-
-    /// Resets the code map cache and triggers a rescan of all files
-    @MainActor
-    func resetCodeMapCache() async {
-        // Clear all code map caches and trigger rescan
-        await fileManager.clearCodeMapCaches()
     }
 
     func resetPlanningPromptToDefault() {
@@ -5930,11 +5880,6 @@ extension PromptViewModel {
                 markSettingsDirty()
             }
             return
-        }
-
-        let cfg: PromptContextResolved = resolvedPromptContext(from: preset) ?? resolvePromptContext()
-        if cfg.codeMapUsage != .none {
-            Task { await fileManager.setCodeScanEnabled(true) }
         }
 
         // Preset-specific configs are resolved on demand; avoid mutating manual defaults.

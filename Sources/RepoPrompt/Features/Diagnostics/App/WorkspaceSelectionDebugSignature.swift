@@ -12,6 +12,7 @@ import Foundation
         static func counts(for selection: StoredSelection, prefix: String = "selection") -> [String: String] {
             [
                 "\(prefix)SelectedPaths": "\(selection.selectedPaths.count)",
+                "\(prefix)ManualCodemapPaths": "\(selection.manualCodemapPaths.count)",
                 "\(prefix)SliceFiles": "\(selection.slices.count)",
                 "\(prefix)SliceRanges": "\(sliceRangeCount(in: selection))",
                 "\(prefix)CodemapAutoEnabled": "\(selection.codemapAutoEnabled)"
@@ -22,6 +23,7 @@ import Foundation
             [
                 "selectionSignature": signature(for: selection),
                 "selectedPaths": "\(selection.selectedPaths.count)",
+                "manualCodemapPaths": "\(selection.manualCodemapPaths.count)",
                 "sliceFiles": "\(selection.slices.count)",
                 "sliceRanges": "\(sliceRangeCount(in: selection))",
                 "codemapAutoEnabled": "\(selection.codemapAutoEnabled)"
@@ -37,15 +39,19 @@ import Foundation
 
         private static func canonicalLines(for selection: StoredSelection) -> [String] {
             var lines: [String] = [
-                "v1",
+                "v2",
                 "codemapAutoEnabled=\(selection.codemapAutoEnabled)",
                 "selectedPaths.count=\(selection.selectedPaths.count)",
+                "manualCodemapPaths.count=\(selection.manualCodemapPaths.count)",
                 "sliceFiles.count=\(selection.slices.count)",
                 "sliceRanges.count=\(sliceRangeCount(in: selection))"
             ]
 
             for path in selection.selectedPaths {
                 lines.append("selected=\(standardized(path))")
+            }
+            for path in selection.manualCodemapPaths {
+                lines.append("manualCodemap=\(standardized(path))")
             }
             let standardizedSlices = selection.slices.reduce(into: [String: [LineRange]]()) { partial, entry in
                 partial[standardized(entry.key), default: []].append(contentsOf: entry.value)

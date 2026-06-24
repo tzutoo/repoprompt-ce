@@ -43,7 +43,8 @@ enum ToolResultDTOs {
                         rootEpoch: WorkspaceCodemapRootEpoch(
                             rootID: boundRoot.logicalRoot.id,
                             rootLifetimeID: boundRoot.physicalRoot.id
-                        )
+                        ),
+                        preferredName: boundRoot.logicalRoot.name
                     )
                 }
             )

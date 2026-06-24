@@ -77,25 +77,7 @@ enum CodeMapFixtureRunner {
     }
 
     static func renderCodeMap(for fixture: CodeMapFixture, tempRoot: URL) throws -> String {
-        let virtualURL = tempRoot.appendingPathComponent(fixture.relativePath)
-        let captures = try SyntaxManager.shared.codeMap(
-            content: fixture.content,
-            fileExtension: fixture.fileExtension
-        )
-        guard !captures.isEmpty else {
-            throw CodeMapFixtureError.noCaptures(fixture.relativePath)
-        }
-        guard let fileAPI = CodeMapGenerator.generateCodeMap(
-            from: captures,
-            content: fixture.content,
-            fullPath: virtualURL.path
-        ) else {
-            throw CodeMapFixtureError.noFileAPI(fixture.relativePath)
-        }
-        return normalize(
-            fileAPI.getFullAPIDescription(displayPath: virtualURL.path),
-            tempRoot: tempRoot
-        )
+        try renderArtifactCodeMap(for: fixture, tempRoot: tempRoot)
     }
 
     static func renderArtifactCodeMap(for fixture: CodeMapFixture, tempRoot: URL) throws -> String {
@@ -233,8 +215,6 @@ enum CodeMapFixtureRunner {
 
 enum CodeMapFixtureError: Error, CustomStringConvertible {
     case missingResource(String)
-    case noCaptures(String)
-    case noFileAPI(String)
     case noArtifact(String)
     case unsupportedExtension(String)
 
@@ -242,10 +222,6 @@ enum CodeMapFixtureError: Error, CustomStringConvertible {
         switch self {
         case let .missingResource(path):
             "Missing Bundle.module resource: \(path)"
-        case let .noCaptures(path):
-            "No Tree-sitter captures for \(path)"
-        case let .noFileAPI(path):
-            "No FileAPI generated for \(path)"
         case let .noArtifact(path):
             "No CodeMapSyntaxArtifact generated for \(path)"
         case let .unsupportedExtension(fileExtension):

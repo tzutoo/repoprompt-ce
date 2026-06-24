@@ -19,6 +19,7 @@ class TokenCountingViewModel: ObservableObject {
     @Published private(set) var codeMapTokenCount: Int = 0
     @Published private(set) var fileTreeContent: String = ""
     @Published private(set) var codeMapContent: String = ""
+    @Published private(set) var codemapPresentation: WorkspaceCodemapUIPresentationSnapshot = .empty
     @Published private(set) var scannedLanguages: Set<LanguageType> = []
     @Published private(set) var copyContextTotalTokens: Int = 0
     @Published private(set) var copyContextTokenCountString: String = "0.00k"
@@ -183,8 +184,16 @@ class TokenCountingViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        fileManager.codeMapUpdatePublisher
-            .sink { [weak self] in
+        fileManager.$autoCodemapFiles
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.markDirty(.codeMap)
+            }
+            .store(in: &cancellables)
+
+        fileManager.$manualCodemapFiles
+            .dropFirst()
+            .sink { [weak self] _ in
                 self?.markDirty(.codeMap)
             }
             .store(in: &cancellables)
@@ -794,6 +803,7 @@ class TokenCountingViewModel: ObservableObject {
         folderTokenInfo = result.folderTokenInfo
         fileTreeContent = result.fileTreeContent
         codeMapContent = result.codeMapContent
+        codemapPresentation = WorkspaceCodemapUIPresentationSnapshot(accountingResult.codemapPresentation)
         lastFileTreeTokens = result.fileTreeTokenCountRaw
         charCount = result.charCount
         totalTokenCount = copyTotal
@@ -1046,6 +1056,7 @@ class TokenCountingViewModel: ObservableObject {
         // Immediately clear caches used by UI previews so we don't show stale data
         scannedLanguages = []
         codeMapContent = ""
+        codemapPresentation = .empty
         fileTreeContent = ""
         codeMapFileCount = 0
         codeMapTokenCount = 0

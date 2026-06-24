@@ -435,7 +435,9 @@ enum AgentContextExportResolver {
         lookupContext: WorkspaceLookupContext,
         store: WorkspaceFileContextStore
     ) async -> StoredSelection {
-        let originalKeys = Array(Set(selection.selectedPaths + selection.slices.keys))
+        let originalKeys = Array(Set(
+            selection.selectedPaths + selection.manualCodemapPaths + selection.slices.keys
+        ))
         let physicalKeysByOriginal = Dictionary(uniqueKeysWithValues: originalKeys.map {
             ($0, physicalizedKey($0, lookupContext: lookupContext))
         })
@@ -452,11 +454,13 @@ enum AgentContextExportResolver {
             return results[physical]?.file?.id == row.id.fileID
         })
         let selectedPaths = selection.selectedPaths.filter { !removedKeys.contains($0) }
+        let manualCodemapPaths = selection.manualCodemapPaths.filter { !removedKeys.contains($0) }
         let slices = selection.slices.filter { path, ranges in
             !ranges.isEmpty && !removedKeys.contains(path)
         }
         return StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: manualCodemapPaths,
             slices: slices,
             codemapAutoEnabled: row.removesAutomaticSourceIntent && removedKeys.isEmpty
                 ? false
@@ -466,13 +470,18 @@ enum AgentContextExportResolver {
 
     static func removeSelectionSnapshot(_ snapshot: StoredSelection, from selection: StoredSelection) -> StoredSelection {
         let selectedSnapshotKeys = Set(snapshot.selectedPaths.map(normalizedSelectionKey))
+        let manualSnapshotKeys = Set(snapshot.manualCodemapPaths.map(normalizedSelectionKey))
         let sliceSnapshotKeys = Set(snapshot.slices.keys.map(normalizedSelectionKey))
         let selectedPaths = selection.selectedPaths.filter { !selectedSnapshotKeys.contains(normalizedSelectionKey($0)) }
+        let manualCodemapPaths = selection.manualCodemapPaths.filter {
+            !manualSnapshotKeys.contains(normalizedSelectionKey($0))
+        }
         let slices = selection.slices.filter { path, ranges in
             !ranges.isEmpty && !sliceSnapshotKeys.contains(normalizedSelectionKey(path))
         }
         return StoredSelection(
             selectedPaths: selectedPaths,
+            manualCodemapPaths: manualCodemapPaths,
             slices: slices,
             codemapAutoEnabled: selection.codemapAutoEnabled
         )

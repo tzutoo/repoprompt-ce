@@ -158,8 +158,8 @@ final class PromptContextAccountingServiceTests: XCTestCase {
         _ = try await store.loadRoot(path: root.path)
         let fileLookup = await store.lookupPath(fileURL.path)
         let file = try XCTUnwrap(fileLookup?.file)
-        let api = makeFileAPI(path: fileURL.path)
-        let presentation = try makePresentation(entries: [(file, api.getFullAPIDescription(displayPath: "AccountingSelectedCodemap/A.swift"))])
+        let api = makeSyntaxArtifact(path: fileURL.path)
+        let presentation = try makePresentation(entries: [(file, api.renderedCodeMap(displayPath: "AccountingSelectedCodemap/A.swift"))])
         let service = PromptContextAccountingService()
         let selection = StoredSelection(
             selectedPaths: [fileURL.path],
@@ -196,13 +196,13 @@ final class PromptContextAccountingServiceTests: XCTestCase {
         _ = try await store.loadRoot(path: root.path)
         let targetLookup = await store.lookupPath(targetURL.path)
         let target = try XCTUnwrap(targetLookup?.file)
-        let targetAPI = makeFileAPI(
+        let targetAPI = makeSyntaxArtifact(
             path: targetURL.path,
             symbolName: "targetCodemapSymbol",
             className: "TargetType"
         )
         let targetPresentation = try makePresentation(entries: [
-            (target, targetAPI.getFullAPIDescription(displayPath: "AccountingCanonicalAutoCodemap/Target.swift"))
+            (target, targetAPI.renderedCodeMap(displayPath: "AccountingCanonicalAutoCodemap/Target.swift"))
         ])
         let service = PromptContextAccountingService()
         let slice = LineRange(start: 2, end: 2)
@@ -362,14 +362,14 @@ final class PromptContextAccountingServiceTests: XCTestCase {
 
         let store = WorkspaceFileContextStore()
         _ = try await store.loadRoot(path: root.path)
-        let api = makeFileAPI(
+        let api = makeSyntaxArtifact(
             path: fileURL.path,
             symbolName: "renderedTokenSentinel",
             imports: ["Foundation", "Combine"]
         )
         let fileLookup = await store.lookupPath(fileURL.path)
         let file = try XCTUnwrap(fileLookup?.file)
-        let rendered = api.getFullAPIDescription(displayPath: "AccountingRenderedCodemapTokens/Nested/Target.swift")
+        let rendered = api.renderedCodeMap(displayPath: "AccountingRenderedCodemapTokens/Nested/Target.swift")
         let presentation = try makePresentation(entries: [(file, rendered)])
 
         let result = await PromptContextAccountingService().calculatePromptStats(
@@ -403,8 +403,8 @@ final class PromptContextAccountingServiceTests: XCTestCase {
         _ = try await store.loadRoot(path: root.path)
         let fileLookup = await store.lookupPath(fileURL.path)
         let file = try XCTUnwrap(fileLookup?.file)
-        let rendered = makeFileAPI(path: fileURL.path, symbolName: "sharedArtifactSentinel")
-            .getFullAPIDescription(displayPath: "LogicalRoot/Target.swift")
+        let rendered = makeSyntaxArtifact(path: fileURL.path, symbolName: "sharedArtifactSentinel")
+            .renderedCodeMap(displayPath: "LogicalRoot/Target.swift")
         let presentation = try makePresentation(entries: [(file, rendered)])
 
         let result = await PromptContextAccountingService().calculatePromptStats(
@@ -468,8 +468,8 @@ final class PromptContextAccountingServiceTests: XCTestCase {
         let loadedRoot = try await store.loadRoot(path: root.path)
         let files = await store.files(inRoot: loadedRoot.id)
         let presentation = try makePresentation(entries: files.map { file in
-            let api = makeFileAPI(path: file.standardizedFullPath)
-            return (file, api.getFullAPIDescription(displayPath: "AccountingCompleteCodemapBatch/\(file.standardizedRelativePath)"))
+            let api = makeSyntaxArtifact(path: file.standardizedFullPath)
+            return (file, api.renderedCodeMap(displayPath: "AccountingCompleteCodemapBatch/\(file.standardizedRelativePath)"))
         })
 
         let resolution = await PromptContextAccountingService().resolveEntries(
@@ -498,15 +498,14 @@ final class PromptContextAccountingServiceTests: XCTestCase {
         try content.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func makeFileAPI(
+    private func makeSyntaxArtifact(
         path: String,
         symbolName: String = "codemapOnlySymbol",
         className: String? = nil,
         imports: [String] = [],
         referencedTypes: [String] = []
-    ) -> FileAPI {
-        FileAPI(
-            filePath: path,
+    ) -> CodeMapSyntaxArtifact {
+        CodeMapSyntaxArtifact(
             imports: imports,
             classes: className.map { [ClassInfo(name: $0, methods: [], properties: [])] } ?? [],
             functions: [
