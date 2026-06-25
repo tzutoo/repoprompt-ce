@@ -66,7 +66,7 @@ struct WorkspaceRootSeedShadowScope: Hashable {
 struct WorkspaceRootSeedShadowPreparation {
     let scope: WorkspaceRootSeedShadowScope
     let snapshot: WorkspaceRootReusableSnapshot
-    let plan: WorkspaceRootSeedPlan
+    let planHandle: WorkspaceRootTargetSeedPlanHandle
 }
 
 struct WorkspaceSessionWorktreeOwnershipPreparation {

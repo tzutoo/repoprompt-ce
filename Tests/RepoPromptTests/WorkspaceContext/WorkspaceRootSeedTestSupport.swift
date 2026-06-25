@@ -138,18 +138,4 @@ enum WorkspaceRootSeedTestSupport {
             conflictStage3OID: nil
         )
     }
-
-    static func fact(
-        _ path: String,
-        kind: WorkspaceRootSeedVerifiedPathKind = .regularFile(isExecutable: false),
-        ignored: Bool = false,
-        includedInOrdinaryCrawl: Bool? = nil
-    ) -> WorkspaceRootSeedVerificationFact {
-        WorkspaceRootSeedVerificationFact(
-            relativePath: path,
-            kind: kind,
-            isIgnored: ignored,
-            isIncludedInOrdinaryCrawl: includedInOrdinaryCrawl
-        )
-    }
 }

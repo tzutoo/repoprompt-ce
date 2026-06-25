@@ -406,9 +406,18 @@ final class FileSystemAcceptedIngressBarrierTests: XCTestCase {
         // while only the file event contributes a changed path.
         XCTAssertEqual(result.acceptedPayloadCount, Int(first.rawValue))
         XCTAssertGreaterThanOrEqual(result.acceptedEventCount, result.acceptedPayloadCount)
-        XCTAssertEqual(result.changedRelativePaths, ["Known.swift"])
-        XCTAssertEqual(result.relativeFilePaths, ["Known.swift"])
-        XCTAssertTrue(result.relativeFolderPaths.isEmpty)
+        let changedPathReader = try result.changedRelativePaths.makeReader()
+        XCTAssertEqual(try changedPathReader.next(), "Known.swift")
+        XCTAssertNil(try changedPathReader.next())
+        let inventoryReader = try result.inventorySnapshot.makeReader()
+        var inventory: [FileSystemSeededInventoryRecord] = []
+        while let record = try inventoryReader.next() {
+            inventory.append(record)
+        }
+        XCTAssertEqual(
+            inventory,
+            [FileSystemSeededInventoryRecord(relativePath: "Known.swift", isDirectory: false)]
+        )
         XCTAssertEqual(publications.snapshot().count, 1)
         let queued = await service.watcherIngressMailboxSnapshotForTesting()
         let queuedRange = try XCTUnwrap(queued.queuedAcceptedWatermarkRange)
@@ -497,6 +506,60 @@ final class FileSystemAcceptedIngressBarrierTests: XCTestCase {
         }
         XCTAssertTrue(publications.snapshot().isEmpty)
         withExtendedLifetime(cancellable) {}
+    }
+
+    func testSyntheticHundredThousandPathReplayUsesBoundedSpillWorkingSet() throws {
+        let inventory = FileSystemVisitedInventory()
+        let manifest = try FileSystemSeededInventoryManifest.makeForTesting(records: [])
+        inventory.installSeeded(manifest: manifest)
+
+        let recordCount = 100_000
+        let retainedGenerationCount = 40000
+        var retainedSnapshot: FileSystemSeededInventorySnapshot?
+        for index in 0 ..< recordCount {
+            inventory.applySeededChangeForTesting(
+                relativePath: String(format: "Replay/%06d.swift", index),
+                isDirectory: false
+            )
+            if index + 1 == retainedGenerationCount {
+                retainedSnapshot = try inventory.seededSnapshot()
+            }
+        }
+
+        let snapshot = try inventory.seededSnapshot()
+        let statistics = inventory.seededReplayStorageStatisticsForTesting
+        XCTAssertEqual(statistics.changedPathCount, recordCount)
+        XCTAssertLessThanOrEqual(
+            statistics.peakMutablePathBytes,
+            FileSystemSeededInventoryChangeOverlay.maximumMutablePathBytes
+        )
+        XCTAssertLessThanOrEqual(
+            statistics.peakOpenSegmentCount,
+            FileSystemSeededInventoryChangeOverlay.maximumSegmentCount + 1
+        )
+        let mergePathByteBound =
+            (FileSystemSeededInventoryChangeOverlay.maximumSegmentCount + 1) * 256 * 1024
+                + (FileSystemSeededInventoryChangeOverlay.maximumSegmentCount + 2)
+                * FileSystemSeededInventoryChangeOverlay.maximumRecordPathBytes
+        XCTAssertLessThanOrEqual(statistics.peakMergeResidentPathBytes, mergePathByteBound)
+        XCTAssertEqual(statistics.currentSegmentCount, 1)
+
+        let oldReader = try XCTUnwrap(retainedSnapshot).makeReader()
+        var oldObservedCount = 0
+        while let record = try oldReader.next() {
+            XCTAssertEqual(record.relativePath, String(format: "Replay/%06d.swift", oldObservedCount))
+            oldObservedCount += 1
+        }
+        XCTAssertEqual(oldObservedCount, retainedGenerationCount)
+
+        let reader = try snapshot.makeReader()
+        var observedCount = 0
+        while let record = try reader.next() {
+            XCTAssertEqual(record.relativePath, String(format: "Replay/%06d.swift", observedCount))
+            XCTAssertFalse(record.isDirectory)
+            observedCount += 1
+        }
+        XCTAssertEqual(observedCount, recordCount)
     }
 
     func testSeedWatcherRejectsZeroJournalCut() async throws {

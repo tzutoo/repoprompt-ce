@@ -1,194 +1,7 @@
 import Darwin
 import Foundation
 
-enum WorkspaceRootSeedVerificationError: Error, Equatable {
-    case invalidPath
-    case limitExceeded
-    case unsupportedTopology
-}
-
 extension FileSystemService {
-    /// Collects bounded, target-local facts without mutating the service's visited state.
-    /// The seed route uses these facts only for shadow verification; the ordinary crawler
-    /// remains authoritative and retains ownership of ignore caches/publications.
-    func workspaceRootSeedVerificationFacts(
-        relativePaths: Set<String>,
-        affectedDirectories: Set<String>,
-        allowRepositoryMetadataAtRoot: Bool = true,
-        limits: WorkspaceRootSeedPlannerLimits
-    ) async throws -> [String: WorkspaceRootSeedVerificationFact] {
-        guard WorkspaceRootByteExactPathSet(relativePaths) != nil,
-              WorkspaceRootByteExactPathSet(affectedDirectories) != nil
-        else { throw WorkspaceRootSeedVerificationError.invalidPath }
-        var candidatesByKey: [WorkspaceRootByteExactPathKey: String] = [:]
-        var canonicalCandidateKeys: [String: WorkspaceRootByteExactPathKey] = [:]
-        candidatesByKey.reserveCapacity(relativePaths.count)
-
-        func insertCandidate(_ path: String) throws {
-            let key = WorkspaceRootByteExactPathKey(path)
-            if let existing = canonicalCandidateKeys[path], existing != key {
-                throw WorkspaceRootSeedVerificationError.invalidPath
-            }
-            candidatesByKey[key] = path
-            canonicalCandidateKeys[path] = key
-        }
-
-        for path in relativePaths {
-            let standardized = StandardizedPath.relative(path)
-            guard !standardized.isEmpty,
-                  WorkspaceRootByteExactPathKey(standardized) == WorkspaceRootByteExactPathKey(path),
-                  standardized.utf8.count <= 16 * 1024,
-                  standardized.split(separator: "/").count <= 512,
-                  !standardized.hasPrefix("../"),
-                  standardized != ".git",
-                  !standardized.hasPrefix(".git/")
-            else { throw WorkspaceRootSeedVerificationError.invalidPath }
-            try insertCandidate(standardized)
-        }
-
-        let fileManager = FileManager.default
-        var proofDirectoryValues = Array(affectedDirectories)
-        for relativePath in candidatesByKey.values {
-            try Task.checkCancellation()
-            let absolutePath = rootURL.appendingPathComponent(relativePath).path
-            var value = stat()
-            if lstat(absolutePath, &value) == 0 {
-                if value.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
-                    proofDirectoryValues.append(relativePath)
-                }
-            } else if errno != ENOENT, errno != ENOTDIR {
-                throw CocoaError(.fileReadUnknown)
-            }
-        }
-        let standardizedProofDirectories = proofDirectoryValues.map(StandardizedPath.relative)
-        guard let exactProofDirectories = WorkspaceRootByteExactPathSet(standardizedProofDirectories) else {
-            throw WorkspaceRootSeedVerificationError.invalidPath
-        }
-        guard exactProofDirectories.count <= limits.maximumVerificationPathCount else {
-            throw WorkspaceRootSeedVerificationError.limitExceeded
-        }
-
-        let sortedProofDirectories = exactProofDirectories.sortedKeys.map(\.value).sorted {
-            let lhsDepth = $0.split(separator: "/").count
-            let rhsDepth = $1.split(separator: "/").count
-            return lhsDepth == rhsDepth
-                ? WorkspaceRootByteExactPathKey($0) < WorkspaceRootByteExactPathKey($1)
-                : lhsDepth < rhsDepth
-        }
-        var disjointProofDirectories: [String] = []
-        for directory in sortedProofDirectories {
-            let directoryKey = WorkspaceRootByteExactPathKey(directory)
-            if disjointProofDirectories.contains(where: { ancestor in
-                directoryKey.isSameOrDescendant(of: WorkspaceRootByteExactPathKey(ancestor))
-            }) {
-                continue
-            }
-            disjointProofDirectories.append(directory)
-        }
-
-        for directory in disjointProofDirectories {
-            try Task.checkCancellation()
-            let standardized = StandardizedPath.relative(directory)
-            guard WorkspaceRootByteExactPathKey(standardized) == WorkspaceRootByteExactPathKey(directory),
-                  standardized.utf8.count <= 16 * 1024,
-                  standardized.split(separator: "/").count <= 512,
-                  !standardized.hasPrefix("../"),
-                  standardized != ".git",
-                  !standardized.hasPrefix(".git/")
-            else { throw WorkspaceRootSeedVerificationError.invalidPath }
-            let absolute = standardized.isEmpty
-                ? rootURL
-                : rootURL.appendingPathComponent(standardized, isDirectory: true)
-            var enumerationFailed = false
-            guard let enumerator = fileManager.enumerator(
-                at: absolute,
-                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-                options: [],
-                errorHandler: { _, _ in
-                    enumerationFailed = true
-                    return false
-                }
-            ) else { continue }
-            while let child = enumerator.nextObject() as? URL {
-                try Task.checkCancellation()
-                let absolutePath = child.standardizedFileURL.path
-                let rootPath = rootURL.standardizedFileURL.path
-                guard absolutePath.hasPrefix(rootPath + "/") else {
-                    throw WorkspaceRootSeedVerificationError.invalidPath
-                }
-                let relative = StandardizedPath.relative(
-                    String(absolutePath.dropFirst(rootPath.count + 1))
-                )
-                if relative == ".git" || relative.hasPrefix(".git/") {
-                    if allowRepositoryMetadataAtRoot {
-                        enumerator.skipDescendants()
-                        continue
-                    }
-                    throw WorkspaceRootSeedVerificationError.unsupportedTopology
-                }
-                if relative.hasSuffix("/.git") || relative.contains("/.git/") {
-                    throw WorkspaceRootSeedVerificationError.unsupportedTopology
-                }
-                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-                if values?.isSymbolicLink == true {
-                    enumerator.skipDescendants()
-                }
-                try insertCandidate(relative)
-                if candidatesByKey.count > limits.maximumVerificationPathCount {
-                    throw WorkspaceRootSeedVerificationError.limitExceeded
-                }
-            }
-            guard !enumerationFailed else { throw CocoaError(.fileReadUnknown) }
-        }
-        guard candidatesByKey.count <= limits.maximumVerificationPathCount else {
-            throw WorkspaceRootSeedVerificationError.limitExceeded
-        }
-
-        var facts: [String: WorkspaceRootSeedVerificationFact] = [:]
-        facts.reserveCapacity(candidatesByKey.count)
-        for pathKey in candidatesByKey.keys.sorted() {
-            let relativePath = pathKey.value
-            try Task.checkCancellation()
-            let absolutePath = rootURL.appendingPathComponent(relativePath).path
-            var value = stat()
-            let kind: WorkspaceRootSeedVerifiedPathKind
-            if lstat(absolutePath, &value) != 0 {
-                guard errno == ENOENT || errno == ENOTDIR else {
-                    throw CocoaError(.fileReadUnknown)
-                }
-                kind = .missing
-            } else {
-                switch value.st_mode & mode_t(S_IFMT) {
-                case mode_t(S_IFREG):
-                    kind = .regularFile(isExecutable: value.st_mode & mode_t(0o111) != 0)
-                case mode_t(S_IFDIR):
-                    kind = .directory
-                case mode_t(S_IFLNK):
-                    kind = .symbolicLink
-                default:
-                    kind = .special
-                }
-            }
-            let isDirectory = kind == .directory
-            let isIgnored = kind == .missing
-                ? false
-                : await isIgnoredHierarchical(
-                    relativePath: relativePath,
-                    isDirectory: isDirectory
-                )
-            let isIncludedInOrdinaryCrawl = isDirectory
-                ? await directoryIsIncludedInOrdinaryCrawl(relativePath: relativePath)
-                : false
-            facts[relativePath] = WorkspaceRootSeedVerificationFact(
-                relativePath: relativePath,
-                kind: kind,
-                isIgnored: isIgnored,
-                isIncludedInOrdinaryCrawl: isIncludedInOrdinaryCrawl
-            )
-        }
-        return facts
-    }
-
     // MARK: - Parallel scanning support
 
     struct FolderScanBatchResult {
@@ -304,8 +117,7 @@ extension FileSystemService {
 
         // Use parallel scanning for larger sets with BOUNDED CONCURRENCY
         var aggregatedDeltas = [FileSystemDelta]()
-        let originalVisitedPaths = visitedPaths
-        let originalVisitedItems = visitedItems
+        let originalVisitedInventory = visitedInventory.captureState()
         let originalPathCompsCache = pathCompsCache
 
         // Use configured parallelism cap (prevents CPU saturation)
@@ -418,8 +230,7 @@ extension FileSystemService {
                 }
             }
         } catch {
-            visitedPaths = originalVisitedPaths
-            visitedItems = originalVisitedItems
+            visitedInventory.restore(originalVisitedInventory)
             pathCompsCache = originalPathCompsCache
             throw error
         }
@@ -525,7 +336,7 @@ extension FileSystemService {
         mergeIgnoreCache(deltaCache)
 
         let actualSet = Set(actualChildren)
-        let oldSet = visitedPaths.filter { parentDirectory(of: $0) == folderRelPath }
+        let oldSet = Set(visitedPaths.filter { parentDirectory(of: $0) == folderRelPath })
 
         let newItems = actualSet.subtracting(oldSet)
         let removedItems = oldSet.subtracting(actualSet)
@@ -587,43 +398,43 @@ extension FileSystemService {
             skipSymlinks: skipSymlinks,
             baseRelativePath: ""
         )
-        let previousItems = visitedItems
         var reconciledItems = actualItems
         for relativePath in explicitlyManagedIgnoredFilePaths
-            where previousItems[relativePath] == false && actualItems[relativePath] == nil
+            where visitedItems[relativePath] == false && actualItems[relativePath] == nil
         {
             let eligibility = await catalogRegularFileEligibility(relativePath: relativePath)
             if case .ineligible(.ignored) = eligibility {
                 reconciledItems[relativePath] = false
             }
         }
-        let previousPaths = Set(previousItems.keys)
-        let actualPaths = Set(reconciledItems.keys)
-        let typeChangedPaths = Set(previousPaths.intersection(actualPaths).filter {
-            previousItems[$0] != reconciledItems[$0]
-        })
-
-        let removedPaths = previousPaths.subtracting(actualPaths).union(typeChangedPaths)
-            .sorted { lhs, rhs in
-                let lhsDepth = lhs.split(separator: "/").count
-                let rhsDepth = rhs.split(separator: "/").count
-                return lhsDepth == rhsDepth ? lhs > rhs : lhsDepth > rhsDepth
+        var remainingItems = reconciledItems
+        var removedItems: [(path: String, wasDirectory: Bool)] = []
+        var retainedFiles: [String] = []
+        for previous in visitedItems {
+            if let currentType = reconciledItems[previous.key], currentType == previous.value {
+                remainingItems.removeValue(forKey: previous.key)
+                if !currentType { retainedFiles.append(previous.key) }
+            } else {
+                removedItems.append((previous.key, previous.value))
             }
-        let addedPaths = actualPaths.subtracting(previousPaths).union(typeChangedPaths)
-        let addedFolders = addedPaths.filter { reconciledItems[$0] == true }.sorted { lhs, rhs in
+        }
+        removedItems.sort { lhs, rhs in
+            let lhsDepth = lhs.path.split(separator: "/").count
+            let rhsDepth = rhs.path.split(separator: "/").count
+            return lhsDepth == rhsDepth ? lhs.path > rhs.path : lhsDepth > rhsDepth
+        }
+        let addedFolders = remainingItems.keys.filter { remainingItems[$0] == true }.sorted { lhs, rhs in
             let lhsDepth = lhs.split(separator: "/").count
             let rhsDepth = rhs.split(separator: "/").count
             return lhsDepth == rhsDepth ? lhs < rhs : lhsDepth < rhsDepth
         }
-        let addedFiles = addedPaths.filter { reconciledItems[$0] == false }.sorted()
-        let retainedFiles = actualPaths.intersection(previousPaths).subtracting(typeChangedPaths)
-            .filter { reconciledItems[$0] == false }
-            .sorted()
+        let addedFiles = remainingItems.keys.filter { remainingItems[$0] == false }.sorted()
+        retainedFiles.sort()
 
         var deltas: [FileSystemDelta] = []
-        deltas.reserveCapacity(removedPaths.count + addedPaths.count + retainedFiles.count)
-        for relativePath in removedPaths {
-            deltas.append(previousItems[relativePath] == true ? .folderRemoved(relativePath) : .fileRemoved(relativePath))
+        deltas.reserveCapacity(removedItems.count + remainingItems.count + retainedFiles.count)
+        for removed in removedItems {
+            deltas.append(removed.wasDirectory ? .folderRemoved(removed.path) : .fileRemoved(removed.path))
         }
         deltas.append(contentsOf: addedFolders.map(FileSystemDelta.folderAdded))
         deltas.append(contentsOf: addedFiles.map(FileSystemDelta.fileAdded))
@@ -632,8 +443,7 @@ extension FileSystemService {
             deltas.append(.fileModified(relativePath, modificationDate))
         }
 
-        visitedPaths = actualPaths
-        visitedItems = reconciledItems
+        visitedInventory.installOrdinary(paths: Set(reconciledItems.keys), items: reconciledItems)
         pathCompsCache.removeAll()
         return deltas
     }

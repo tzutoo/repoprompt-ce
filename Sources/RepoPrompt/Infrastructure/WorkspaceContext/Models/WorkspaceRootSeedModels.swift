@@ -153,7 +153,7 @@ struct WorkspaceRootValidatedCatalogProjection {
 }
 
 struct WorkspaceRootSeedCompatibilityKey: Hashable {
-    static let currentInventorySchemaVersion = 3
+    static let currentInventorySchemaVersion = 4
 
     let repositoryNamespace: GitBlobRepositoryNamespace
     let objectFormat: GitObjectFormat
@@ -389,7 +389,7 @@ final class WorkspaceRootReusableSnapshot: @unchecked Sendable {
         catalogPolicyIdentity: WorkspaceRootCatalogPolicyIdentity
     ) -> String {
         var writer = CanonicalWriter()
-        writer.append("workspace-root-reusable-snapshot-v3")
+        writer.append("workspace-root-reusable-snapshot-v4")
         writer.append(compatibilityKey.repositoryNamespace.rawValue)
         writer.append(compatibilityKey.objectFormat.rawValue)
         writer.append(compatibilityKey.treeOID.lowercaseHex)
@@ -540,84 +540,8 @@ enum WorkspaceRootMaterializationHintObservation: Equatable {
     case fallback(WorkspaceRootSeedFallbackReason)
 }
 
-struct WorkspaceRootSeedPlannerLimits: Equatable {
-    let maximumVerificationPathCount: Int
-    let maximumOverlayChangedFileCount: Int
-
-    static let production = WorkspaceRootSeedPlannerLimits(
-        maximumVerificationPathCount: 512,
-        maximumOverlayChangedFileCount: WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount
-    )
-}
-
-enum WorkspaceRootSeedVerifiedPathKind: Equatable {
-    case missing
-    case regularFile(isExecutable: Bool)
-    case directory
-    case symbolicLink
-    case special
-}
-
-struct WorkspaceRootSeedVerificationFact: Equatable {
-    let relativePath: String
-    let kind: WorkspaceRootSeedVerifiedPathKind
-    let isIgnored: Bool
-    let isIncludedInOrdinaryCrawl: Bool
-
-    init(
-        relativePath: String,
-        kind: WorkspaceRootSeedVerifiedPathKind,
-        isIgnored: Bool,
-        isIncludedInOrdinaryCrawl: Bool? = nil
-    ) {
-        self.relativePath = relativePath
-        self.kind = kind
-        self.isIgnored = isIgnored
-        self.isIncludedInOrdinaryCrawl = isIncludedInOrdinaryCrawl
-            ?? (kind == .directory && !isIgnored)
-    }
-}
-
-struct WorkspaceRootSeedPlan: Equatable {
-    let snapshotIdentity: WorkspaceRootReusableSnapshotIdentity
-    let targetTreeOID: GitObjectID
-    let relativeFilePaths: Set<String>
-    let relativeFolderPaths: Set<String>
-    let baseRelativeFilePaths: Set<String>
-    let changedRelativeFilePaths: Set<String>
-    let tombstonedBaseRelativeFilePaths: Set<String>
-    let policyIgnoredTrackedRelativeFilePaths: Set<String>
-    let verifiedPathCount: Int
-
-    init(
-        snapshotIdentity: WorkspaceRootReusableSnapshotIdentity,
-        targetTreeOID: GitObjectID,
-        relativeFilePaths: Set<String>,
-        relativeFolderPaths: Set<String>,
-        baseRelativeFilePaths: Set<String>,
-        changedRelativeFilePaths: Set<String>,
-        tombstonedBaseRelativeFilePaths: Set<String>,
-        policyIgnoredTrackedRelativeFilePaths: Set<String> = [],
-        verifiedPathCount: Int
-    ) {
-        self.snapshotIdentity = snapshotIdentity
-        self.targetTreeOID = targetTreeOID
-        self.relativeFilePaths = relativeFilePaths
-        self.relativeFolderPaths = relativeFolderPaths
-        self.baseRelativeFilePaths = baseRelativeFilePaths
-        self.changedRelativeFilePaths = changedRelativeFilePaths
-        self.tombstonedBaseRelativeFilePaths = tombstonedBaseRelativeFilePaths
-        self.policyIgnoredTrackedRelativeFilePaths = policyIgnoredTrackedRelativeFilePaths
-        self.verifiedPathCount = verifiedPathCount
-    }
-
-    var overlayRelativeFilePaths: Set<String> {
-        changedRelativeFilePaths.intersection(relativeFilePaths)
-    }
-}
-
-enum WorkspaceRootSeedPlannerOutcome: Equatable {
-    case planned(WorkspaceRootSeedPlan)
+enum WorkspaceRootSeedPlannerOutcome {
+    case planned(WorkspaceRootTargetSeedPlanHandle)
     case fallback(WorkspaceRootSeedFallbackReason)
 }
 

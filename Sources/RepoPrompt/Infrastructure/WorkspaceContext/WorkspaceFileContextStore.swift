@@ -193,12 +193,12 @@ actor WorkspaceFileContextStore {
         var authorityAcceptedMetadataWatermark: UInt64
         var authorityMutationDepth: Int
         var snapshot: WorkspaceRootReusableSnapshot?
-        var effectivePlan: WorkspaceRootSeedPlan?
+        var targetPlanHandle: WorkspaceRootTargetSeedPlanHandle?
+        var authorityClaim: WorkspaceRootSeedServingAuthorityClaim?
         var attachment: WatcherPublisherAttachment?
         var preparedShard: RootCatalogShard?
         var lastAppliedServicePublicationSequence: UInt64
         var lastAppliedWatcherWatermark: FileSystemWatcherIngressMailbox.Watermark
-        var replayChangedRelativePaths: Set<String>
         var activationProof: FileSystemSeedPublicationActivationProof?
         var terminalFallbackReason: WorkspaceRootSeedFallbackReason?
     }
@@ -212,6 +212,7 @@ actor WorkspaceFileContextStore {
         var isReconciling: Bool
         var reconciliationFailed: Bool
         var fullCrawlAttemptedGeneration: UInt64?
+        var fullCrawlCompletedGeneration: UInt64?
     }
 
     private enum PendingSeededRootAttempt {
@@ -825,7 +826,6 @@ actor WorkspaceFileContextStore {
         struct RootCatalogShardDebugSnapshot: Equatable {
             let liveGenerationCapPerRoot: Int
             let maxPatchLogicalMutationCount: Int
-            let maxPathIndexOverlayChangedFileCount: Int
             let publishedShardCount: Int
             let totalBuildCount: Int
             let totalBackstopCount: Int
@@ -1348,7 +1348,6 @@ actor WorkspaceFileContextStore {
             return RootCatalogShardDebugSnapshot(
                 liveGenerationCapPerRoot: Self.maxLiveRootCatalogShardGenerationsPerRoot,
                 maxPatchLogicalMutationCount: Self.maxRootCatalogShardPatchLogicalMutationCount,
-                maxPathIndexOverlayChangedFileCount: WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount,
                 publishedShardCount: publishedRootCatalogShardsByRootID.count,
                 totalBuildCount: rootCatalogShardBuildCountsByRootID.values.reduce(0, +),
                 totalBackstopCount: rootCatalogShardBackstopCountsByRootID.values.reduce(0, +),
@@ -1849,6 +1848,7 @@ actor WorkspaceFileContextStore {
     ] = [:]
     private var seededAuthorityInvalidationListenerTask: Task<Void, Never>?
     private var publishedSeededAuthorityFencesByRootID: [UUID: GitWorkspacePendingInitializationAuthorityFence] = [:]
+    private var publishedSeededAuthorityClaimsByRootID: [UUID: WorkspaceRootSeedServingAuthorityClaim] = [:]
     private var publishedSeededAuthorityStatesByRootID: [UUID: PublishedSeededAuthorityState] = [:]
     private var publishedSeededAuthorityWaitersByRootID: [
         UUID: [UUID: CheckedContinuation<Void, Error>]
@@ -2361,14 +2361,6 @@ actor WorkspaceFileContextStore {
             }
             pending.lastAppliedWatcherWatermark = watermark
         }
-        pending.replayChangedRelativePaths.formUnion(publication.deltas.map { delta in
-            switch delta {
-            case let .fileAdded(path), let .fileRemoved(path), let .folderAdded(path), let .folderRemoved(path):
-                StandardizedPath.relative(path)
-            case let .fileModified(path, _), let .folderModified(path, _):
-                StandardizedPath.relative(path)
-            }
-        })
         pendingSeededRootsByID[pendingID] = pending
     }
 
@@ -2520,11 +2512,9 @@ actor WorkspaceFileContextStore {
             )
         #endif
 
-        let topology = makePendingSeededRootTopology(
+        let topology = try makePendingSeededRootTopology(
             standardizedPath: standardizedPath,
-            service: service,
-            relativeFilePaths: [],
-            relativeFolderPaths: []
+            service: service
         )
         let pendingID = WorkspacePendingSeededRootID()
         let initializationID = FileSystemSeedInitializationID()
@@ -2553,12 +2543,12 @@ actor WorkspaceFileContextStore {
             authorityAcceptedMetadataWatermark: 0,
             authorityMutationDepth: 0,
             snapshot: nil,
-            effectivePlan: nil,
+            targetPlanHandle: nil,
+            authorityClaim: nil,
             attachment: nil,
             preparedShard: nil,
             lastAppliedServicePublicationSequence: 0,
             lastAppliedWatcherWatermark: .zero,
-            replayChangedRelativePaths: [],
             activationProof: nil,
             terminalFallbackReason: nil
         )
@@ -2619,7 +2609,8 @@ actor WorkspaceFileContextStore {
                 standardizedPath: standardizedPath,
                 expectedPhase: .planning
             )
-            let plan: WorkspaceRootSeedPlan
+            let planHandle: WorkspaceRootTargetSeedPlanHandle
+            let authorityClaim: WorkspaceRootSeedServingAuthorityClaim
             let authorityFence: GitWorkspacePendingInitializationAuthorityFence
             switch planningOutcome {
             case let .fallback(reason):
@@ -2629,11 +2620,28 @@ actor WorkspaceFileContextStore {
                     startupContext: startupContext
                 )
                 return .fallback(reason)
-            case let .planned(planned, fence):
-                plan = planned
-                authorityFence = fence
+            case let .planned(handle, claim):
+                planHandle = handle
+                authorityClaim = claim
+                guard let fence = await claim.authorityFence() else {
+                    await fallBackPendingSeededRoot(
+                        pendingID,
+                        reason: .authorityUnstable,
+                        startupContext: startupContext
+                    )
+                    return .fallback(.authorityUnstable)
+                }
+                // Record the coordinator claim before the awaited fence
+                // validation can publish its non-owning fence value into
+                // pending state. Abort cleanup must never mistake that shared
+                // value for a store-owned lease.
+                pendingSeededRootsByID[pendingID]?.authorityClaim = claim
+                let validatedFence = try await claim.validatePendingAuthorityFence(
+                    replacing: fence
+                )
+                authorityFence = validatedFence
                 try await installValidatedPendingAuthorityFence(
-                    fence,
+                    validatedFence,
                     pendingID: pendingID,
                     token: token,
                     standardizedPath: standardizedPath,
@@ -2641,16 +2649,14 @@ actor WorkspaceFileContextStore {
                 )
             }
 
-            guard let snapshot = await workspaceStateAuthority.reusableSnapshot(
-                identity: plan.snapshotIdentity,
-                expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
-            ) else {
+            let snapshot = planHandle.snapshot
+            guard snapshot.compatibilityKey == hint.creationReceipt.parentCompatibilityKey else {
                 await fallBackPendingSeededRoot(
                     pendingID,
-                    reason: .baseEvicted,
+                    reason: .compatibilityMismatch,
                     startupContext: startupContext
                 )
-                return .fallback(.baseEvicted)
+                return .fallback(.compatibilityMismatch)
             }
             try requirePendingSeededRootCurrent(
                 pendingID,
@@ -2659,10 +2665,10 @@ actor WorkspaceFileContextStore {
                 expectedPhase: .planning
             )
             pendingSeededRootsByID[pendingID]?.snapshot = snapshot
-            pendingSeededRootsByID[pendingID]?.effectivePlan = plan
+            pendingSeededRootsByID[pendingID]?.targetPlanHandle = planHandle
 
             let inventory = try await service.prepareSeededInventory(
-                plan: plan,
+                planHandle: planHandle,
                 initializationID: initializationID
             )
             try requirePendingSeededRootCurrent(
@@ -2713,8 +2719,7 @@ actor WorkspaceFileContextStore {
             guard let reconciled = pendingSeededRootsByID[pendingID],
                   reconciled.terminalFallbackReason == nil,
                   reconciled.lastAppliedServicePublicationSequence == replay.finalServicePublicationSequence,
-                  reconciled.lastAppliedWatcherWatermark >= replay.requestedAcceptedWatermark,
-                  reconciled.replayChangedRelativePaths == replay.changedRelativePaths
+                  reconciled.lastAppliedWatcherWatermark >= replay.requestedAcceptedWatermark
             else {
                 let reason = pendingSeededRootsByID[pendingID]?.terminalFallbackReason
                     ?? .pendingIngressSequenceGap
@@ -2749,8 +2754,9 @@ actor WorkspaceFileContextStore {
                 changedPathCount: replay.changedRelativePaths.count
             )
 
-            let validatedFence = try await worktreeSeedGitService
-                .validateOrRevalidatePendingInitializationAuthorityFence(authorityFence)
+            let validatedFence = try await authorityClaim.validatePendingAuthorityFence(
+                replacing: authorityFence
+            )
             try await installValidatedPendingAuthorityFence(
                 validatedFence,
                 pendingID: pendingID,
@@ -2761,35 +2767,18 @@ actor WorkspaceFileContextStore {
             WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(
                 used: validatedFence.revalidationUsed
             )
-
-            let replayChanged = plan.changedRelativeFilePaths
-                .union(replay.changedRelativePaths)
-                .union(plan.baseRelativeFilePaths.subtracting(replay.relativeFilePaths))
-            guard replayChanged.count < WorkspaceSearchRootPathIndex.maxOverlayChangedFileCount else {
-                await fallBackPendingSeededRoot(
-                    pendingID,
-                    reason: .overlayThresholdExceeded,
-                    startupContext: startupContext
-                )
-                return .fallback(.overlayThresholdExceeded)
-            }
-            let effectivePlan = WorkspaceRootSeedPlan(
-                snapshotIdentity: plan.snapshotIdentity,
-                targetTreeOID: plan.targetTreeOID,
-                relativeFilePaths: replay.relativeFilePaths,
-                relativeFolderPaths: replay.relativeFolderPaths,
-                baseRelativeFilePaths: plan.baseRelativeFilePaths,
-                changedRelativeFilePaths: replayChanged,
-                tombstonedBaseRelativeFilePaths: plan.baseRelativeFilePaths.subtracting(replay.relativeFilePaths),
-                policyIgnoredTrackedRelativeFilePaths: plan.policyIgnoredTrackedRelativeFilePaths,
-                verifiedPathCount: plan.verifiedPathCount
+            try requirePendingSeededRootCurrent(
+                pendingID,
+                token: token,
+                standardizedPath: standardizedPath,
+                expectedPhase: .replaying(replayCut)
             )
+
             pendingSeededRootsByID[pendingID]?.phase = .preparingShard
-            let finalTopology = makePendingSeededRootTopology(
+            let finalTopology = try makePendingSeededRootTopology(
                 standardizedPath: standardizedPath,
                 service: service,
-                relativeFilePaths: replay.relativeFilePaths,
-                relativeFolderPaths: replay.relativeFolderPaths,
+                inventorySnapshot: replay.inventorySnapshot,
                 root: topology.state.root,
                 lifetimeID: topology.state.lifetimeID
             )
@@ -2825,7 +2814,8 @@ actor WorkspaceFileContextStore {
             #endif
             guard let projected = WorkspaceProjectedPathSearchIndex(
                 snapshot: snapshot,
-                plan: effectivePlan,
+                planHandle: planHandle,
+                additionalChangedRelativePaths: replay.changedRelativePaths,
                 root: finalTopology.state.root,
                 authoritativeEntries: components.entries
             ) else {
@@ -2859,7 +2849,7 @@ actor WorkspaceFileContextStore {
 
             ready.state = finalTopology.state
             ready.indexes = finalTopology.indexes
-            ready.effectivePlan = effectivePlan
+            ready.targetPlanHandle = nil
             ready.preparedShard = shard
             ready.phase = .readyForCommit
             pendingSeededRootsByID[pendingID] = ready
@@ -2980,7 +2970,8 @@ actor WorkspaceFileContextStore {
                 isBlocked: false,
                 isReconciling: false,
                 reconciliationFailed: false,
-                fullCrawlAttemptedGeneration: nil
+                fullCrawlAttemptedGeneration: nil,
+                fullCrawlCompletedGeneration: nil
             )
             let wasBlocked = state.isBlocked
             state.epoch &+= 1
@@ -3031,14 +3022,15 @@ actor WorkspaceFileContextStore {
     private func reconcilePublishedSeededAuthority(rootID: UUID) async {
         while let capturedGeneration = seededAuthorityPendingGenerationByRootID[rootID],
               let fence = publishedSeededAuthorityFencesByRootID[rootID],
+              let authorityClaim = publishedSeededAuthorityClaimsByRootID[rootID],
               let state = rootStatesByID[rootID]
         {
             guard publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0 else { break }
             seededAuthorityPendingGenerationByRootID.removeValue(forKey: rootID)
             publishedSeededAuthorityStatesByRootID[rootID]?.isReconciling = true
             do {
-                let replacement = try await worktreeSeedGitService
-                    .recapturePublishedInitializationAuthorityFence(replacing: fence)
+                let replacement = try await authorityClaim
+                    .recapturePublishedAuthorityFence(replacing: fence)
                 guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
                       publishedSeededAuthorityFencesByRootID[rootID] == fence,
                       publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0,
@@ -3047,14 +3039,12 @@ actor WorkspaceFileContextStore {
                       workspaceStateAuthority
                       .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(replacement)
                 else {
-                    await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
                     continue
                 }
 
                 if replacement.snapshot != fence.snapshot {
                     guard publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlAttemptedGeneration == nil
                     else {
-                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
                         failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
                         break
                     }
@@ -3063,10 +3053,10 @@ actor WorkspaceFileContextStore {
                         publishedSeededAuthorityFullCrawlCountsByRootID[rootID, default: 0] += 1
                     #endif
                     guard await state.service.reconcileEntireTreeForAuthorityChange() else {
-                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
                         failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
                         break
                     }
+                    publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlCompletedGeneration = capturedGeneration
                     await waitForCurrentPublisherIngress(rootIDs: [rootID])
                     guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
                           publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0,
@@ -3075,13 +3065,11 @@ actor WorkspaceFileContextStore {
                           workspaceStateAuthority
                           .pendingInitializationAuthorityFenceIsSynchronouslyCurrent(replacement)
                     else {
-                        await worktreeSeedGitService.releasePendingInitializationAuthorityFence(replacement)
                         continue
                     }
                 }
                 publishedSeededAuthorityFencesByRootID[rootID] = replacement
                 markPublishedSeededAuthorityCurrent(rootID: rootID)
-                await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)
             } catch {
                 if await workspaceStateAuthority.collectionMutationFenceReason(
                     for: fence.repositoryKey
@@ -3101,8 +3089,13 @@ actor WorkspaceFileContextStore {
                     #if DEBUG
                         publishedSeededAuthorityFullCrawlCountsByRootID[rootID, default: 0] += 1
                     #endif
-                    _ = await state.service.reconcileEntireTreeForAuthorityChange()
+                    if await state.service.reconcileEntireTreeForAuthorityChange() {
+                        publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlCompletedGeneration = capturedGeneration
+                    }
                     await waitForCurrentPublisherIngress(rootIDs: [rootID])
+                }
+                if await retirePublishedSeededAuthorityAfterUnifiedFullCrawl(rootID: rootID, state: state) {
+                    break
                 }
                 failPublishedSeededAuthorityReconciliation(rootID: rootID, state: state)
                 break
@@ -3123,8 +3116,32 @@ actor WorkspaceFileContextStore {
         authority.isReconciling = false
         authority.reconciliationFailed = false
         authority.fullCrawlAttemptedGeneration = nil
+        authority.fullCrawlCompletedGeneration = nil
         publishedSeededAuthorityStatesByRootID[rootID] = authority
         resumePublishedSeededAuthorityWaiters(rootID: rootID, error: nil)
+    }
+
+    private func retirePublishedSeededAuthorityAfterUnifiedFullCrawl(
+        rootID: UUID,
+        state: RootState
+    ) async -> Bool {
+        guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
+              let authority = publishedSeededAuthorityStatesByRootID[rootID],
+              authority.activeMutationDepth == 0,
+              authority.fullCrawlCompletedGeneration != nil
+        else { return false }
+
+        seededAuthorityPendingGenerationByRootID.removeValue(forKey: rootID)
+        let claim = publishedSeededAuthorityClaimsByRootID.removeValue(forKey: rootID)
+        let fence = publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID)
+        publishedSeededAuthorityStatesByRootID.removeValue(forKey: rootID)
+        resumePublishedSeededAuthorityWaiters(rootID: rootID, error: nil)
+        if let claim {
+            await claim.release()
+        } else if let fence {
+            await workspaceStateAuthority.releasePendingInitializationAuthorityFence(fence)
+        }
+        return true
     }
 
     private func failPublishedSeededAuthorityReconciliation(rootID: UUID, state: RootState) {
@@ -3235,7 +3252,9 @@ actor WorkspaceFileContextStore {
             publisherIngressCoordinator.closePublisherIngress(subscription)
             await publisherIngressCoordinator.waitForCurrentPublisherIngress(rootIDs: [pending.state.root.id])
         }
-        if let fence = pending.authorityFence {
+        if let authorityClaim = pending.authorityClaim {
+            await authorityClaim.release()
+        } else if let fence = pending.authorityFence {
             await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)
         }
         pendingSeededRootsByID.removeValue(forKey: pendingID)
@@ -3535,29 +3554,57 @@ actor WorkspaceFileContextStore {
                             route: .diffSeedObservation,
                             fallback: reason
                         )
-                    case let .planned(plan):
-                        let authoritativeFiles = state.fileIDsByRelativePath.compactMap { relativePath, fileID in
-                            isDiscoverableFileID(fileID) ? relativePath : nil
+                    case let .planned(planHandle):
+                        let authoritativeFileCount = state.fileIDsByRelativePath.values.count(where: {
+                            isDiscoverableFileID($0)
+                        })
+                        let authoritativeFolderCount = state.folderIDsByRelativePath.count(where: { relativePath, folderID in
+                            !relativePath.isEmpty && isDiscoverableFolderID(folderID)
+                        })
+                        var plannedFileCount = 0
+                        var plannedFolderCount = 0
+                        var matches = true
+                        do {
+                            let reader = try planHandle.makeReader()
+                            while let record = try reader.next() {
+                                guard let relativePath = String(data: record.relativePathBytes, encoding: .utf8),
+                                      Data(relativePath.utf8) == record.relativePathBytes
+                                else {
+                                    matches = false
+                                    continue
+                                }
+                                switch record.disposition {
+                                case .ordinaryFile:
+                                    plannedFileCount += 1
+                                    guard let fileID = state.fileIDsByRelativePath[relativePath],
+                                          isDiscoverableFileID(fileID)
+                                    else { matches = false
+                                        continue
+                                    }
+                                case .ordinaryDirectory:
+                                    plannedFolderCount += 1
+                                    guard let folderID = state.folderIDsByRelativePath[relativePath],
+                                          isDiscoverableFolderID(folderID)
+                                    else { matches = false
+                                        continue
+                                    }
+                                case .policyIgnoredTrackedFile:
+                                    if let fileID = state.fileIDsByRelativePath[relativePath],
+                                       isDiscoverableFileID(fileID)
+                                    { matches = false }
+                                case .baseTombstone:
+                                    break
+                                }
+                            }
+                            matches = matches
+                                && reader.validationState == .verified
+                                && plannedFileCount == authoritativeFileCount
+                                && plannedFolderCount == authoritativeFolderCount
+                        } catch {
+                            matches = false
                         }
-                        let authoritativeFolders = state.folderIDsByRelativePath.compactMap { relativePath, folderID in
-                            !relativePath.isEmpty && isDiscoverableFolderID(folderID) ? relativePath : nil
-                        }
-                        let authoritativeExactFiles = WorkspaceRootByteExactPathSet(authoritativeFiles)
-                        let plannedExactFiles = WorkspaceRootByteExactPathSet(plan.relativeFilePaths)
-                        let authoritativeExactFolders = WorkspaceRootByteExactPathSet(authoritativeFolders)
-                        let plannedExactFolders = WorkspaceRootByteExactPathSet(plan.relativeFolderPaths)
-                        let matches = authoritativeExactFiles != nil
-                            && authoritativeExactFiles == plannedExactFiles
-                            && authoritativeExactFolders != nil
-                            && authoritativeExactFolders == plannedExactFolders
-                            && plan.policyIgnoredTrackedRelativeFilePaths.isDisjoint(with: plan.relativeFilePaths)
                         WorktreeStartupInstrumentation.recordInventoryComparison(matched: matches)
-                        if matches,
-                           let snapshot = await workspaceStateAuthority.reusableSnapshot(
-                               identity: plan.snapshotIdentity,
-                               expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
-                           )
-                        {
+                        if matches {
                             let scope = WorkspaceRootSeedShadowScope(
                                 token: token,
                                 bindingFingerprint: bindingFingerprint,
@@ -3569,8 +3616,8 @@ actor WorkspaceFileContextStore {
                             )
                             rootSeedShadowPreparations.append(WorkspaceRootSeedShadowPreparation(
                                 scope: scope,
-                                snapshot: snapshot,
-                                plan: plan
+                                snapshot: planHandle.snapshot,
+                                planHandle: planHandle
                             ))
                             WorktreeStartupInstrumentation.record(
                                 .shadowVerified,
@@ -3727,10 +3774,11 @@ actor WorkspaceFileContextStore {
         do {
             for pendingID in pendingIDs {
                 guard let pending = pendingSeededRootsByID[pendingID],
-                      let fence = pending.authorityFence
+                      let fence = pending.authorityFence,
+                      let authorityClaim = pending.authorityClaim
                 else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
-                let validated = try await worktreeSeedGitService
-                    .validateOrRevalidatePendingInitializationAuthorityFence(fence)
+                let validated = try await authorityClaim
+                    .validatePendingAuthorityFence(replacing: fence)
                 try await installValidatedPendingAuthorityFence(
                     validated,
                     pendingID: pendingID,
@@ -3939,6 +3987,7 @@ actor WorkspaceFileContextStore {
 
             for pending in pendingRoots {
                 guard let fence = pending.authorityFence,
+                      let authorityClaim = pending.authorityClaim,
                       let activationProof = pending.activationProof
                 else { return false }
                 let root = pending.state.root
@@ -3985,6 +4034,7 @@ actor WorkspaceFileContextStore {
                 newlyPublishedPaths.append(pending.standardizedPath)
                 pendingServices.append((pending.state.service, activationProof, pending.startupContext))
                 publishedSeededAuthorityFencesByRootID[root.id] = fence
+                publishedSeededAuthorityClaimsByRootID[root.id] = authorityClaim
                 publishedSeededAuthorityStatesByRootID[root.id] = PublishedSeededAuthorityState(
                     epoch: 0,
                     pendingInvalidationGeneration: nil,
@@ -3993,7 +4043,8 @@ actor WorkspaceFileContextStore {
                     isBlocked: false,
                     isReconciling: false,
                     reconciliationFailed: false,
-                    fullCrawlAttemptedGeneration: nil
+                    fullCrawlAttemptedGeneration: nil,
+                    fullCrawlCompletedGeneration: nil
                 )
                 pendingSeededRootsByID.removeValue(forKey: pending.id)
                 pendingSeededRootIDsByStandardizedPath.removeValue(forKey: pending.standardizedPath)
@@ -5785,7 +5836,8 @@ actor WorkspaceFileContextStore {
         let entries = buildAuthoritativeCatalogComponents(roots: [state.root]).entries
         guard let projection = WorkspaceProjectedPathSearchIndex(
             snapshot: preparation.snapshot,
-            plan: preparation.plan,
+            planHandle: preparation.planHandle,
+            additionalChangedRelativePaths: .empty,
             root: state.root,
             authoritativeEntries: entries
         ) else {
@@ -8279,11 +8331,10 @@ actor WorkspaceFileContextStore {
     private func makePendingSeededRootTopology(
         standardizedPath: String,
         service: FileSystemService,
-        relativeFilePaths: Set<String>,
-        relativeFolderPaths: Set<String>,
+        inventorySnapshot: FileSystemSeededInventorySnapshot? = nil,
         root existingRoot: WorkspaceRootRecord? = nil,
         lifetimeID existingLifetimeID: UUID? = nil
-    ) -> (state: RootState, indexes: RootIndexBuffers) {
+    ) throws -> (state: RootState, indexes: RootIndexBuffers) {
         let rootURL = URL(fileURLWithPath: standardizedPath).standardizedFileURL
         let root = existingRoot ?? WorkspaceRootRecord(
             name: rootURL.lastPathComponent,
@@ -8312,22 +8363,21 @@ actor WorkspaceFileContextStore {
         indexes.folderIDsByStandardizedFullPath[rootFolder.standardizedFullPath] = rootFolder.id
         state.folderIDsByRelativePath[""] = rootFolder.id
 
-        let folders = relativeFolderPaths
-            .map(StandardizedPath.relative)
-            .filter { !$0.isEmpty && $0 != "." }
-            .sorted { lhs, rhs in
-                let lhsDepth = lhs.split(separator: "/").count
-                let rhsDepth = rhs.split(separator: "/").count
-                return lhsDepth == rhsDepth ? lhs < rhs : lhsDepth < rhsDepth
+        if let inventorySnapshot {
+            let reader = try inventorySnapshot.makeReader()
+            while let item = try reader.next() {
+                let dto = FSItemDTO(
+                    relativePath: item.relativePath,
+                    isDirectory: item.isDirectory,
+                    hierarchy: item.relativePath.split(separator: "/").count
+                )
+                if item.isDirectory {
+                    indexFolders([dto], root: root, state: &state, indexes: &indexes)
+                } else {
+                    indexFiles([dto], root: root, state: &state, indexes: &indexes)
+                }
             }
-            .map { FSItemDTO(relativePath: $0, isDirectory: true, hierarchy: $0.split(separator: "/").count) }
-        indexFolders(folders, root: root, state: &state, indexes: &indexes)
-
-        let files = relativeFilePaths
-            .map(StandardizedPath.relative)
-            .sorted()
-            .map { FSItemDTO(relativePath: $0, isDirectory: false, hierarchy: $0.split(separator: "/").count) }
-        indexFiles(files, root: root, state: &state, indexes: &indexes)
+        }
         return (state, indexes)
     }
 
@@ -8424,10 +8474,14 @@ actor WorkspaceFileContextStore {
         var codemapCleanupFlights: [CodemapCleanupFlight] = []
         var codemapCleanupIDs = Set<UUID>()
         var seededAuthorityFencesToRelease: [GitWorkspacePendingInitializationAuthorityFence] = []
+        var seededAuthorityClaimsToRelease: [WorkspaceRootSeedServingAuthorityClaim] = []
         var ownershipResourcesReleasedByUnload = SessionWorktreeOwnershipRemoval()
         var invalidatedOwnershipTokens = Set<WorkspaceSessionWorktreeOwnershipToken>()
         for rootID in orderedRootIDs {
-            if let fence = publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID) {
+            if let claim = publishedSeededAuthorityClaimsByRootID.removeValue(forKey: rootID) {
+                seededAuthorityClaimsToRelease.append(claim)
+                publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID)
+            } else if let fence = publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID) {
                 seededAuthorityFencesToRelease.append(fence)
             }
             publishedSeededAuthorityStatesByRootID.removeValue(forKey: rootID)
@@ -8491,6 +8545,9 @@ actor WorkspaceFileContextStore {
                 $0.value.rootEpoch != rootEpoch
             }
             statesToUnload.append((rootID, state))
+        }
+        for claim in seededAuthorityClaimsToRelease {
+            await claim.release()
         }
         for fence in seededAuthorityFencesToRelease {
             await worktreeSeedGitService.releasePendingInitializationAuthorityFence(fence)

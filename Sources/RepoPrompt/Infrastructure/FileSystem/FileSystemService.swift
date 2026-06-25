@@ -173,15 +173,18 @@ actor FileSystemService {
     var mutationWaiters: [UUID: FileSystemMutationWaiter] = [:]
     var deferredEditPublicationsByMutationID: [UUID: FileSystemDeferredEditPublication] = [:]
 
-    /// Tracks paths we know about, to detect additions/removals
-    var visitedPaths = Set<String>()
+    /// Tracks paths we know about, to detect additions/removals. Ordinary roots
+    /// keep the legacy in-memory representation; seeded roots retain their
+    /// authenticated spill manifest and only overlay post-cut mutations.
+    let visitedInventory = FileSystemVisitedInventory()
+    lazy var visitedPaths = visitedInventory.paths
 
     /// Ignored regular files retained only because an explicit app/MCP request manages them.
     /// Ordinary catalog files that later become ignored must not acquire this provenance.
     var explicitlyManagedIgnoredFilePaths = Set<String>()
 
     /// True => directory, False => file
-    var visitedItems = [String: Bool]()
+    lazy var visitedItems = visitedInventory.items
 
     /// The FSEvent stream reference
     var fseventStreamRef: FSEventStreamRef?
@@ -452,12 +455,12 @@ actor FileSystemService {
             recoveryScanRetryBaseNanoseconds = recoveryScanRetryBaseNanosecondsOverride ?? 50_000_000
             self.recoveryScanSleep = recoveryScanSleep
 
-            // Use test data if provided
-            if let paths = testVisitedPaths {
-                visitedPaths = paths
-            }
-            if let items = testVisitedItems {
-                visitedItems = items
+            // Use test data if provided.
+            if testVisitedPaths != nil || testVisitedItems != nil {
+                visitedInventory.installOrdinary(
+                    paths: testVisitedPaths ?? [],
+                    items: testVisitedItems ?? [:]
+                )
             }
 
             // Use test ignore rules or load fresh rules with their exact global-policy provenance.

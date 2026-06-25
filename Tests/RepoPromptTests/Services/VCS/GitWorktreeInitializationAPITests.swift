@@ -146,7 +146,7 @@ final class GitWorktreeInitializationAPITests: XCTestCase {
         XCTAssertFalse(manifest.entries.contains { $0.skipWorktree })
     }
 
-    func testUntrackedNestedRepositoryDirectoryReachesBoundedTopologyProof() async throws {
+    func testUntrackedNestedRepositoryDirectoryRemainsExplicitInStatusEvidence() async throws {
         let fixture = try GitInitializationFixture()
         defer { fixture.cleanup() }
         let nested = fixture.root.appendingPathComponent("Root/Nested", isDirectory: true)
@@ -168,23 +168,6 @@ final class GitWorktreeInitializationAPITests: XCTestCase {
         XCTAssertTrue(status.pathRecords.contains { record in
             record.kind == .untracked && StandardizedPath.relative(record.path) == "Root/Nested"
         })
-
-        let service = try await FileSystemService(
-            path: fixture.root.appendingPathComponent("Root", isDirectory: true).path,
-            respectRepoIgnore: false,
-            respectCursorignore: false
-        )
-        do {
-            _ = try await service.workspaceRootSeedVerificationFacts(
-                relativePaths: ["Nested"],
-                affectedDirectories: [],
-                allowRepositoryMetadataAtRoot: false,
-                limits: .production
-            )
-            XCTFail("Expected nested repository topology fallback")
-        } catch let error as WorkspaceRootSeedVerificationError {
-            XCTAssertEqual(error, .unsupportedTopology)
-        }
     }
 
     func testAuthorityPolicyIdentityUsesResolvedExternalContentsAndHierarchicalPrefixControls() async throws {

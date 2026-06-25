@@ -348,13 +348,34 @@ final class GitWorktreeCreationReceiptTests: XCTestCase {
         let expectedFiles: Set = [".repo_ignore", "MiXeD.swift", "文件.swift"]
         XCTAssertEqual(ordinaryFiles, expectedFiles)
         XCTAssertEqual(ordinaryFolders, ["Links", "VisibleOnly", "VisibleSymlinkParent"])
-        XCTAssertEqual(plan.relativeFilePaths, ordinaryFiles)
-        XCTAssertEqual(plan.relativeFolderPaths, ordinaryFolders)
-        XCTAssertEqual(plan.policyIgnoredTrackedRelativeFilePaths, [
-            "Ignored/Committed.swift", "VisibleOnly/OnlyIgnored.tmp"
+        var plannedFiles = Set<String>()
+        var plannedFolders = Set<String>()
+        var policyIgnoredFiles = Set<String>()
+        var overlayFiles = Set<String>()
+        let planReader = try plan.makeReader()
+        while let record = try planReader.next() {
+            let path = try XCTUnwrap(String(data: record.relativePathBytes, encoding: .utf8))
+            switch record.disposition {
+            case .ordinaryFile:
+                plannedFiles.insert(path)
+                if record.baseAction == .overlay { overlayFiles.insert(path) }
+            case .ordinaryDirectory:
+                plannedFolders.insert(path)
+            case .policyIgnoredTrackedFile:
+                policyIgnoredFiles.insert(path)
+            case .baseTombstone:
+                break
+            }
+        }
+        XCTAssertEqual(planReader.validationState, .verified)
+        XCTAssertEqual(plannedFiles, ordinaryFiles)
+        XCTAssertEqual(plannedFolders, ordinaryFolders)
+        XCTAssertEqual(policyIgnoredFiles, [
+            "Ignored/Committed.swift", "Links/Current",
+            "VisibleOnly/OnlyIgnored.tmp", "VisibleSymlinkParent/IgnoredDirLink"
         ])
-        XCTAssertTrue(plan.overlayRelativeFilePaths.isEmpty)
-        XCTAssertTrue(plan.relativeFilePaths.isDisjoint(with: plan.policyIgnoredTrackedRelativeFilePaths))
+        XCTAssertTrue(overlayFiles.isEmpty)
+        XCTAssertTrue(plannedFiles.isDisjoint(with: policyIgnoredFiles))
 
         let snapshot = await authority.reusableSnapshot(
             identity: receipt.parentSnapshotIdentity,

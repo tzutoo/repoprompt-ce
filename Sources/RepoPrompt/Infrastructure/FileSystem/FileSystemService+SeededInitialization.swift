@@ -29,11 +29,15 @@ struct FileSystemSeededInventoryPreparation: @unchecked Sendable {
     let initializationID: FileSystemSeedInitializationID
     let watcherIngressGeneration: UInt64
     let snapshotIdentity: WorkspaceRootReusableSnapshotIdentity?
-    let relativeFilePaths: Set<String>
-    let relativeFolderPaths: Set<String>
+    let targetPlanDigest: Data?
+    let inventoryManifest: FileSystemSeededInventoryManifest
+
+    var statistics: FileSystemSeededInventoryPreparationStatistics {
+        inventoryManifest.statistics
+    }
 }
 
-struct FileSystemSeedReplayResult: Equatable {
+struct FileSystemSeedReplayResult {
     let initializationID: FileSystemSeedInitializationID
     let watcherIngressGeneration: UInt64
     let requestedAcceptedWatermark: FileSystemWatcherIngressMailbox.Watermark
@@ -41,10 +45,10 @@ struct FileSystemSeedReplayResult: Equatable {
     let finalServicePublicationSequence: UInt64
     let acceptedPayloadCount: Int
     let acceptedEventCount: Int
-    let changedRelativePaths: Set<String>
+    let changedRelativePaths: FileSystemSeededInventoryChangedPaths
+    let replayStorageStatistics: FileSystemSeededInventoryReplayStorageStatistics
     let ignoreControlPathsChanged: Bool
-    let relativeFilePaths: Set<String>
-    let relativeFolderPaths: Set<String>
+    let inventorySnapshot: FileSystemSeededInventorySnapshot
 }
 
 struct FileSystemSeedPublicationActivationProof: Equatable {
@@ -92,7 +96,6 @@ struct FileSystemSeedInitializationState {
     var initialAcceptedWatermark: FileSystemWatcherIngressMailbox.Watermark
     var phase: Phase
     var lastReplayPublicationSequence: UInt64
-    var changedRelativePaths = Set<String>()
 }
 
 extension FileSystemService {
@@ -163,26 +166,22 @@ extension FileSystemService {
     }
 
     func prepareSeededInventory(
-        plan: WorkspaceRootSeedPlan,
+        planHandle: WorkspaceRootTargetSeedPlanHandle,
         initializationID: FileSystemSeedInitializationID
     ) async throws -> FileSystemSeededInventoryPreparation {
         try requireCurrentSeedInitialization(initializationID)
         guard seedInitializationState?.phase == .capturing else {
             throw FileSystemSeedReplayError.replayAlreadyCompleted
         }
-        let files = try validatedSeedPaths(plan.relativeFilePaths)
-        let folders = try validatedSeedPaths(plan.relativeFolderPaths)
-        guard files.isDisjoint(with: folders) else {
-            let overlap = files.intersection(folders).sorted().first ?? ""
-            throw FileSystemSeedReplayError.invalidSeedInventoryPath(overlap)
-        }
+
+        let manifest = try FileSystemSeededInventoryManifest(validating: planHandle)
         return FileSystemSeededInventoryPreparation(
             serviceIdentity: diagnosticRootToken,
             initializationID: initializationID,
             watcherIngressGeneration: watcherIngressGeneration,
-            snapshotIdentity: plan.snapshotIdentity,
-            relativeFilePaths: files,
-            relativeFolderPaths: folders
+            snapshotIdentity: planHandle.snapshotIdentity,
+            targetPlanDigest: planHandle.planManifest.footer.digest,
+            inventoryManifest: manifest
         )
     }
 
@@ -197,11 +196,7 @@ extension FileSystemService {
             throw FileSystemSeedReplayError.watcherIngressChanged
         }
 
-        visitedPaths = preparation.relativeFilePaths.union(preparation.relativeFolderPaths)
-        visitedItems = Dictionary(
-            uniqueKeysWithValues: preparation.relativeFolderPaths.map { ($0, true) }
-                + preparation.relativeFilePaths.map { ($0, false) }
-        )
+        visitedInventory.installSeeded(manifest: preparation.inventoryManifest)
         explicitlyManagedIgnoredFilePaths.removeAll(keepingCapacity: false)
         seedInitializationState?.phase = .inventoryInstalled
     }
@@ -263,7 +258,7 @@ extension FileSystemService {
                 throw FileSystemSeedReplayError.requestedWatermarkNotPublished
             }
 
-            let state = try currentSeedInitialization(initializationID)
+            let inventorySnapshot = try visitedInventory.seededSnapshot()
             let result = FileSystemSeedReplayResult(
                 initializationID: initializationID,
                 watcherIngressGeneration: watcherIngressGeneration,
@@ -272,10 +267,10 @@ extension FileSystemService {
                 finalServicePublicationSequence: lastServicePublicationSequence,
                 acceptedPayloadCount: evidence.payloadCount,
                 acceptedEventCount: evidence.eventCount,
-                changedRelativePaths: state.changedRelativePaths,
+                changedRelativePaths: inventorySnapshot.changedRelativePaths,
+                replayStorageStatistics: visitedInventory.seededReplayStorageStatistics,
                 ignoreControlPathsChanged: evidence.ignoreControlPathsChanged,
-                relativeFilePaths: Set(visitedItems.lazy.filter { !$0.value }.map(\.key)),
-                relativeFolderPaths: Set(visitedItems.lazy.filter(\.value).map(\.key))
+                inventorySnapshot: inventorySnapshot
             )
             seedInitializationState?.phase = .readyForPublication
             return result
@@ -403,7 +398,7 @@ extension FileSystemService {
         state.lastReplayPublicationSequence = servicePublicationSequence
         if watcherAcceptedWatermark != nil {
             for delta in deltas {
-                state.changedRelativePaths.insert(delta.relativePathForSeedReplay)
+                visitedInventory.recordSeedReplayDelta(delta)
             }
         }
         seedInitializationState = state
@@ -418,24 +413,6 @@ extension FileSystemService {
     func failCurrentSeedReplayForRecovery() {
         guard let initializationID = seedInitializationState?.initializationID else { return }
         failSeedReplay(.recoveryRequired, initializationID: initializationID)
-    }
-
-    private func validatedSeedPaths(_ paths: Set<String>) throws -> Set<String> {
-        var validated = Set<String>()
-        validated.reserveCapacity(paths.count)
-        for path in paths {
-            let standardized = StandardizedPath.relative(path)
-            guard !standardized.isEmpty,
-                  standardized != ".",
-                  standardized != "..",
-                  !standardized.hasPrefix("../"),
-                  !standardized.hasPrefix("/")
-            else {
-                throw FileSystemSeedReplayError.invalidSeedInventoryPath(path)
-            }
-            validated.insert(standardized)
-        }
-        return validated
     }
 
     private func drainSeedReplayPayloads(
@@ -560,18 +537,26 @@ extension FileSystemService {
     }
 }
 
-private extension FileSystemDelta {
-    var relativePathForSeedReplay: String {
-        switch self {
-        case let .fileAdded(path), let .fileRemoved(path), let .folderAdded(path), let .folderRemoved(path),
-             let .fileModified(path, _), let .folderModified(path, _):
-            path
-        }
-    }
-}
-
 #if DEBUG
     extension FileSystemService {
+        private func validatedSeedPaths(_ paths: Set<String>) throws -> Set<String> {
+            var validated = Set<String>()
+            validated.reserveCapacity(paths.count)
+            for path in paths {
+                let standardized = StandardizedPath.relative(path)
+                guard !standardized.isEmpty,
+                      standardized != ".",
+                      standardized != "..",
+                      !standardized.hasPrefix("../"),
+                      !standardized.hasPrefix("/")
+                else {
+                    throw FileSystemSeedReplayError.invalidSeedInventoryPath(path)
+                }
+                validated.insert(standardized)
+            }
+            return validated
+        }
+
         func setSeededPublicationActivationFailureForTesting(_ shouldFail: Bool) {
             seededPublicationActivationShouldFailForTesting = shouldFail
         }
@@ -582,13 +567,29 @@ private extension FileSystemDelta {
             initializationID: FileSystemSeedInitializationID
         ) throws -> FileSystemSeededInventoryPreparation {
             try requireCurrentSeedInitialization(initializationID)
-            return try FileSystemSeededInventoryPreparation(
+            let validatedFiles = try validatedSeedPaths(relativeFilePaths)
+            let validatedFolders = try validatedSeedPaths(relativeFolderPaths)
+            guard validatedFiles.isDisjoint(with: validatedFolders) else {
+                throw FileSystemSeedReplayError.invalidSeedInventoryPath(
+                    validatedFiles.intersection(validatedFolders).sorted().first ?? ""
+                )
+            }
+            var records: [FileSystemSeededInventoryRecord] = []
+            records.reserveCapacity(relativeFilePaths.count + relativeFolderPaths.count)
+            records.append(contentsOf: validatedFiles.map {
+                FileSystemSeededInventoryRecord(relativePath: $0, isDirectory: false)
+            })
+            records.append(contentsOf: validatedFolders.map {
+                FileSystemSeededInventoryRecord(relativePath: $0, isDirectory: true)
+            })
+            let manifest = try FileSystemSeededInventoryManifest.makeForTesting(records: records)
+            return FileSystemSeededInventoryPreparation(
                 serviceIdentity: diagnosticRootToken,
                 initializationID: initializationID,
                 watcherIngressGeneration: watcherIngressGeneration,
                 snapshotIdentity: nil,
-                relativeFilePaths: validatedSeedPaths(relativeFilePaths),
-                relativeFolderPaths: validatedSeedPaths(relativeFolderPaths)
+                targetPlanDigest: nil,
+                inventoryManifest: manifest
             )
         }
     }

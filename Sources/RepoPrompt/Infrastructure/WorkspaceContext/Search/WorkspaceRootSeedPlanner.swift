@@ -1,720 +1,1120 @@
+import CryptoKit
 import Foundation
 
-enum WorkspaceRootSeedServingPlanningOutcome: Equatable {
+enum WorkspaceRootSeedServingPlanningOutcome {
     case planned(
-        plan: WorkspaceRootSeedPlan,
-        authorityFence: GitWorkspacePendingInitializationAuthorityFence
+        handle: WorkspaceRootTargetSeedPlanHandle,
+        authorityClaim: WorkspaceRootSeedServingAuthorityClaim
     )
     case fallback(WorkspaceRootSeedFallbackReason)
 }
 
-actor WorkspaceRootSeedPlanner {
-    private typealias PathKey = WorkspaceRootByteExactPathKey
+/// A non-owning view of the flight's shared authority fence. Retaining this
+/// claim keeps the coordinator-owned fence alive; releasing one claim never
+/// releases the fence while another compatible waiter still has a claim.
+final class WorkspaceRootSeedServingAuthorityClaim: @unchecked Sendable {
+    private let evidenceClaim: WorkspaceRootTargetEvidenceClaim
 
+    fileprivate init(evidenceClaim: WorkspaceRootTargetEvidenceClaim) {
+        self.evidenceClaim = evidenceClaim
+    }
+
+    func authorityFence() async -> GitWorkspacePendingInitializationAuthorityFence? {
+        guard let shared = evidenceClaim.handle(as: WorkspaceRootSeedServingFlightHandle.self) else {
+            return nil
+        }
+        return await shared.authorityResource.currentFence()
+    }
+
+    func recapturePublishedAuthorityFence(
+        replacing fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        guard let shared = evidenceClaim.handle(as: WorkspaceRootSeedServingFlightHandle.self) else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        return try await shared.authorityResource.recapturePublishedFence(replacing: fence)
+    }
+
+    func validatePendingAuthorityFence(
+        replacing fence: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        guard let shared = evidenceClaim.handle(as: WorkspaceRootSeedServingFlightHandle.self) else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        return try await shared.authorityResource.validatePendingFence(replacing: fence)
+    }
+
+    func release() async {
+        await evidenceClaim.release()
+    }
+}
+
+private final class WorkspaceRootSeedServingFlightHandle: WorkspaceRootTargetEvidenceHandle,
+    @unchecked Sendable
+{
+    let planHandle: WorkspaceRootTargetSeedPlanHandle
+    let authorityResource: WorkspaceRootSeedAuthorityFenceResource
+
+    init(
+        planHandle: WorkspaceRootTargetSeedPlanHandle,
+        authorityResource: WorkspaceRootSeedAuthorityFenceResource
+    ) {
+        self.planHandle = planHandle
+        self.authorityResource = authorityResource
+    }
+}
+
+/// The coordinator is the sole owner of the operational authority lease. All
+/// serving claims observe this owner, which coalesces publication transitions
+/// and releases the current fence only after the final claim is gone.
+private actor WorkspaceRootSeedAuthorityFenceResource:
+    WorkspaceRootTargetEvidenceAttemptResource,
+    Sendable
+{
+    private struct Transition {
+        let id: UUID
+        let replacing: GitWorkspacePendingInitializationAuthorityFence
+        let task: Task<GitWorkspacePendingInitializationAuthorityFence, any Error>
+    }
+
+    nonisolated let initialFence: GitWorkspacePendingInitializationAuthorityFence
+    private let gitService: GitService
+    private let authority: GitWorkspaceStateAuthority
+    private var fence: GitWorkspacePendingInitializationAuthorityFence?
+    private var transition: Transition?
+    private var isReleased = false
+
+    init(
+        fence: GitWorkspacePendingInitializationAuthorityFence,
+        gitService: GitService,
+        authority: GitWorkspaceStateAuthority
+    ) {
+        initialFence = fence
+        self.fence = fence
+        self.gitService = gitService
+        self.authority = authority
+    }
+
+    func currentFence() -> GitWorkspacePendingInitializationAuthorityFence? {
+        guard !isReleased else { return nil }
+        return fence
+    }
+
+    func recapturePublishedFence(
+        replacing expected: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        try await validatedCurrentFence(observedBy: expected)
+    }
+
+    func validatePendingFence(
+        replacing expected: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        try await validatedCurrentFence(observedBy: expected)
+    }
+
+    /// A lagging claim may have observed an older fence than the resource now
+    /// owns. Never hand that claim the newer fence until the newer fence itself
+    /// has been proved current. One joined or newly-created transition exhausts
+    /// this call's recapture budget; instability after that fails closed.
+    private func validatedCurrentFence(
+        observedBy _: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        var didUseRecapture = false
+        while true {
+            guard !isReleased, let current = fence else {
+                throw GitWorkspaceAuthorityUnavailableReason.superseded
+            }
+            if let transition {
+                guard !didUseRecapture else {
+                    throw GitWorkspaceAuthorityUnavailableReason.superseded
+                }
+                _ = try await finishTransition(transition)
+                didUseRecapture = true
+                continue
+            }
+
+            let decision = await authority.pendingInitializationFenceDecision(current)
+            guard !isReleased, fence == current, transition == nil else {
+                continue
+            }
+            switch decision {
+            case .current:
+                return current
+            case .fallback:
+                throw GitWorkspaceAuthorityUnavailableReason.superseded
+            case .revalidationRequired:
+                guard !didUseRecapture else {
+                    throw GitWorkspaceAuthorityUnavailableReason.superseded
+                }
+                _ = try await transitionFence(replacing: current)
+                didUseRecapture = true
+            }
+        }
+    }
+
+    private func transitionFence(
+        replacing expected: GitWorkspacePendingInitializationAuthorityFence
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        guard !isReleased, let current = fence else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        if current != expected {
+            return current
+        }
+        let observed: Transition
+        if let transition {
+            observed = transition
+        } else {
+            let task = Task { [gitService] in
+                try await gitService.recapturePublishedInitializationAuthorityFence(
+                    replacing: expected
+                )
+            }
+            observed = Transition(id: UUID(), replacing: expected, task: task)
+            transition = observed
+        }
+        return try await finishTransition(observed)
+    }
+
+    private func finishTransition(
+        _ observed: Transition
+    ) async throws -> GitWorkspacePendingInitializationAuthorityFence {
+        let replacement: GitWorkspacePendingInitializationAuthorityFence
+        do {
+            replacement = try await observed.task.value
+        } catch {
+            if transition?.id == observed.id {
+                transition = nil
+            }
+            throw error
+        }
+        guard !isReleased else {
+            throw GitWorkspaceAuthorityUnavailableReason.superseded
+        }
+        guard transition?.id == observed.id else {
+            guard let current = fence else {
+                throw GitWorkspaceAuthorityUnavailableReason.superseded
+            }
+            return current
+        }
+        guard fence == observed.replacing else {
+            transition = nil
+            await gitService.releasePendingInitializationAuthorityFence(replacement)
+            guard let current = fence else {
+                throw GitWorkspaceAuthorityUnavailableReason.superseded
+            }
+            return current
+        }
+        let replaced = fence
+        fence = replacement
+        transition = nil
+        if let replaced, replaced != replacement {
+            await gitService.releasePendingInitializationAuthorityFence(replaced)
+        }
+        return replacement
+    }
+
+    func release() async {
+        guard !isReleased else { return }
+        isReleased = true
+        let pendingTransition = transition
+        transition = nil
+        let retainedFence = fence
+        fence = nil
+        pendingTransition?.task.cancel()
+        var replacement: GitWorkspacePendingInitializationAuthorityFence?
+        if let pendingTransition {
+            replacement = try? await pendingTransition.task.value
+        }
+        if let retainedFence {
+            await gitService.releasePendingInitializationAuthorityFence(retainedFence)
+        }
+        if let replacement, replacement != retainedFence {
+            await gitService.releasePendingInitializationAuthorityFence(replacement)
+        }
+    }
+}
+
+actor WorkspaceRootSeedPlanner {
     static let shared = WorkspaceRootSeedPlanner()
 
-    private struct SeedEntry {
-        let mode: String
-        let kind: GitTreeEntryKind
-        let catalogProjection: RootNeutralTreeInventoryEntry.CatalogProjection?
+    private enum PlanningFailure: Error {
+        case fallback(WorkspaceRootSeedFallbackReason)
+    }
+
+    private enum UncoalescedPlanningOutcome {
+        case planned(
+            handle: WorkspaceRootTargetSeedPlanHandle,
+            authorityResource: WorkspaceRootSeedAuthorityFenceResource
+        )
+        case authorityInvalidated(expectedAuthoritySnapshotIdentity: Data)
+        case fallback(WorkspaceRootSeedFallbackReason)
+    }
+
+    private struct BaseValue {
+        let entry: RootNeutralTreeInventoryEntry
+        let path: Data
+    }
+
+    private struct DeltaValue {
+        let record: GitTargetTreeDeltaEvidenceRecord
+        let path: Data
+    }
+
+    private struct IndexValue {
+        let record: GitTargetIndexEvidenceRecord
+        let path: Data
+    }
+
+    private struct StatusValue {
+        let record: GitTargetStatusEvidenceRecord
+        let path: Data
+        let sourcePath: Data?
+    }
+
+    private struct TargetTreeValue {
+        let mode: Data
+        let objectID: Data
     }
 
     private let gitService: GitService
     private let authority: GitWorkspaceStateAuthority
-    private let limits: WorkspaceRootSeedPlannerLimits
+    private let flightCoordinator: WorkspaceRootTargetEvidenceCoordinator
+    private let namespaceResourcePolicy: WorkspaceRootNamespaceManifestResourcePolicy
+    private let evidenceResourcePolicy: GitTargetEvidenceResourcePolicy
+    private let planResourcePolicy: WorkspaceRootTargetSeedPlanResourcePolicy
 
     init(
         gitService: GitService = GitService(),
         authority: GitWorkspaceStateAuthority = .shared,
-        limits: WorkspaceRootSeedPlannerLimits = .production
+        flightCoordinator: WorkspaceRootTargetEvidenceCoordinator = .shared,
+        namespaceResourcePolicy: WorkspaceRootNamespaceManifestResourcePolicy = .default,
+        evidenceResourcePolicy: GitTargetEvidenceResourcePolicy = .default,
+        planResourcePolicy: WorkspaceRootTargetSeedPlanResourcePolicy = .default
     ) {
         self.gitService = gitService
         self.authority = authority
-        self.limits = limits
+        self.flightCoordinator = flightCoordinator
+        self.namespaceResourcePolicy = namespaceResourcePolicy
+        self.evidenceResourcePolicy = evidenceResourcePolicy
+        self.planResourcePolicy = planResourcePolicy
     }
 
     func plan(
         hint: WorkspaceRootMaterializationHint,
         service: FileSystemService
     ) async -> WorkspaceRootSeedPlannerOutcome {
-        let result = await planningResult(
-            hint: hint,
-            service: service,
-            retainFinalAuthorityFence: false
-        )
-        return result.outcome
+        let result = await planForServing(hint: hint, service: service)
+        switch result {
+        case let .fallback(reason):
+            return .fallback(reason)
+        case let .planned(handle, authorityClaim):
+            await authorityClaim.release()
+            return .planned(handle)
+        }
     }
 
     func planForServing(
         hint: WorkspaceRootMaterializationHint,
         service: FileSystemService
     ) async -> WorkspaceRootSeedServingPlanningOutcome {
-        let result = await planningResult(
-            hint: hint,
-            service: service,
-            retainFinalAuthorityFence: true
-        )
-        switch result.outcome {
-        case let .fallback(reason):
+        if let reason = hint.validationFallbackReason ?? hint.creationReceipt.fallbackReason() {
             return .fallback(reason)
-        case let .planned(plan):
-            guard let fence = result.authorityFence else {
-                return .fallback(.authorityUnstable)
+        }
+        do {
+            let key = try await flightKey(hint: hint, service: service)
+            let claim = try await flightCoordinator.claim(for: key) { [self] _, context in
+                switch await uncoalescedPlanningResult(
+                    hint: hint,
+                    service: service,
+                    attemptContext: context
+                ) {
+                case let .fallback(reason):
+                    throw PlanningFailure.fallback(reason)
+                case let .planned(handle, authorityResource):
+                    return .sealed(
+                        handle: WorkspaceRootSeedServingFlightHandle(
+                            planHandle: handle,
+                            authorityResource: authorityResource
+                        ),
+                        authoritySnapshotIdentity: Self.authoritySnapshotIdentity(
+                            authorityResource.initialFence.snapshot
+                        )
+                    )
+                case let .authorityInvalidated(expectedAuthoritySnapshotIdentity):
+                    return .authorityInvalidated(
+                        originalAuthoritySnapshotIdentity: expectedAuthoritySnapshotIdentity,
+                        replacementAuthoritySnapshotIdentity: expectedAuthoritySnapshotIdentity
+                    )
+                }
             }
-            return .planned(plan: plan, authorityFence: fence)
+            guard let shared = claim.handle(as: WorkspaceRootSeedServingFlightHandle.self) else {
+                await claim.release()
+                return .fallback(.targetEvidenceIncoherent)
+            }
+            return .planned(
+                handle: shared.planHandle,
+                authorityClaim: WorkspaceRootSeedServingAuthorityClaim(evidenceClaim: claim)
+            )
+        } catch {
+            return .fallback(Self.fallbackReason(for: error))
         }
     }
 
-    private func planningResult(
+    private func uncoalescedPlanningResult(
         hint: WorkspaceRootMaterializationHint,
         service: FileSystemService,
-        retainFinalAuthorityFence: Bool
-    ) async -> (outcome: WorkspaceRootSeedPlannerOutcome, authorityFence: GitWorkspacePendingInitializationAuthorityFence?) {
+        attemptContext: WorkspaceRootTargetEvidenceAttemptContext
+    ) async -> UncoalescedPlanningOutcome {
+        if let reason = hint.validationFallbackReason ?? hint.creationReceipt.fallbackReason() {
+            return .fallback(reason)
+        }
+        guard let snapshot = await authority.reusableSnapshot(
+            identity: hint.creationReceipt.parentSnapshotIdentity,
+            expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
+        ) else { return .fallback(.baseEvicted) }
+
         do {
+            let fence = try await gitService.pendingInitializationAuthorityFence(
+                layout: hint.creationReceipt.targetLayout,
+                prefix: hint.creationReceipt.repositoryRelativeRootPrefix
+            )
+            let authorityResource = WorkspaceRootSeedAuthorityFenceResource(
+                fence: fence,
+                gitService: gitService,
+                authority: authority
+            )
+            do {
+                try await attemptContext.retainResource(authorityResource)
+            } catch {
+                throw CancellationError()
+            }
+
             try Task.checkCancellation()
-            guard let snapshot = await authority.reusableSnapshot(
-                identity: hint.creationReceipt.parentSnapshotIdentity,
-                expectedCompatibilityKey: hint.creationReceipt.parentCompatibilityKey
-            ) else { return (.fallback(.baseEvicted), nil) }
-
-            let receipt = hint.creationReceipt
-            let before = try await gitService.generationFencedAuthoritySnapshot(
-                layout: receipt.targetLayout,
-                prefix: receipt.repositoryRelativeRootPrefix
-            )
-            let targetCompatibility = WorkspaceRootSeedCompatibilityKey(authority: before)
-            guard targetCompatibility.isDeltaCompatible(with: snapshot.compatibilityKey),
+            let identity = Self.authoritySnapshotIdentity(fence.snapshot)
+            if let required = attemptContext.requiredAuthoritySnapshotIdentity,
+               required != identity
+            {
+                throw WorkspaceRootTargetEvidenceCoordinatorError.authoritySnapshotChanged
+            }
+            let compatibility = WorkspaceRootSeedCompatibilityKey(authority: fence.snapshot)
+            guard compatibility.isDeltaCompatible(with: snapshot.compatibilityKey),
                   await service.currentWorkspaceRootCatalogPolicyIdentity() == snapshot.catalogPolicyIdentity
-            else {
-                return (.fallback(.compatibilityMismatch), nil)
-            }
+            else { throw PlanningFailure.fallback(.compatibilityMismatch) }
 
-            let treeDelta = try await gitService.diffTrees(
-                baseTreeOID: snapshot.compatibilityKey.treeOID,
-                targetTreeOID: before.treeOID,
-                in: receipt.targetLayout,
-                prefix: receipt.repositoryRelativeRootPrefix
-            )
-            let index = try await gitService.indexManifest(
-                in: receipt.targetLayout,
-                prefix: receipt.repositoryRelativeRootPrefix
-            )
-            let status = try await gitService.worktreeStatus(
-                in: receipt.targetLayout,
-                prefix: receipt.repositoryRelativeRootPrefix
-            )
-
-            guard Self.byteExactProjectionIsValid(
+            let handle = try await buildAttempt(
+                hint: hint,
                 snapshot: snapshot,
-                treeDelta: treeDelta,
-                index: index,
-                status: status,
-                verificationFacts: [:],
-                copiedRepositoryRelativePaths: receipt.exactCopiedRelativePaths,
-                prefix: receipt.repositoryRelativeRootPrefix
-            ) else { return (.fallback(.compatibilityMismatch), nil) }
-            let policyIgnoredBasePaths = Set(snapshot.inventory.entries.compactMap { entry in
-                entry.catalogProjection == .policyIgnoredRegularFile || entry.mode == "120000"
-                    ? entry.relativePath
-                    : nil
-            })
-            let verificationScope = try Self.verificationScope(
-                treeDelta: treeDelta,
-                policyIgnoredBasePaths: policyIgnoredBasePaths,
-                status: status,
-                copiedRepositoryRelativePaths: receipt.exactCopiedRelativePaths,
-                prefix: receipt.repositoryRelativeRootPrefix,
-                limits: limits
+                fence: fence,
+                service: service
             )
-            let facts = try await service.workspaceRootSeedVerificationFacts(
-                relativePaths: verificationScope.paths,
-                affectedDirectories: verificationScope.directories,
-                allowRepositoryMetadataAtRoot: receipt.repositoryRelativeRootPrefix.value.isEmpty,
-                limits: limits
-            )
-
-            let authorityFence: GitWorkspacePendingInitializationAuthorityFence?
-            let after: GitWorkspaceAuthoritySnapshot
-            if retainFinalAuthorityFence {
-                let fence = try await gitService.pendingInitializationAuthorityFence(
-                    layout: receipt.targetLayout,
-                    prefix: receipt.repositoryRelativeRootPrefix
-                )
-                authorityFence = fence
-                after = fence.snapshot
-            } else {
-                authorityFence = nil
-                after = try await gitService.generationFencedAuthoritySnapshot(
-                    layout: receipt.targetLayout,
-                    prefix: receipt.repositoryRelativeRootPrefix
-                )
-            }
-            guard before == after else {
-                if let authorityFence {
-                    await gitService.releasePendingInitializationAuthorityFence(authorityFence)
-                }
-                return (.fallback(.authorityUnstable), nil)
-            }
-            let outcome = Self.materialize(
-                snapshot: snapshot,
-                targetTreeOID: before.treeOID,
-                treeDelta: treeDelta,
-                index: index,
-                status: status,
-                verificationFacts: facts,
-                copiedRepositoryRelativePaths: receipt.exactCopiedRelativePaths,
-                prefix: receipt.repositoryRelativeRootPrefix,
-                limits: limits
-            )
-            if case .fallback = outcome, let authorityFence {
-                await gitService.releasePendingInitializationAuthorityFence(authorityFence)
-                return (outcome, nil)
-            }
-            return (outcome, authorityFence)
-        } catch is CancellationError {
-            return (.fallback(.cancellation), nil)
-        } catch WorkspaceRootSeedVerificationError.limitExceeded {
-            return (.fallback(.verificationLimitExceeded), nil)
-        } catch WorkspaceRootSeedVerificationError.invalidPath {
-            return (.fallback(.unexplainedFilesystemEntry), nil)
-        } catch WorkspaceRootSeedVerificationError.unsupportedTopology {
-            return (.fallback(.submoduleOrNestedRepository), nil)
-        } catch let reason as GitWorkspaceAuthorityUnavailableReason {
-            switch reason {
-            case .mutationInProgress, .metadataEventPending:
-                return (.fallback(.authorityChanging), nil)
-            case .noSnapshot, .monitorCoverageUnavailable, .superseded,
-                 .invalidatedDuringCollection, .collectionScopeMismatch:
-                return (.fallback(.authorityUnstable), nil)
-            }
-        } catch let error as GitWorktreeInitializationError {
-            switch error.reason {
-            case .timeout:
-                return (.fallback(.gitTimeout), nil)
-            case .cappedOutput, .recordLimitExceeded, .pathLimitExceeded:
-                return (.fallback(.gitCappedOutput), nil)
-            case .malformedOutput, .invalidRootPrefix:
-                return (.fallback(.gitMalformedOutput), nil)
-            case .gitError:
-                return (.fallback(.gitError), nil)
-            case .cancelled:
-                return (.fallback(.cancellation), nil)
+            switch await authority.pendingInitializationFenceDecision(fence) {
+            case .current:
+                return .planned(handle: handle, authorityResource: authorityResource)
+            case .revalidationRequired:
+                return .authorityInvalidated(expectedAuthoritySnapshotIdentity: identity)
+            case .fallback:
+                throw PlanningFailure.fallback(.authorityUnstable)
             }
         } catch {
-            return (.fallback(.gitError), nil)
+            return .fallback(Self.fallbackReason(for: error))
         }
     }
 
-    static func materialize(
+    private func buildAttempt(
+        hint: WorkspaceRootMaterializationHint,
+        snapshot: WorkspaceRootReusableSnapshot,
+        fence: GitWorkspacePendingInitializationAuthorityFence,
+        service: FileSystemService
+    ) async throws -> WorkspaceRootTargetSeedPlanHandle {
+        let receipt = hint.creationReceipt
+        let namespaceStore = try WorkspaceRootNamespaceManifestStore()
+        let evidenceStore = try GitTargetEvidenceManifestStore()
+        let planStore = try WorkspaceRootTargetSeedPlanManifestStore()
+        let attemptID = UUID()
+        let provenance = Self.creationCutProvenance(receipt)
+
+        let namespace = try await service.workspaceRootNamespaceManifest(
+            in: namespaceStore,
+            resourcePolicy: namespaceResourcePolicy
+        )
+        let expectedNamespaceRoot = try WorkspaceRootNamespaceRootIdentity(
+            rootURL: URL(fileURLWithPath: hint.standardizedTargetPath, isDirectory: true)
+        )
+        guard namespace.header.identity.catalogPolicy == snapshot.catalogPolicyIdentity,
+              namespace.header.identity.root == expectedNamespaceRoot
+        else { throw PlanningFailure.fallback(.changedIgnoreAuthority) }
+
+        let tree = try await gitService.writeTreeDeltaEvidence(
+            baseTreeOID: snapshot.compatibilityKey.treeOID,
+            in: receipt.targetLayout,
+            prefix: receipt.repositoryRelativeRootPrefix,
+            authorityFence: fence,
+            attemptID: attemptID,
+            suppliedCreationCutProvenanceBytes: provenance,
+            store: evidenceStore,
+            evidenceResourcePolicy: evidenceResourcePolicy
+        )
+        let index = try await gitService.writeIndexEvidence(
+            in: receipt.targetLayout,
+            prefix: receipt.repositoryRelativeRootPrefix,
+            authorityFence: fence,
+            attemptID: attemptID,
+            suppliedCreationCutProvenanceBytes: provenance,
+            store: evidenceStore,
+            evidenceResourcePolicy: evidenceResourcePolicy
+        )
+        let status = try await gitService.writeStatusEvidence(
+            in: receipt.targetLayout,
+            prefix: receipt.repositoryRelativeRootPrefix,
+            authorityFence: fence,
+            attemptID: attemptID,
+            suppliedCreationCutProvenanceBytes: provenance,
+            store: evidenceStore,
+            evidenceResourcePolicy: evidenceResourcePolicy
+        )
+        let evidence = try GitTargetEvidenceBundleLease(treeDelta: tree, index: index, status: status)
+        let plan = try await Self.reconcile(
+            snapshot: snapshot,
+            targetTreeOID: fence.snapshot.treeOID,
+            prefix: receipt.repositoryRelativeRootPrefix,
+            namespace: namespace,
+            evidence: evidence,
+            planStore: planStore,
+            resourcePolicy: planResourcePolicy
+        )
+        return try WorkspaceRootTargetSeedPlanHandle(
+            snapshot: snapshot,
+            namespaceManifest: namespace,
+            gitEvidence: evidence,
+            planManifest: plan
+        )
+    }
+
+    /// Performs one byte-exact streaming merge. At most one record from each
+    /// source plus a fixed-size output batch is resident; the reusable base is
+    /// already process-shared and is never copied into target-local storage.
+    static func reconcile(
         snapshot: WorkspaceRootReusableSnapshot,
         targetTreeOID: GitObjectID,
-        treeDelta: [GitTreeDeltaRecord],
-        index: GitIndexManifest,
-        status: GitStatusPorcelainV2Snapshot,
-        verificationFacts: [String: WorkspaceRootSeedVerificationFact],
-        copiedRepositoryRelativePaths: [String],
         prefix: GitRepositoryRelativeRootPrefix,
-        limits: WorkspaceRootSeedPlannerLimits = .production
-    ) -> WorkspaceRootSeedPlannerOutcome {
+        namespace: WorkspaceRootNamespaceManifestLease,
+        evidence: GitTargetEvidenceBundleLease,
+        planStore: WorkspaceRootTargetSeedPlanManifestStore,
+        resourcePolicy: WorkspaceRootTargetSeedPlanResourcePolicy = .default
+    ) async throws -> WorkspaceRootTargetSeedPlanManifestLease {
         guard snapshot.compatibilityKey.repositoryRelativeRootPrefix == prefix,
-              index.rootPrefix == prefix,
-              snapshot.compatibilityKey.objectFormat == targetTreeOID.objectFormat
-        else { return .fallback(.compatibilityMismatch) }
+              snapshot.compatibilityKey.objectFormat == targetTreeOID.objectFormat,
+              evidence.index.header.identity.sparseCheckoutEnabled == false,
+              evidence.treeDelta.header.identity.targetObjectIDBytes == Data(targetTreeOID.lowercaseHex.utf8),
+              evidence.treeDelta.header.identity.baseObjectIDBytes == Data(snapshot.compatibilityKey.treeOID.lowercaseHex.utf8),
+              evidence.treeDelta.header.identity.repositoryRelativeRootPrefixBytes == Data(prefix.value.utf8)
+        else { throw PlanningFailure.fallback(.compatibilityMismatch) }
 
-        guard !index.sparseCheckoutEnabled else { return .fallback(.sparseCheckout) }
-        guard byteExactProjectionIsValid(
+        let treeReader = try evidence.makeTreeDeltaReader()
+        let indexReader = try evidence.makeIndexReader()
+        let statusReader = try evidence.makeStatusReader()
+        let namespaceReader = try namespace.makeReader()
+        let header = WorkspaceRootTargetSeedPlanManifestHeader(
+            snapshotIdentityBytes: Data(snapshot.identity.sha256.utf8),
+            targetTreeOIDBytes: Data(targetTreeOID.lowercaseHex.utf8),
+            objectFormatBytes: Data(targetTreeOID.objectFormat.rawValue.utf8),
+            repositoryRelativeRootPrefixBytes: Data(prefix.value.utf8),
+            namespaceIdentity: namespace.header.identity,
+            namespaceDigest: namespace.digest,
+            treeDeltaDigest: evidence.treeDelta.digest,
+            indexDigest: evidence.index.digest,
+            statusDigest: evidence.status.digest,
+            authorityIdentity: evidence.treeDelta.header.identity.authority,
+            suppliedCreationCutProvenanceBytes: evidence.treeDelta.header.identity.suppliedCreationCutProvenanceBytes
+        )
+        let writer = try planStore.makeWriter(header: header, resourcePolicy: resourcePolicy)
+
+        var baseIndex = 0
+        var previousBasePath: Data?
+        var base: BaseValue? = try nextBase(
             snapshot: snapshot,
-            treeDelta: treeDelta,
-            index: index,
-            status: status,
-            verificationFacts: verificationFacts,
-            copiedRepositoryRelativePaths: copiedRepositoryRelativePaths,
-            prefix: prefix
-        ) else { return .fallback(.compatibilityMismatch) }
-        let verificationFactsByKey = Dictionary(uniqueKeysWithValues: verificationFacts.values.map {
-            (PathKey($0.relativePath), $0)
-        })
+            index: &baseIndex,
+            previousPath: &previousBasePath
+        )
+        var delta = try nextDelta(treeReader, prefix: prefix)
+        var index = try nextIndex(indexReader, prefix: prefix)
+        var status = try nextStatus(statusReader, prefix: prefix)
+        var namespaceRecord = try namespaceReader.next()
+        var outputBatch: [WorkspaceRootTargetSeedPlanRecord] = []
+        outputBatch.reserveCapacity(256)
 
-        let baseFilePathKeys = Set(snapshot.inventory.entries.compactMap { entry in
-            entry.isSearchableFile ? PathKey(entry.relativePath) : nil
-        })
-        if snapshot.inventory.entries.contains(where: { $0.mode == "160000" || $0.kind == .commit }) {
-            return .fallback(.submoduleOrNestedRepository)
-        }
-        if snapshot.inventory.entries.contains(where: { !supported(mode: $0.mode, kind: $0.kind) }) {
-            return .fallback(.symlinkOrSpecialTopology)
-        }
+        do {
+            while let path = minimumPath([
+                base?.path,
+                delta?.path,
+                index?.path,
+                status?.path,
+                namespaceRecord?.relativePathBytes
+            ]) {
+                try Task.checkCancellation()
+                let baseAtPath = base?.path == path ? base : nil
+                let deltaAtPath = delta?.path == path ? delta : nil
+                let indexAtPath = index?.path == path ? index : nil
+                let statusAtPath = status?.path == path ? status : nil
+                let namespaceAtPath = namespaceRecord?.relativePathBytes == path ? namespaceRecord : nil
 
-        var targetTree: [PathKey: SeedEntry] = [:]
-        for entry in snapshot.inventory.entries {
-            targetTree[PathKey(entry.relativePath)] = SeedEntry(
-                mode: entry.mode,
-                kind: entry.kind,
-                catalogProjection: entry.catalogProjection
-            )
-        }
-        var changedPathKeys = Set<PathKey>()
-        for delta in treeDelta {
-            guard delta.status != .unmerged else { return .fallback(.conflictOrUnmergedIndex) }
-            guard let destinationPath = rootRelative(delta.repositoryRelativePath, prefix: prefix) else {
-                return .fallback(.compatibilityMismatch)
-            }
-            if case .renamed = delta.status {
-                guard let sourcePath = delta.sourceRepositoryRelativePath.flatMap({ rootRelative($0, prefix: prefix) }) else {
-                    return .fallback(.gitMalformedOutput)
+                if let baseAtPath {
+                    try validateBaseEntry(baseAtPath.entry)
                 }
-                let source = PathKey(sourcePath)
-                targetTree.removeValue(forKey: source)
-                changedPathKeys.insert(source)
-            }
-            let destination = PathKey(destinationPath)
-            if delta.oldMode == "120000" || delta.newMode == "120000" {
-                return .fallback(.symlinkOrSpecialTopology)
-            }
-            if case .deleted = delta.status {
-                targetTree.removeValue(forKey: destination)
-                changedPathKeys.insert(destination)
-                continue
-            }
-            if delta.newMode == "160000" { return .fallback(.submoduleOrNestedRepository) }
-            guard let mode = delta.newMode,
-                  delta.newObjectID != nil,
-                  let kind = kind(for: mode),
-                  supported(mode: mode, kind: kind)
-            else { return .fallback(.symlinkOrSpecialTopology) }
-            let projection: RootNeutralTreeInventoryEntry.CatalogProjection? =
-                kind == .blob && (mode == "100644" || mode == "100755")
-                    ? nil
-                    : .nonRegularTopology
-            targetTree[destination] = SeedEntry(
-                mode: mode,
-                kind: kind,
-                catalogProjection: projection
-            )
-            changedPathKeys.insert(destination)
-        }
-        for delta in treeDelta where delta.status == .typeChanged || delta.oldMode != delta.newMode {
-            guard let relativePath = rootRelative(delta.repositoryRelativePath, prefix: prefix),
-                  let fact = verificationFactsByKey[PathKey(relativePath)]
-            else { return .fallback(.unexplainedFilesystemEntry) }
-            guard factMatches(mode: delta.newMode, fact: fact) else {
-                return .fallback(.symlinkOrSpecialTopology)
-            }
-        }
-
-        var tracked: [PathKey: SeedEntry] = [:]
-        for entry in index.entries {
-            guard entry.stage == 0 else { return .fallback(.conflictOrUnmergedIndex) }
-            guard !entry.assumeUnchanged else { return .fallback(.assumeUnchangedIndexEntry) }
-            guard !entry.skipWorktree else { return .fallback(.sparseCheckout) }
-            if entry.mode == "160000" { return .fallback(.submoduleOrNestedRepository) }
-            guard let relativePathValue = rootRelative(entry.repositoryRelativePath, prefix: prefix),
-                  let kind = kind(for: entry.mode),
-                  supported(mode: entry.mode, kind: kind)
-            else { return .fallback(.symlinkOrSpecialTopology) }
-            let relativePath = PathKey(relativePathValue)
-            let projection: RootNeutralTreeInventoryEntry.CatalogProjection? =
-                kind == .blob && (entry.mode == "100644" || entry.mode == "100755")
-                    ? targetTree[relativePath]?.catalogProjection
-                    : .nonRegularTopology
-            tracked[relativePath] = SeedEntry(
-                mode: entry.mode,
-                kind: kind,
-                catalogProjection: projection
-            )
-        }
-        let targetTreeFilePaths = Set(targetTree.compactMap { relativePath, entry in
-            entry.kind == .blob && (entry.mode == "100644" || entry.mode == "100755")
-                ? relativePath
-                : nil
-        })
-        let trackedRegularFilePaths = Set(tracked.compactMap { relativePath, entry in
-            entry.kind == .blob && (entry.mode == "100644" || entry.mode == "100755")
-                ? relativePath
-                : nil
-        })
-        changedPathKeys.formUnion(targetTreeFilePaths.symmetricDifference(trackedRegularFilePaths))
-
-        var fileKeys = Set<PathKey>()
-        var policyIgnoredTrackedPathKeys = Set<PathKey>()
-        var explicitFolderKeys = Set<PathKey>()
-        for (relativePath, entry) in tracked {
-            if entry.mode == "120000" {
-                continue
-            }
-            guard entry.kind == .blob,
-                  entry.mode == "100644" || entry.mode == "100755"
-            else { continue }
-            switch entry.catalogProjection {
-            case .searchableRegularFile:
-                fileKeys.insert(relativePath)
-            case .policyIgnoredRegularFile:
-                guard let fact = verificationFactsByKey[relativePath],
-                      case .regularFile = fact.kind,
-                      fact.isIgnored
-                else { return .fallback(.compatibilityMismatch) }
-                policyIgnoredTrackedPathKeys.insert(relativePath)
-            case .nonRegularTopology, nil:
-                guard let fact = verificationFactsByKey[relativePath] else {
-                    return .fallback(.unexplainedFilesystemEntry)
-                }
-                guard applyTrackedFact(
-                    fact,
-                    expectedMode: entry.mode,
-                    files: &fileKeys,
-                    folders: &explicitFolderKeys,
-                    policyIgnoredTrackedPaths: &policyIgnoredTrackedPathKeys
-                ) else { return .fallback(.symlinkOrSpecialTopology) }
-            }
-        }
-        for record in status.pathRecords {
-            guard record.kind != .unmerged else { return .fallback(.conflictOrUnmergedIndex) }
-            if let submoduleState = record.submoduleState,
-               submoduleState.first != "N"
-            {
-                return .fallback(.submoduleOrNestedRepository)
-            }
-            guard let relativePathValue = rootRelative(record.path, prefix: prefix) else {
-                return .fallback(.compatibilityMismatch)
-            }
-            let relativePath = PathKey(relativePathValue)
-            switch record.kind {
-            case .unmerged:
-                return .fallback(.conflictOrUnmergedIndex)
-            case .ignored:
-                continue
-            case .untracked:
-                changedPathKeys.insert(relativePath)
-                guard let fact = verificationFactsByKey[relativePath] else {
-                    return .fallback(.unexplainedFilesystemEntry)
-                }
-                guard applyUntrackedFact(fact, files: &fileKeys, folders: &explicitFolderKeys) else {
-                    return .fallback(.symlinkOrSpecialTopology)
-                }
-            case let .renamedOrCopied(originalPath, score):
-                changedPathKeys.insert(relativePath)
-                guard let sourceValue = rootRelative(originalPath, prefix: prefix),
-                      let fact = verificationFactsByKey[relativePath]
-                else { return .fallback(.unexplainedFilesystemEntry) }
-                let source = PathKey(sourceValue)
-                if score.first == "R" {
-                    fileKeys.remove(source)
-                    policyIgnoredTrackedPathKeys.remove(source)
-                }
-                guard applyTrackedFact(
-                    fact,
-                    expectedMode: record.workTreeMode ?? record.indexMode,
-                    files: &fileKeys,
-                    folders: &explicitFolderKeys,
-                    policyIgnoredTrackedPaths: &policyIgnoredTrackedPathKeys
-                ) else { return .fallback(.symlinkOrSpecialTopology) }
-                changedPathKeys.insert(source)
-            case .ordinary:
-                if record.hasWorkTreeChange || record.hasIndexChange {
-                    changedPathKeys.insert(relativePath)
-                }
-                if record.workTreeStatus == "D" {
-                    fileKeys.remove(relativePath)
-                    policyIgnoredTrackedPathKeys.remove(relativePath)
-                    continue
-                }
-                if record.hasWorkTreeChange || record.hasIndexChange {
-                    guard let fact = verificationFactsByKey[relativePath] else {
-                        return .fallback(.unexplainedFilesystemEntry)
+                let targetTree = try targetTreeValue(base: baseAtPath, delta: deltaAtPath)
+                try validateIndex(indexAtPath, targetTree: targetTree)
+                try validateStatus(statusAtPath)
+                let record = try planRecord(
+                    path: path,
+                    base: baseAtPath,
+                    targetTree: targetTree,
+                    index: indexAtPath,
+                    status: statusAtPath,
+                    namespace: namespaceAtPath
+                )
+                if let record {
+                    outputBatch.append(record)
+                    if outputBatch.count == 256 {
+                        try await writer.append(contentsOf: outputBatch)
+                        outputBatch.removeAll(keepingCapacity: true)
                     }
-                    guard applyTrackedFact(
-                        fact,
-                        expectedMode: record.workTreeMode ?? record.indexMode,
-                        files: &fileKeys,
-                        folders: &explicitFolderKeys,
-                        policyIgnoredTrackedPaths: &policyIgnoredTrackedPathKeys
-                    ) else { return .fallback(.symlinkOrSpecialTopology) }
                 }
-            }
-        }
 
-        let copiedRelativePaths = copiedRepositoryRelativePaths.compactMap { rootRelative($0, prefix: prefix) }
-        for relativePathValue in copiedRelativePaths {
-            let relativePath = PathKey(relativePathValue)
-            guard let fact = verificationFactsByKey[relativePath] else {
-                return .fallback(.unknownCopiedPath)
+                if baseAtPath != nil {
+                    base = try nextBase(
+                        snapshot: snapshot,
+                        index: &baseIndex,
+                        previousPath: &previousBasePath
+                    )
+                }
+                if deltaAtPath != nil { delta = try nextDelta(treeReader, prefix: prefix) }
+                if indexAtPath != nil { index = try nextIndex(indexReader, prefix: prefix) }
+                if statusAtPath != nil { status = try nextStatus(statusReader, prefix: prefix) }
+                if namespaceAtPath != nil { namespaceRecord = try namespaceReader.next() }
             }
-            guard applyUntrackedFact(fact, files: &fileKeys, folders: &explicitFolderKeys) else {
-                return .fallback(.symlinkOrSpecialTopology)
-            }
-            if !fact.isIgnored { changedPathKeys.insert(relativePath) }
-        }
 
-        // Receipt-affected directory enumeration may expose additional untracked siblings.
-        for fact in verificationFacts.values where !tracked.keys.contains(PathKey(fact.relativePath)) {
-            guard applyUntrackedFact(fact, files: &fileKeys, folders: &explicitFolderKeys) else {
-                return .fallback(.symlinkOrSpecialTopology)
+            guard treeReader.validationState == .verified,
+                  indexReader.validationState == .verified,
+                  statusReader.validationState == .verified,
+                  namespaceReader.validationState == .verified
+            else { throw PlanningFailure.fallback(.compatibilityMismatch) }
+            if !outputBatch.isEmpty {
+                try await writer.append(contentsOf: outputBatch)
             }
-            if !fact.isIgnored, fact.kind != .missing {
-                changedPathKeys.insert(PathKey(fact.relativePath))
-            }
+            return try await writer.finish()
+        } catch {
+            await writer.cancel()
+            throw error
         }
-
-        var folderKeys = explicitFolderKeys
-        for path in fileKeys {
-            folderKeys.formUnion(ancestorKeys(of: path))
-        }
-        var policyFolderCandidateKeys = Set<PathKey>()
-        for path in policyIgnoredTrackedPathKeys {
-            policyFolderCandidateKeys.formUnion(ancestorKeys(of: path))
-        }
-        for (path, entry) in tracked where entry.mode == "120000" {
-            policyFolderCandidateKeys.formUnion(ancestorKeys(of: path))
-        }
-        for fact in verificationFacts.values where fact.isIgnored && fact.kind != .missing {
-            policyFolderCandidateKeys.formUnion(ancestorKeys(of: PathKey(fact.relativePath)))
-        }
-        for candidate in policyFolderCandidateKeys {
-            guard let fact = verificationFactsByKey[candidate],
-                  fact.kind == .directory
-            else { return .fallback(.unexplainedFilesystemEntry) }
-            if fact.isIncludedInOrdinaryCrawl {
-                folderKeys.insert(candidate)
-            }
-        }
-
-        guard changedPathKeys.count < limits.maximumOverlayChangedFileCount else {
-            return .fallback(.overlayThresholdExceeded)
-        }
-        guard policyIgnoredTrackedPathKeys.isDisjoint(with: fileKeys) else {
-            return .fallback(.compatibilityMismatch)
-        }
-        let files = Set(fileKeys.map(\.value))
-        let folders = Set(folderKeys.map(\.value))
-        let baseFilePaths = Set(baseFilePathKeys.map(\.value))
-        let changedPaths = Set(changedPathKeys.map(\.value))
-        let policyIgnoredTrackedPaths = Set(policyIgnoredTrackedPathKeys.map(\.value))
-        guard files.count == fileKeys.count,
-              folders.count == folderKeys.count,
-              baseFilePaths.count == baseFilePathKeys.count,
-              changedPaths.count == changedPathKeys.count,
-              policyIgnoredTrackedPaths.count == policyIgnoredTrackedPathKeys.count
-        else { return .fallback(.compatibilityMismatch) }
-        return .planned(WorkspaceRootSeedPlan(
-            snapshotIdentity: snapshot.identity,
-            targetTreeOID: targetTreeOID,
-            relativeFilePaths: files,
-            relativeFolderPaths: folders,
-            baseRelativeFilePaths: baseFilePaths,
-            changedRelativeFilePaths: changedPaths,
-            tombstonedBaseRelativeFilePaths: Set(baseFilePathKeys.subtracting(fileKeys).map(\.value)),
-            policyIgnoredTrackedRelativeFilePaths: policyIgnoredTrackedPaths,
-            verifiedPathCount: verificationFacts.count
-        ))
     }
 
-    private static func ancestorKeys(of path: PathKey) -> Set<PathKey> {
-        var result = Set<PathKey>()
-        var parent = path.parent
-        while let current = parent {
-            result.insert(current)
-            parent = current.parent
+    private static func planRecord(
+        path: Data,
+        base: BaseValue?,
+        targetTree: TargetTreeValue?,
+        index: IndexValue?,
+        status: StatusValue?,
+        namespace: WorkspaceRootNamespaceRecord?
+    ) throws -> WorkspaceRootTargetSeedPlanRecord? {
+        let searchableBase = base?.entry.isSearchableFile == true ? base : nil
+        let baseOrdinal = searchableBase.flatMap { UInt64(exactly: $0.entry.ordinal) }
+        if searchableBase != nil, baseOrdinal == nil {
+            throw PlanningFailure.fallback(.compatibilityMismatch)
         }
-        return result
+
+        if let namespace {
+            guard !pathContainsRepositoryMetadata(path) else {
+                throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+            }
+            guard !namespace.isSymbolicLink,
+                  namespace.fileSystemMode & UInt16(S_IFMT) != UInt16(S_IFLNK)
+            else { throw PlanningFailure.fallback(.symlinkOrSpecialTopology) }
+
+            switch namespace.kind {
+            case .directory:
+                guard namespace.fileSystemMode == 0 ||
+                    namespace.fileSystemMode & UInt16(S_IFMT) == UInt16(S_IFDIR),
+                    index == nil
+                else { throw PlanningFailure.fallback(.symlinkOrSpecialTopology) }
+                return WorkspaceRootTargetSeedPlanRecord(
+                    relativePathBytes: path,
+                    disposition: .ordinaryDirectory,
+                    baseAction: searchableBase == nil ? .none : .tombstone,
+                    fileSystemMode: namespace.fileSystemMode,
+                    baseOrdinal: baseOrdinal
+                )
+
+            case .file:
+                guard namespace.fileSystemMode == 0 ||
+                    namespace.fileSystemMode & UInt16(S_IFMT) == UInt16(S_IFREG)
+                else { throw PlanningFailure.fallback(.symlinkOrSpecialTopology) }
+                if status?.record.kind == .ignored {
+                    throw PlanningFailure.fallback(.changedIgnoreAuthority)
+                }
+                if status?.record.workTreeStatus == UInt8(ascii: "D") {
+                    throw PlanningFailure.fallback(.unexplainedFilesystemEntry)
+                }
+                if index == nil, status?.record.kind != .untracked {
+                    throw PlanningFailure.fallback(.unexplainedFilesystemEntry)
+                }
+                let reusable = canReuse(
+                    base: searchableBase,
+                    targetTree: targetTree,
+                    index: index,
+                    status: status,
+                    namespace: namespace
+                )
+                return WorkspaceRootTargetSeedPlanRecord(
+                    relativePathBytes: path,
+                    disposition: .ordinaryFile,
+                    baseAction: reusable ? .reuse : .overlay,
+                    fileSystemMode: namespace.fileSystemMode,
+                    baseOrdinal: reusable ? baseOrdinal : nil,
+                    targetModeBytes: index?.record.modeBytes,
+                    targetObjectIDBytes: index?.record.objectIDBytes
+                )
+            }
+        }
+
+        if let index {
+            let deleted = status?.record.workTreeStatus == UInt8(ascii: "D")
+            if !deleted {
+                // A tracked regular file omitted by the exact ordinary crawler
+                // is policy-ignored. Porcelain proves it exists (otherwise D),
+                // while the namespace manifest proves it is not publicly visible.
+                return WorkspaceRootTargetSeedPlanRecord(
+                    relativePathBytes: path,
+                    disposition: .policyIgnoredTrackedFile,
+                    baseAction: searchableBase == nil ? .none : .tombstone,
+                    baseOrdinal: baseOrdinal,
+                    targetModeBytes: index.record.modeBytes,
+                    targetObjectIDBytes: index.record.objectIDBytes
+                )
+            }
+        }
+
+        if let status {
+            switch status.record.kind {
+            case .ignored:
+                break
+            case .untracked:
+                if status.record.isDirectoryMarker {
+                    // `--untracked-files=all` reports ordinary files directly;
+                    // a remaining directory marker is an embedded repository or
+                    // another route that needs the ordinary full crawl.
+                    throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+                }
+                throw PlanningFailure.fallback(.unexplainedFilesystemEntry)
+            case .ordinary, .renamed, .copied:
+                guard status.record.workTreeStatus == UInt8(ascii: "D") else {
+                    throw PlanningFailure.fallback(.unexplainedFilesystemEntry)
+                }
+            case .unmerged:
+                throw PlanningFailure.fallback(.conflictOrUnmergedIndex)
+            }
+        }
+
+        if let searchableBase {
+            return WorkspaceRootTargetSeedPlanRecord(
+                relativePathBytes: path,
+                disposition: .baseTombstone,
+                baseAction: .tombstone,
+                baseOrdinal: UInt64(searchableBase.entry.ordinal)
+            )
+        }
+        return nil
     }
 
-    private static func byteExactProjectionIsValid(
-        snapshot: WorkspaceRootReusableSnapshot,
-        treeDelta: [GitTreeDeltaRecord],
-        index: GitIndexManifest,
-        status: GitStatusPorcelainV2Snapshot,
-        verificationFacts: [String: WorkspaceRootSeedVerificationFact],
-        copiedRepositoryRelativePaths: [String],
-        prefix: GitRepositoryRelativeRootPrefix
+    private static func canReuse(
+        base: BaseValue?,
+        targetTree: TargetTreeValue?,
+        index: IndexValue?,
+        status: StatusValue?,
+        namespace: WorkspaceRootNamespaceRecord
     ) -> Bool {
-        let snapshotPaths = snapshot.inventory.entries.map(\.relativePath)
-        guard WorkspaceRootByteExactPathSet(
-            snapshotPaths,
-            rejectExactDuplicates: true
-        ) != nil else { return false }
-
-        var paths = snapshotPaths
-        for delta in treeDelta {
-            if let path = rootRelative(delta.repositoryRelativePath, prefix: prefix) {
-                paths.append(path)
-            }
-            if let source = delta.sourceRepositoryRelativePath.flatMap({ rootRelative($0, prefix: prefix) }) {
-                paths.append(source)
-            }
-        }
-        for entry in index.entries {
-            if let path = rootRelative(entry.repositoryRelativePath, prefix: prefix) {
-                paths.append(path)
-            }
-        }
-        for record in status.pathRecords {
-            if let path = rootRelative(record.path, prefix: prefix) {
-                paths.append(path)
-            }
-            if case let .renamedOrCopied(originalPath, _) = record.kind,
-               let source = rootRelative(originalPath, prefix: prefix)
-            {
-                paths.append(source)
-            }
-        }
-        paths.append(contentsOf: copiedRepositoryRelativePaths.compactMap {
-            rootRelative($0, prefix: prefix)
-        })
-        for (key, fact) in verificationFacts {
-            guard PathKey(key) == PathKey(fact.relativePath) else { return false }
-            paths.append(key)
-        }
-        paths.append(contentsOf: paths.flatMap { ancestorKeys(of: PathKey($0)).map(\.value) })
-        return WorkspaceRootByteExactPathSet(paths) != nil
+        guard let base, let targetTree, let index,
+              Data(base.entry.mode.utf8) == targetTree.mode,
+              Data(base.entry.objectID.lowercaseHex.utf8) == targetTree.objectID,
+              index.record.modeBytes == targetTree.mode,
+              index.record.objectIDBytes == targetTree.objectID,
+              status == nil || (
+                  status?.record.indexStatus == UInt8(ascii: ".") &&
+                      status?.record.workTreeStatus == UInt8(ascii: ".")
+              )
+        else { return false }
+        let expectedExecutable = base.entry.mode == "100755"
+        return namespace.fileSystemMode == 0 || namespace.isExecutable == expectedExecutable
     }
 
-    private static func verificationScope(
-        treeDelta: [GitTreeDeltaRecord],
-        policyIgnoredBasePaths: Set<String>,
-        status: GitStatusPorcelainV2Snapshot,
-        copiedRepositoryRelativePaths: [String],
-        prefix: GitRepositoryRelativeRootPrefix,
-        limits: WorkspaceRootSeedPlannerLimits
-    ) throws -> (paths: Set<String>, directories: Set<String>) {
-        var pathValues = Array(policyIgnoredBasePaths)
-        for record in treeDelta {
-            if let relative = rootRelative(record.repositoryRelativePath, prefix: prefix) { pathValues.append(relative) }
-            if let source = record.sourceRepositoryRelativePath.flatMap({ rootRelative($0, prefix: prefix) }) {
-                pathValues.append(source)
+    private static func targetTreeValue(
+        base: BaseValue?,
+        delta: DeltaValue?
+    ) throws -> TargetTreeValue? {
+        if let delta {
+            let record = delta.record
+            if record.status == .unmerged {
+                throw PlanningFailure.fallback(.conflictOrUnmergedIndex)
             }
-        }
-        for record in status.pathRecords {
-            if let relative = rootRelative(record.path, prefix: prefix) { pathValues.append(relative) }
-            if case let .renamedOrCopied(originalPath, _) = record.kind,
-               let source = rootRelative(originalPath, prefix: prefix)
+            if let oldMode = record.oldModeBytes,
+               record.status != .renamed,
+               record.status != .copied
             {
-                pathValues.append(source)
+                guard let base,
+                      Data(base.entry.mode.utf8) == oldMode,
+                      record.oldObjectIDBytes == Data(base.entry.objectID.lowercaseHex.utf8)
+                else { throw PlanningFailure.fallback(.compatibilityMismatch) }
+            }
+            switch record.status {
+            case .deleted, .renamedSource:
+                return nil
+            case .added, .modified, .typeChanged, .renamed, .copied:
+                guard let mode = record.newModeBytes, let objectID = record.newObjectIDBytes else {
+                    throw PlanningFailure.fallback(.gitMalformedOutput)
+                }
+                try validateSupportedGitMode(mode)
+                return TargetTreeValue(mode: mode, objectID: objectID)
+            case .unmerged:
+                throw PlanningFailure.fallback(.conflictOrUnmergedIndex)
             }
         }
-        for path in copiedRepositoryRelativePaths {
-            if let relative = rootRelative(path, prefix: prefix) { pathValues.append(relative) }
-        }
-        pathValues.append(contentsOf: pathValues.flatMap { path in
-            ancestorKeys(of: PathKey(path)).map(\.value)
-        })
-        guard let exactPaths = WorkspaceRootByteExactPathSet(pathValues) else {
-            throw WorkspaceRootSeedVerificationError.invalidPath
-        }
+        guard let base else { return nil }
+        return TargetTreeValue(
+            mode: Data(base.entry.mode.utf8),
+            objectID: Data(base.entry.objectID.lowercaseHex.utf8)
+        )
+    }
 
-        guard exactPaths.count <= limits.maximumVerificationPathCount else {
-            throw WorkspaceRootSeedVerificationError.limitExceeded
+    private static func validateBaseEntry(_ entry: RootNeutralTreeInventoryEntry) throws {
+        let mode = Data(entry.mode.utf8)
+        if mode == Data("160000".utf8) || entry.kind == .commit {
+            throw PlanningFailure.fallback(.submoduleOrNestedRepository)
         }
-        // Creation-interval contents are represented by final Git/index/status
-        // authority plus the exact include-copy inventory. The seeded watcher is
-        // already attached at the receipt's exact end cut before this plan runs,
-        // so witness event paths are neither retained nor required here.
-        return (Set(exactPaths.stringValues), [])
+        try validateSupportedGitMode(mode)
+    }
+
+    private static func validateIndex(
+        _ value: IndexValue?,
+        targetTree _: TargetTreeValue?
+    ) throws {
+        guard let value else { return }
+        let record = value.record
+        guard record.stage == 0 else { throw PlanningFailure.fallback(.conflictOrUnmergedIndex) }
+        guard !record.assumeUnchanged else { throw PlanningFailure.fallback(.assumeUnchangedIndexEntry) }
+        guard !record.skipWorktree else { throw PlanningFailure.fallback(.sparseCheckout) }
+        try validateSupportedGitMode(record.modeBytes)
+    }
+
+    private static func validateStatus(_ value: StatusValue?) throws {
+        guard let value else { return }
+        let record = value.record
+        guard record.kind != .unmerged else { throw PlanningFailure.fallback(.conflictOrUnmergedIndex) }
+        if let submodule = record.submoduleStateBytes,
+           submodule.first != UInt8(ascii: "N")
+        {
+            throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+        }
+        if record.kind == .untracked, record.isDirectoryMarker {
+            throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+        }
+        if let sourcePath = value.sourcePath, pathContainsRepositoryMetadata(sourcePath) {
+            throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+        }
+    }
+
+    private static func validateSupportedGitMode(_ mode: Data) throws {
+        switch mode {
+        case Data("040000".utf8), Data("100644".utf8), Data("100755".utf8):
+            return
+        case Data("120000".utf8):
+            // The ordinary catalog policy skips symlinks. A tracked symlink is
+            // safe only when the exact namespace manifest omits it; planRecord
+            // then retains it as an excluded tracked entry and never serves it.
+            return
+        case Data("160000".utf8):
+            throw PlanningFailure.fallback(.submoduleOrNestedRepository)
+        default:
+            throw PlanningFailure.fallback(.symlinkOrSpecialTopology)
+        }
+    }
+
+    private static func nextBase(
+        snapshot: WorkspaceRootReusableSnapshot,
+        index: inout Int,
+        previousPath: inout Data?
+    ) throws -> BaseValue? {
+        guard index < snapshot.inventory.entries.count else { return nil }
+        let entry = snapshot.inventory.entries[index]
+        index += 1
+        let path = Data(entry.relativePath.utf8)
+        guard !path.isEmpty,
+              previousPath == nil || previousPath!.lexicographicallyPrecedes(path)
+        else { throw PlanningFailure.fallback(.compatibilityMismatch) }
+        previousPath = path
+        return BaseValue(entry: entry, path: path)
+    }
+
+    private static func nextDelta(
+        _ reader: GitTargetTreeDeltaEvidenceReader,
+        prefix: GitRepositoryRelativeRootPrefix
+    ) throws -> DeltaValue? {
+        guard let record = try reader.next() else { return nil }
+        guard let path = rootRelative(record.repositoryRelativePathBytes, prefix: prefix) else {
+            throw PlanningFailure.fallback(.compatibilityMismatch)
+        }
+        return DeltaValue(record: record, path: path)
+    }
+
+    private static func nextIndex(
+        _ reader: GitTargetIndexEvidenceReader,
+        prefix: GitRepositoryRelativeRootPrefix
+    ) throws -> IndexValue? {
+        guard let record = try reader.next() else { return nil }
+        guard let path = rootRelative(record.repositoryRelativePathBytes, prefix: prefix) else {
+            throw PlanningFailure.fallback(.compatibilityMismatch)
+        }
+        return IndexValue(record: record, path: path)
+    }
+
+    private static func nextStatus(
+        _ reader: GitTargetStatusEvidenceReader,
+        prefix: GitRepositoryRelativeRootPrefix
+    ) throws -> StatusValue? {
+        guard let record = try reader.next() else { return nil }
+        guard let path = rootRelative(record.repositoryRelativePathBytes, prefix: prefix) else {
+            throw PlanningFailure.fallback(.compatibilityMismatch)
+        }
+        let sourcePath = try record.sourceRepositoryRelativePathBytes.map { source -> Data in
+            guard let relative = rootRelative(source, prefix: prefix) else {
+                throw PlanningFailure.fallback(.compatibilityMismatch)
+            }
+            return relative
+        }
+        return StatusValue(record: record, path: path, sourcePath: sourcePath)
     }
 
     private static func rootRelative(
-        _ repositoryRelativePath: String,
+        _ repositoryRelativePath: Data,
         prefix: GitRepositoryRelativeRootPrefix
-    ) -> String? {
-        WorkspaceRootByteExactPathKey.rootRelativePath(
-            repositoryRelativePath: repositoryRelativePath,
-            prefix: prefix
+    ) -> Data? {
+        let prefixBytes = Data(prefix.value.utf8)
+        guard !prefixBytes.isEmpty else { return repositoryRelativePath }
+        var required = prefixBytes
+        required.append(UInt8(ascii: "/"))
+        guard repositoryRelativePath.starts(with: required), repositoryRelativePath.count > required.count else {
+            return nil
+        }
+        return Data(repositoryRelativePath.dropFirst(required.count))
+    }
+
+    private static func minimumPath(_ paths: [Data?]) -> Data? {
+        paths.compactMap(\.self).min { $0.lexicographicallyPrecedes($1) }
+    }
+
+    private static func pathContainsRepositoryMetadata(_ path: Data) -> Bool {
+        path.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+            .contains { $0.elementsEqual(Data(".git".utf8)) }
+    }
+
+    private func flightKey(
+        hint: WorkspaceRootMaterializationHint,
+        service: FileSystemService
+    ) async throws -> WorkspaceRootTargetEvidenceFlightKey {
+        let receipt = hint.creationReceipt
+        let rootIdentity = try WorkspaceRootNamespaceRootIdentity(rootURL: service.rootURL)
+        let policy = await service.currentWorkspaceRootCatalogPolicyIdentity()
+        let repositoryKey = GitWorkspaceAuthorityRepositoryKey(layout: receipt.targetLayout)
+        let searchABI = receipt.parentCompatibilityKey.searchABI
+        let catalogPolicyIdentity = Self.digestFields([
+            String(policy.schemaVersion),
+            policy.mandatoryIgnorePolicyIdentity,
+            policy.globalIgnoreDefaultsDigest,
+            policy.respectRepoIgnore ? "1" : "0",
+            policy.respectCursorignore ? "1" : "0",
+            policy.enableHierarchicalIgnores ? "1" : "0",
+            policy.skipSymlinks ? "1" : "0"
+        ])
+        return WorkspaceRootTargetEvidenceFlightKey(
+            physicalWorktree: .init(
+                canonicalRootPath: service.rootURL.resolvingSymlinksInPath().standardizedFileURL.path,
+                deviceID: rootIdentity.device,
+                inode: rootIdentity.inode,
+                canonicalGitDirectoryPath: receipt.targetLayout.gitDir
+                    .resolvingSymlinksInPath().standardizedFileURL.path
+            ),
+            gitAuthorityRepositoryIdentity: Self.digestFields([
+                repositoryKey.standardizedCommonDirectoryPath,
+                repositoryKey.standardizedGitDirectoryPath,
+                repositoryKey.commonDirectoryDevice.map(String.init) ?? "nil",
+                repositoryKey.commonDirectoryInode.map(String.init) ?? "nil"
+            ]),
+            repositoryRelativeRootPrefix: Data(receipt.repositoryRelativeRootPrefix.value.utf8),
+            reusableSnapshotIdentity: Self.digestFields([
+                receipt.parentSnapshotIdentity.sha256,
+                String(searchABI.matcherSchemaVersion),
+                String(searchABI.projectedKeySchemaVersion),
+                String(searchABI.comparatorSchemaVersion),
+                String(searchABI.pathNormalizationSchemaVersion)
+            ]),
+            catalogPolicyIdentity: catalogPolicyIdentity,
+            creationCutIdentity: Self.creationCutFlightIdentity(receipt),
+            namespaceAcquisitionIdentity: Self.digestFields([
+                rootIdentity.canonicalPathBytes.base64EncodedString(),
+                String(rootIdentity.device),
+                String(rootIdentity.inode),
+                catalogPolicyIdentity.base64EncodedString()
+            ]),
+            inventorySchema: UInt32(receipt.parentCompatibilityKey.inventorySchemaVersion),
+            searchSchema: UInt32(searchABI.projectedKeySchemaVersion)
         )
     }
 
-    private static func kind(for mode: String) -> GitTreeEntryKind? {
-        switch mode {
-        case "040000": .tree
-        case "100644", "100755", "120000": .blob
-        case "160000": .commit
-        default: nil
-        }
+    private static func authoritySnapshotIdentity(_ snapshot: GitWorkspaceAuthoritySnapshot) -> Data {
+        let policy = snapshot.policyIdentity
+        var fields = [
+            snapshot.repositoryKey.standardizedCommonDirectoryPath,
+            snapshot.repositoryKey.standardizedGitDirectoryPath,
+            snapshot.repositoryKey.commonDirectoryDevice.map(String.init) ?? "nil",
+            snapshot.repositoryKey.commonDirectoryInode.map(String.init) ?? "nil",
+            snapshot.repositoryNamespace.rawValue,
+            snapshot.objectFormat.rawValue,
+            snapshot.headCommitOID.lowercaseHex,
+            snapshot.treeOID.lowercaseHex,
+            snapshot.repositoryRelativeRootPrefix.value,
+            snapshot.repositoryBindingEpoch,
+            snapshot.worktreeBindingEpoch,
+            snapshot.layoutGeneration,
+            snapshot.indexGeneration,
+            snapshot.checkoutConfigurationGeneration,
+            snapshot.metadataGeneration,
+            policy.mandatoryIgnorePolicyIdentity,
+            policy.committedIgnoreControlDigest,
+            policy.configuredIgnoreAuthorityDigest,
+            policy.attributePolicyDigest,
+            policy.sparsePolicyDigest
+        ]
+        fields.append(contentsOf: policy.prefixControlIdentities.flatMap { control in
+            [
+                control.repositoryRelativePath,
+                control.kind.rawValue,
+                control.content.exists ? "1" : "0",
+                control.content.sha256,
+                String(control.content.byteCount)
+            ]
+        })
+        return digestFields(fields)
     }
 
-    private static func supported(mode: String, kind: GitTreeEntryKind) -> Bool {
-        kind == .tree
-            || (kind == .blob && (mode == "100644" || mode == "100755" || mode == "120000"))
+    private static func digestFields(_ fields: [String]) -> Data {
+        var digest = SHA256()
+        for field in fields {
+            var count = UInt64(field.utf8.count).bigEndian
+            withUnsafeBytes(of: &count) { digest.update(data: Data($0)) }
+            digest.update(data: Data(field.utf8))
+        }
+        return Data(digest.finalize())
     }
 
-    private static func factMatches(
-        mode: String?,
-        fact: WorkspaceRootSeedVerificationFact
-    ) -> Bool {
-        switch (mode, fact.kind) {
-        case (nil, .missing):
-            true
-        case ("040000", .directory):
-            true
-        case ("100644", .regularFile(isExecutable: false)):
-            true
-        case ("100755", .regularFile(isExecutable: true)):
-            true
-        default:
-            false
+    private static func creationCutProvenance(_ receipt: GitWorktreeCreationReceipt) -> Data {
+        var digest = SHA256()
+        for value in [
+            receipt.id.uuidString.lowercased(),
+            receipt.mutationID.uuidString.lowercased(),
+            receipt.correlationID.uuidString.lowercased(),
+            receipt.actualTargetPath,
+            receipt.repositoryRelativeRootPrefix.value,
+            String(receipt.witnessCoverage.startEventID),
+            String(receipt.witnessCoverage.endEventID),
+            String(receipt.witnessCoverage.endAcceptedCallbackWatermark),
+            String(receipt.witnessCoverage.endedAtUptimeNanoseconds)
+        ] {
+            var length = UInt64(value.utf8.count).bigEndian
+            withUnsafeBytes(of: &length) { digest.update(data: Data($0)) }
+            digest.update(data: Data(value.utf8))
         }
+        for path in receipt.exactCopiedRelativePaths {
+            var length = UInt64(path.utf8.count).bigEndian
+            withUnsafeBytes(of: &length) { digest.update(data: Data($0)) }
+            digest.update(data: Data(path.utf8))
+        }
+        return Data(digest.finalize())
     }
 
-    @discardableResult
-    private static func applyTrackedFact(
-        _ fact: WorkspaceRootSeedVerificationFact,
-        expectedMode: String?,
-        files: inout Set<PathKey>,
-        folders: inout Set<PathKey>,
-        policyIgnoredTrackedPaths: inout Set<PathKey>
-    ) -> Bool {
-        let path = PathKey(fact.relativePath)
-        switch fact.kind {
-        case .missing:
-            files.remove(path)
-            policyIgnoredTrackedPaths.remove(path)
-            return true
-        case let .regularFile(isExecutable):
-            if let expectedMode,
-               (expectedMode == "100755") != isExecutable,
-               expectedMode == "100644" || expectedMode == "100755"
-            {
-                return false
-            }
-            if fact.isIgnored {
-                files.remove(path)
-                policyIgnoredTrackedPaths.insert(path)
-            } else {
-                policyIgnoredTrackedPaths.remove(path)
-                files.insert(path)
-            }
-            return true
-        case .directory:
-            files.remove(path)
-            policyIgnoredTrackedPaths.remove(path)
-            if fact.isIncludedInOrdinaryCrawl {
-                folders.insert(path)
-            }
-            return true
-        case .symbolicLink, .special:
-            return false
-        }
+    /// Join identity deliberately excludes waiter/session/correlation/receipt IDs.
+    /// Compatible inherited sessions share the same physical cut and authority work.
+    private static func creationCutFlightIdentity(_ receipt: GitWorktreeCreationReceipt) -> Data {
+        digestFields([
+            receipt.actualTargetPath,
+            receipt.repositoryRelativeRootPrefix.value,
+            String(receipt.witnessCoverage.startEventID),
+            String(receipt.witnessCoverage.endEventID),
+            String(receipt.witnessCoverage.startAcceptedCallbackWatermark),
+            String(receipt.witnessCoverage.endAcceptedCallbackWatermark),
+            String(receipt.witnessCoverage.startedAtUptimeNanoseconds),
+            String(receipt.witnessCoverage.endedAtUptimeNanoseconds)
+        ] + receipt.exactCopiedRelativePaths)
     }
 
-    @discardableResult
-    private static func applyUntrackedFact(
-        _ fact: WorkspaceRootSeedVerificationFact,
-        files: inout Set<PathKey>,
-        folders: inout Set<PathKey>
-    ) -> Bool {
-        if fact.isIgnored, fact.kind != .directory { return true }
-        let path = PathKey(fact.relativePath)
-        switch fact.kind {
-        case .regularFile:
-            files.insert(path)
-            return true
-        case .directory:
-            if fact.isIncludedInOrdinaryCrawl {
-                folders.insert(path)
+    private static func fallbackReason(for error: Error) -> WorkspaceRootSeedFallbackReason {
+        if let failure = error as? PlanningFailure,
+           case let .fallback(reason) = failure
+        { return reason }
+        if error is CancellationError { return .cancellation }
+        if let error = error as? WorkspaceRootTargetEvidenceCoordinatorError {
+            return switch error {
+            case .waiterDeadlineExceeded: .evidenceWaitDeadlineExceeded
+            case .authoritySnapshotChanged, .authorityUnstable: .authorityUnstable
+            case .attemptResourceAlreadyRegistered: .targetEvidenceIncoherent
             }
-            return true
-        case .missing:
-            return true
-        case .symbolicLink, .special:
-            return false
         }
+        if let reason = error as? GitWorkspaceAuthorityUnavailableReason {
+            return switch reason {
+            case .mutationInProgress, .metadataEventPending: .authorityChanging
+            case .noSnapshot, .monitorCoverageUnavailable, .superseded,
+                 .invalidatedDuringCollection, .collectionScopeMismatch: .authorityUnstable
+            }
+        }
+        if let error = error as? GitTargetEvidenceCollectionError {
+            return switch error {
+            case .authorityChanged: .authorityUnstable
+            case .activityTimeout: .gitTimeout
+            case .malformedGitOutput: .gitMalformedOutput
+            case let .gitInitialization(initialization):
+                switch initialization.reason {
+                case .malformedOutput, .invalidRootPrefix: .gitMalformedOutput
+                case .timeout: .gitTimeout
+                case .cancelled: .cancellation
+                case .gitError, .cappedOutput, .recordLimitExceeded, .pathLimitExceeded: .gitError
+                }
+            case .admission, .processCapture: .gitResourceUnavailable
+            case let .spool(spool):
+                switch spool {
+                case .resourceAdmission: .evidenceResourceUnavailable
+                case .io: .evidenceIOFailure
+                case .invalidConfiguration, .closed, .corrupt: .gitEvidenceCorrupt
+                }
+            case .resourceAdmission: .evidenceResourceUnavailable
+            case .artifact: .gitEvidenceCorrupt
+            case .io: .evidenceIOFailure
+            case .processLaunch, .gitFailure, .gitSignal: .gitError
+            }
+        }
+        if let error = error as? WorkspaceRootNamespaceManifestError {
+            return switch error {
+            case .resourceAdmission: .evidenceResourceUnavailable
+            case .io: .evidenceIOFailure
+            case .invalidConfiguration, .invalidRecord, .duplicatePath, .outOfOrder,
+                 .closed, .corrupt: .namespaceEvidenceCorrupt
+            }
+        }
+        if let error = error as? WorkspaceRootTargetSeedPlanManifestError {
+            return switch error {
+            case .resourceAdmission: .evidenceResourceUnavailable
+            case .io: .evidenceIOFailure
+            case .invalidConfiguration, .invalidRecord, .duplicatePath, .outOfOrder,
+                 .closed, .corrupt: .targetEvidenceIncoherent
+            }
+        }
+        return .gitError
     }
 }

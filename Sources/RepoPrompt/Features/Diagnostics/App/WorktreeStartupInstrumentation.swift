@@ -71,6 +71,13 @@ enum WorkspaceRootSeedFallbackReason: String, Equatable {
     case gitError
     case gitMalformedOutput
     case gitCappedOutput
+    case gitResourceUnavailable
+    case gitEvidenceCorrupt
+    case namespaceEvidenceCorrupt
+    case targetEvidenceIncoherent
+    case evidenceResourceUnavailable
+    case evidenceIOFailure
+    case evidenceWaitDeadlineExceeded
     case witnessGap
     case witnessDrop
     case witnessOverflow
@@ -82,10 +89,8 @@ enum WorkspaceRootSeedFallbackReason: String, Equatable {
     case sparseCheckout
     case submoduleOrNestedRepository
     case symlinkOrSpecialTopology
-    case verificationLimitExceeded
     case unexplainedFilesystemEntry
     case projectedSearchMismatch
-    case overlayThresholdExceeded
     case ownerSuperseded
     case serviceIngressGenerationChanged
     case watcherRecoveryUncertain

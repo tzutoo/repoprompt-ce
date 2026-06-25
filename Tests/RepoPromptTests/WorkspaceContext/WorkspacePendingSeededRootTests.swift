@@ -9,6 +9,11 @@ import XCTest
             let fixture = try PendingSeededRootFixture()
             defer { fixture.cleanup() }
             let prepared = try await fixture.prepareWorktree()
+            try FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: prepared.binding.worktreeRootPath)
+                    .appendingPathComponent("Empty/Deep/Leaf", isDirectory: true),
+                withIntermediateDirectories: true
+            )
             let store = WorkspaceFileContextStore()
             let materializer = WorkspaceRootBindingProjectionMaterializer(store: store)
             WorktreeStartupInstrumentation.resetForTesting()
@@ -51,6 +56,12 @@ import XCTest
                 return XCTFail("Expected the atomically published shard to retain projected reuse")
             }
             XCTAssertFalse(pathIndex.search("Tracked", limit: 20).isEmpty)
+            let empty = await store.folder(rootID: physicalRoot.id, relativePath: "Empty")
+            let emptyDeep = await store.folder(rootID: physicalRoot.id, relativePath: "Empty/Deep")
+            let emptyLeaf = await store.folder(rootID: physicalRoot.id, relativePath: "Empty/Deep/Leaf")
+            XCTAssertNotNil(empty)
+            XCTAssertNotNil(emptyDeep)
+            XCTAssertNotNil(emptyLeaf)
 
             let postCommitURL = URL(fileURLWithPath: prepared.binding.worktreeRootPath)
                 .appendingPathComponent("PostCommit.swift")
@@ -207,6 +218,167 @@ import XCTest
                 diagnostics.contains { $0.rootID == root.id && $0.crawlCount == 0 && $0.watcherActive }
             })
             await materializer.release(sessionID: fixture.agentSessionID)
+        }
+
+        func testTwoConsumersPublishFromOneAuthorityFlightWithoutStalingEachOther() async throws {
+            let fixture = try PendingSeededRootFixture()
+            defer { fixture.cleanup() }
+            let prepared = try await fixture.prepareWorktree()
+            let firstStore = WorkspaceFileContextStore()
+            let secondStore = WorkspaceFileContextStore()
+            let firstMaterializer = WorkspaceRootBindingProjectionMaterializer(store: firstStore)
+            let secondMaterializer = WorkspaceRootBindingProjectionMaterializer(store: secondStore)
+
+            let firstPreparation = try await firstMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            let secondPreparation = try await secondMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            XCTAssertEqual(firstPreparation.ownership.pendingSeededRootPreparations.count, 1)
+            XCTAssertEqual(
+                secondPreparation.ownership.pendingSeededRootPreparations.count,
+                1,
+                "observations=\(secondPreparation.ownership.materializationHintObservationsByPhysicalRootPath)"
+            )
+
+            let firstProjectionValue = try await firstMaterializer.commit(firstPreparation)
+            let secondProjectionValue = try await secondMaterializer.commit(secondPreparation)
+            let firstProjection = try XCTUnwrap(firstProjectionValue)
+            let secondProjection = try XCTUnwrap(secondProjectionValue)
+            let firstRoot = try XCTUnwrap(firstProjection.physicalRootRefs.first)
+            let secondRoot = try XCTUnwrap(secondProjection.physicalRootRefs.first)
+            let firstIsCurrent = await firstStore.publishedSeededAuthorityIsCurrentForTesting(rootID: firstRoot.id)
+            let secondIsCurrent = await secondStore.publishedSeededAuthorityIsCurrentForTesting(rootID: secondRoot.id)
+            XCTAssertTrue(firstIsCurrent)
+            XCTAssertTrue(secondIsCurrent)
+            let firstDiagnostics = await firstStore.readSearchRootDiagnosticsSnapshot()
+            let secondDiagnostics = await secondStore.readSearchRootDiagnosticsSnapshot()
+            XCTAssertEqual(
+                firstDiagnostics.first { $0.rootID == firstRoot.id }?.crawlCount,
+                0
+            )
+            XCTAssertEqual(
+                secondDiagnostics.first { $0.rootID == secondRoot.id }?.crawlCount,
+                0
+            )
+
+            await firstMaterializer.release(sessionID: fixture.agentSessionID)
+            await secondMaterializer.release(sessionID: fixture.agentSessionID)
+        }
+
+        func testLaggingConsumerRevalidatesAdvancedInvalidFenceBeforePublication() async throws {
+            let fixture = try PendingSeededRootFixture()
+            defer { fixture.cleanup() }
+            let prepared = try await fixture.prepareWorktree()
+            let firstStore = WorkspaceFileContextStore()
+            let secondStore = WorkspaceFileContextStore()
+            let firstMaterializer = WorkspaceRootBindingProjectionMaterializer(store: firstStore)
+            let secondMaterializer = WorkspaceRootBindingProjectionMaterializer(store: secondStore)
+            let firstPreparation = try await firstMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            let secondPreparation = try await secondMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            let authority = GitWorkspaceStateAuthority.shared
+            let monitor = await authority.metadataMonitorForTesting()
+            let key = GitWorkspaceAuthorityRepositoryKey(layout: prepared.hint.creationReceipt.targetLayout)
+
+            await monitor.acceptEventWithoutDeliveryForTesting(repositoryKey: key)
+            let firstProjectionValue = try await firstMaterializer.commit(firstPreparation)
+            let firstProjection = try XCTUnwrap(firstProjectionValue)
+            let firstRoot = try XCTUnwrap(firstProjection.physicalRootRefs.first)
+            let firstIsCurrent = await firstStore.publishedSeededAuthorityIsCurrentForTesting(rootID: firstRoot.id)
+            XCTAssertTrue(firstIsCurrent, "The first consumer must publish the recaptured F1 fence")
+
+            await monitor.acceptEventWithoutDeliveryForTesting(repositoryKey: key)
+            let invalidatedF1IsCurrent = await firstStore
+                .publishedSeededAuthorityIsCurrentForTesting(rootID: firstRoot.id)
+            XCTAssertFalse(invalidatedF1IsCurrent, "The second accepted cut must invalidate F1")
+            await firstMaterializer.release(sessionID: fixture.agentSessionID)
+
+            let secondProjectionValue = try await secondMaterializer.commit(secondPreparation)
+            let secondProjection = try XCTUnwrap(secondProjectionValue)
+            let secondRoot = try XCTUnwrap(secondProjection.physicalRootRefs.first)
+            let secondIsCurrent = await secondStore
+                .publishedSeededAuthorityIsCurrentForTesting(rootID: secondRoot.id)
+            XCTAssertTrue(secondIsCurrent)
+            let diagnostics = await secondStore.readSearchRootDiagnosticsSnapshot()
+            XCTAssertEqual(
+                diagnostics.first { $0.rootID == secondRoot.id }?.crawlCount,
+                0,
+                "The available recapture must be validated instead of returning stale F1 and full-crawling"
+            )
+            let read = try await secondStore.readContent(
+                rootID: secondRoot.id,
+                relativePath: "Tracked.swift"
+            )
+            XCTAssertEqual(read, "let value = 1\n")
+            let catalog = await secondStore.searchCatalogSnapshot(
+                rootScope: fixture.scope(for: prepared.binding)
+            )
+            XCTAssertEqual(catalog.roots.map(\.id), [secondRoot.id])
+
+            await secondMaterializer.release(sessionID: fixture.agentSessionID)
+        }
+
+        func testReleasingOneCoalescedConsumerKeepsSiblingPublicationCurrent() async throws {
+            let fixture = try PendingSeededRootFixture()
+            defer { fixture.cleanup() }
+            let prepared = try await fixture.prepareWorktree()
+            let firstStore = WorkspaceFileContextStore()
+            let secondStore = WorkspaceFileContextStore()
+            let firstMaterializer = WorkspaceRootBindingProjectionMaterializer(store: firstStore)
+            let secondMaterializer = WorkspaceRootBindingProjectionMaterializer(store: secondStore)
+
+            let firstPreparation = try await firstMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            let secondPreparation = try await secondMaterializer.prepare(
+                sessionID: fixture.agentSessionID,
+                bindings: [prepared.binding],
+                startupContext: fixture.startupContext(serving: true),
+                initializationHintsByBindingID: [prepared.binding.id: prepared.hint]
+            )
+            let firstProjectionValue = try await firstMaterializer.commit(firstPreparation)
+            let secondProjectionValue = try await secondMaterializer.commit(secondPreparation)
+            let firstProjection = try XCTUnwrap(firstProjectionValue)
+            let secondProjection = try XCTUnwrap(secondProjectionValue)
+            let firstRoot = try XCTUnwrap(firstProjection.physicalRootRefs.first)
+            let secondRoot = try XCTUnwrap(secondProjection.physicalRootRefs.first)
+
+            await firstMaterializer.release(sessionID: fixture.agentSessionID)
+            let firstRootsAfterRelease = await firstStore.roots()
+            let siblingIsCurrent = await secondStore.publishedSeededAuthorityIsCurrentForTesting(rootID: secondRoot.id)
+            XCTAssertFalse(firstRootsAfterRelease.contains { $0.id == firstRoot.id })
+            XCTAssertTrue(siblingIsCurrent)
+            let siblingRead = try await secondStore.readContent(
+                rootID: secondRoot.id,
+                relativePath: "Tracked.swift"
+            )
+            XCTAssertEqual(siblingRead, "let value = 1\n")
+            let siblingCatalog = await secondStore.searchCatalogSnapshot(
+                rootScope: fixture.scope(for: prepared.binding)
+            )
+            XCTAssertEqual(siblingCatalog.roots.map(\.id), [secondRoot.id])
+
+            await secondMaterializer.release(sessionID: fixture.agentSessionID)
         }
 
         func testPublishedAuthorityBlocksCatalogAndReadUntilFinalMutationCompletion() async throws {

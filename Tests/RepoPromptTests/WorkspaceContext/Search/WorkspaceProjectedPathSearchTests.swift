@@ -23,19 +23,10 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
             "Sources/Ångström.swift", "Sources/line\nbreak.swift"
         ]
         let entries = makeEntries(paths: finalPaths, root: root)
-        let plan = WorkspaceRootSeedPlan(
-            snapshotIdentity: snapshot.identity,
-            targetTreeOID: Support.oid("f"),
-            relativeFilePaths: Set(finalPaths),
-            relativeFolderPaths: ["Sources"],
-            baseRelativeFilePaths: Set(snapshot.searchBase.relativePaths),
-            changedRelativeFilePaths: ["Added 文件.swift", "Deleted.swift", "Old.swift", "Renamed.swift"],
-            tombstonedBaseRelativeFilePaths: ["Deleted.swift", "Old.swift"],
-            verifiedPathCount: 4
-        )
         let projected = try XCTUnwrap(WorkspaceProjectedPathSearchIndex(
             snapshot: snapshot,
-            plan: plan,
+            changedRelativeFilePaths: ["Added 文件.swift", "Deleted.swift", "Old.swift", "Renamed.swift"],
+            tombstonedBaseRelativeFilePaths: ["Deleted.swift", "Old.swift"],
             root: root,
             authoritativeEntries: entries
         ))
@@ -80,16 +71,6 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
         ])
         let finalPaths = ["A.swift", "Added 文件.swift", "Sources/Keep.swift", "Sources/Ångström.swift"]
         let entries = makeEntries(paths: finalPaths, root: root)
-        let plan = WorkspaceRootSeedPlan(
-            snapshotIdentity: snapshot.identity,
-            targetTreeOID: Support.oid("f"),
-            relativeFilePaths: Set(finalPaths),
-            relativeFolderPaths: ["Sources"],
-            baseRelativeFilePaths: Set(snapshot.searchBase.relativePaths),
-            changedRelativeFilePaths: ["Added 文件.swift", "Deleted.swift"],
-            tombstonedBaseRelativeFilePaths: ["Deleted.swift"],
-            verifiedPathCount: 2
-        )
         let identity = WorkspaceSearchRootPathIndexIdentity(
             rootID: root.id,
             lifetimeID: UUID(),
@@ -99,7 +80,8 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
             identity: identity,
             root: root,
             projectedSnapshot: snapshot,
-            projectedPlan: plan,
+            changedRelativeFilePaths: ["Added 文件.swift", "Deleted.swift"],
+            tombstonedBaseRelativeFilePaths: ["Deleted.swift"],
             entries: entries
         ))
         let materialized = WorkspaceSearchRootPathIndex(
@@ -126,22 +108,12 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
         }
     }
 
-    func testRealProjectedPatchesAccumulatePathsPromoteAt32AndRetainOlderGenerations() throws {
+    func testRealProjectedPatchesCross32CompactSegmentsAndRetainOlderGenerations() throws {
         let root = WorkspaceRootRecord(name: "Patch Target", fullPath: "/tmp/Patch Target", kind: .sessionWorktree)
         let basePaths = (0 ..< 40).map { "File\($0).swift" }
         let snapshot = Support.snapshot(paths: basePaths.map { ($0, "100644") })
         let idsByBasePath = Dictionary(uniqueKeysWithValues: basePaths.map { ($0, UUID()) })
         var entries = makeEntries(paths: basePaths, root: root, idsByPath: idsByBasePath)
-        let plan = WorkspaceRootSeedPlan(
-            snapshotIdentity: snapshot.identity,
-            targetTreeOID: snapshot.compatibilityKey.treeOID,
-            relativeFilePaths: Set(basePaths),
-            relativeFolderPaths: [],
-            baseRelativeFilePaths: Set(basePaths),
-            changedRelativeFilePaths: [],
-            tombstonedBaseRelativeFilePaths: [],
-            verifiedPathCount: 0
-        )
         let lifetimeID = UUID()
         func identity(_ generation: UInt64) -> WorkspaceSearchRootPathIndexIdentity {
             .init(rootID: root.id, lifetimeID: lifetimeID, topologyGeneration: generation)
@@ -150,7 +122,8 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
             identity: identity(1),
             root: root,
             projectedSnapshot: snapshot,
-            projectedPlan: plan,
+            changedRelativeFilePaths: [],
+            tombstonedBaseRelativeFilePaths: [],
             entries: entries
         ))
         XCTAssertEqual(initial.projectedAccumulatedChangedPathCount, 0)
@@ -187,14 +160,47 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
         XCTAssertEqual(retainedAt31.projectedAccumulatedChangedPathCount, 31)
         assertSearchParity(retainedAt31, entries: entries, root: root, identity: identity(3))
 
-        let promoted = try retainedAt31.applyingPatch(
+        var beyondFormerThreshold = try retainedAt31.applyingPatch(
             identity: identity(4),
             entries: entries,
             changedFileIDs: [XCTUnwrap(idsByBasePath["File29.swift"])]
         )
-        XCTAssertEqual(promoted.buildKind, .full)
-        XCTAssertNil(promoted.projectedAccumulatedChangedPathCount)
-        assertSearchParity(promoted, entries: entries, root: root, identity: identity(4))
+        XCTAssertEqual(beyondFormerThreshold.buildKind, .projectedReuse)
+        XCTAssertEqual(beyondFormerThreshold.projectedAccumulatedChangedPathCount, 32)
+        assertSearchParity(beyondFormerThreshold, entries: entries, root: root, identity: identity(4))
+
+        var retainedBeforeCompaction: WorkspaceSearchRootPathIndex?
+        for iteration in 0 ..< 20 {
+            let renamedPath = "Cycle\(iteration)-文件.swift"
+            entries.removeAll { $0.id == renamedID }
+            entries.append(makeEntry(path: renamedPath, id: renamedID, root: root))
+            entries.sort(by: WorkspaceFileContextStore.searchCatalogEntryPrecedes)
+            beyondFormerThreshold = beyondFormerThreshold.applyingPatch(
+                identity: identity(UInt64(5 + iteration)),
+                entries: entries,
+                changedFileIDs: [renamedID]
+            )
+            if iteration == 12 {
+                retainedBeforeCompaction = beyondFormerThreshold
+                XCTAssertEqual(beyondFormerThreshold.overlaySegmentCountForTesting, 16)
+            }
+            assertSearchParity(
+                beyondFormerThreshold,
+                entries: entries,
+                root: root,
+                identity: identity(UInt64(5 + iteration))
+            )
+        }
+        XCTAssertLessThanOrEqual(beyondFormerThreshold.overlaySegmentCountForTesting, 16)
+        XCTAssertEqual(beyondFormerThreshold.buildKind, .projectedReuse)
+        XCTAssertEqual(
+            beyondFormerThreshold.search("Cycle19-文件", limit: 1).map(\.entry.id),
+            [renamedID]
+        )
+
+        let retained = try XCTUnwrap(retainedBeforeCompaction)
+        XCTAssertEqual(retained.search("Cycle12-文件", limit: 1).map(\.entry.id), [renamedID])
+        XCTAssertTrue(retained.search("Cycle19-文件", limit: 1).isEmpty)
 
         XCTAssertEqual(initial.buildKind, .projectedReuse)
         XCTAssertEqual(initial.projectedAccumulatedChangedPathCount, 0)
@@ -205,38 +211,42 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
         XCTAssertEqual(retainedAt31.search("Renamed.swift", limit: 10).map(\.entry.id), [renamedID])
     }
 
-    func testProjectionThresholdAndCrossRootIsolation() throws {
+    func testProjectionHasNoEntryCountFallbackAndPreservesCrossRootIsolation() throws {
         let root = WorkspaceRootRecord(name: "Target", fullPath: "/tmp/Target", kind: .sessionWorktree)
         let paths = (0 ..< 40).map { "File\($0).swift" }
         let snapshot = Support.snapshot(paths: paths.map { ($0, "100644") })
         let entries = makeEntries(paths: paths, root: root)
 
-        func plan(changedCount: Int) -> WorkspaceRootSeedPlan {
-            WorkspaceRootSeedPlan(
-                snapshotIdentity: snapshot.identity,
-                targetTreeOID: Support.oid("f"),
-                relativeFilePaths: Set(paths),
-                relativeFolderPaths: [],
-                baseRelativeFilePaths: Set(paths),
-                changedRelativeFilePaths: Set(paths.prefix(changedCount)),
-                tombstonedBaseRelativeFilePaths: [],
-                verifiedPathCount: changedCount
-            )
-        }
-
         let retained = try XCTUnwrap(WorkspaceProjectedPathSearchIndex(
             snapshot: snapshot,
-            plan: plan(changedCount: 31),
+            changedRelativeFilePaths: Set(paths.prefix(31)),
+            tombstonedBaseRelativeFilePaths: [],
             root: root,
             authoritativeEntries: entries
         ))
         XCTAssertEqual(retained.overlayEntryCount, 31)
-        XCTAssertNil(WorkspaceProjectedPathSearchIndex(
+        let retainedAt32 = try XCTUnwrap(WorkspaceProjectedPathSearchIndex(
             snapshot: snapshot,
-            plan: plan(changedCount: 32),
+            changedRelativeFilePaths: Set(paths.prefix(32)),
+            tombstonedBaseRelativeFilePaths: [],
             root: root,
             authoritativeEntries: entries
         ))
+        XCTAssertEqual(retainedAt32.overlayEntryCount, 32)
+        let materialized = WorkspaceSearchRootPathIndex(
+            identity: .init(rootID: root.id, lifetimeID: UUID(), topologyGeneration: 1),
+            rootPath: root.standardizedFullPath,
+            entries: entries
+        )
+        for query in ["", "File", "*.swift", root.standardizedFullPath] {
+            for limit in [1, 7, 100] {
+                XCTAssertEqual(
+                    retainedAt32.search(query, limit: limit).map(\.entry.id),
+                    materialized.search(query, limit: limit).map(\.entry.id),
+                    "query=\(query) limit=\(limit)"
+                )
+            }
+        }
 
         XCTAssertTrue(retained.search("/tmp/OtherRoot", limit: 100).isEmpty)
         XCTAssertTrue(retained.search("OtherRoot/File1", limit: 100).isEmpty)
@@ -244,6 +254,58 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
             retained.search(root.standardizedFullPath, limit: 100).map(\.entry.rootID),
             Array(repeating: root.id, count: paths.count)
         )
+    }
+
+    func testMaterializedOverlaySegmentsCompactWithoutInvalidatingRetainedGeneration() throws {
+        let root = WorkspaceRootRecord(name: "Segment Root", fullPath: "/tmp/Segment Root")
+        let basePaths = (0 ..< 80).map { "Base\($0).swift" }
+        let idsByPath = Dictionary(uniqueKeysWithValues: basePaths.map { ($0, UUID()) })
+        var entries = makeEntries(paths: basePaths, root: root, idsByPath: idsByPath)
+        let lifetimeID = UUID()
+        func identity(_ generation: UInt64) -> WorkspaceSearchRootPathIndexIdentity {
+            .init(rootID: root.id, lifetimeID: lifetimeID, topologyGeneration: generation)
+        }
+
+        var index = WorkspaceSearchRootPathIndex(
+            identity: identity(0),
+            rootPath: root.standardizedFullPath,
+            entries: entries
+        )
+        let mutableID = try XCTUnwrap(idsByPath["Base2.swift"])
+        let deletedID = try XCTUnwrap(idsByPath["Base0.swift"])
+        var retainedBeforeCompaction: WorkspaceSearchRootPathIndex?
+        var retainedEntries: [WorkspaceSearchCatalogEntry] = []
+
+        for iteration in 0 ..< 40 {
+            entries.removeAll { entry in
+                entry.id == mutableID || (iteration == 0 && entry.id == deletedID)
+            }
+            entries.append(makeEntry(path: "Mutable \(iteration) Å.swift", id: mutableID, root: root))
+            entries.sort(by: WorkspaceFileContextStore.searchCatalogEntryPrecedes)
+            var changedFileIDs: Set<UUID> = [mutableID]
+            if iteration == 0 { changedFileIDs.insert(deletedID) }
+            index = index.applyingPatch(
+                identity: identity(UInt64(iteration + 1)),
+                entries: entries,
+                changedFileIDs: changedFileIDs
+            )
+            XCTAssertEqual(index.buildKind, .overlay)
+            if iteration == 15 {
+                retainedBeforeCompaction = index
+                retainedEntries = entries
+                XCTAssertEqual(index.overlaySegmentCountForTesting, 16)
+            }
+        }
+
+        XCTAssertLessThanOrEqual(index.overlaySegmentCountForTesting, 16)
+        assertSearchParity(index, entries: entries, root: root, identity: identity(40))
+        XCTAssertTrue(index.search("Base0.swift", limit: 10).isEmpty)
+        XCTAssertEqual(index.search("Mutable 39 Å", limit: 10).map(\.entry.id), [mutableID])
+
+        let retained = try XCTUnwrap(retainedBeforeCompaction)
+        assertSearchParity(retained, entries: retainedEntries, root: root, identity: identity(16))
+        XCTAssertEqual(retained.search("Mutable 15 Å", limit: 10).map(\.entry.id), [mutableID])
+        XCTAssertTrue(retained.search("Mutable 39 Å", limit: 10).isEmpty)
     }
 
     func testProjectedMatcherUsesBoundedTopKStorageAndReusableScratch() async {
@@ -304,19 +366,10 @@ final class WorkspaceProjectedPathSearchTests: XCTestCase {
         let snapshot = Support.snapshot(paths: [("A.swift", "100644")])
         let projectedEntries = makeEntries(paths: ["A.swift"], root: root)
         let authoritativeEntries = makeEntries(paths: ["A.swift", "B.swift"], root: root)
-        let plan = WorkspaceRootSeedPlan(
-            snapshotIdentity: snapshot.identity,
-            targetTreeOID: snapshot.compatibilityKey.treeOID,
-            relativeFilePaths: ["A.swift"],
-            relativeFolderPaths: [],
-            baseRelativeFilePaths: ["A.swift"],
-            changedRelativeFilePaths: [],
-            tombstonedBaseRelativeFilePaths: [],
-            verifiedPathCount: 0
-        )
         let projection = try XCTUnwrap(WorkspaceProjectedPathSearchIndex(
             snapshot: snapshot,
-            plan: plan,
+            changedRelativeFilePaths: [],
+            tombstonedBaseRelativeFilePaths: [],
             root: root,
             authoritativeEntries: projectedEntries
         ))

@@ -295,6 +295,15 @@ actor GitWorkspaceMetadataMonitor {
             acceptedEvent(repositoryKey: repositoryKey, kinds: kinds)
         }
 
+        /// Models the callback acceptance cut before the actor-delivery task is
+        /// scheduled. This lets currentness tests deterministically exercise a
+        /// lagging consumer while the accepted watermark has already advanced.
+        func acceptEventWithoutDeliveryForTesting(
+            repositoryKey: GitWorkspaceAuthorityRepositoryKey
+        ) {
+            acceptedWatermarks.accept(repositoryKey)
+        }
+
         func flushForTesting(repositoryKey: GitWorkspaceAuthorityRepositoryKey) async {
             records[repositoryKey]?.sourcesByTargetKey.values.forEach { $0.flushSync() }
         }
