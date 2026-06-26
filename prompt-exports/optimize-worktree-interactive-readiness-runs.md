@@ -831,3 +831,77 @@ Projected artifact:
   and this append-only identity correction. Retention remains pending the
   requested exact focused validation and independent re-review; no new live or
   performance claim is introduced here.
+
+## Worktree startup live benchmark — 20260626T211823Z-3d45d8c0
+
+- Plan SHA-256: `892f2d5c6a20d60a2505f80cadc4c5bc94a879b56b694abf37cd1fcdcd81fdc7`
+- Decision: **fail**
+- Generated: `2026-06-26T21:18:23.910608Z`
+
+| cohort | metric | N | p50 µs | p95 µs | CV |
+|---|---|---:|---:|---:|---:|
+| `warm/linked-worktree/forced-full/1` | `materialize_to_root_ready` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `materialize_to_first_search` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `materialize_to_first_read` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `interactive_readiness_us` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `first_search` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `first_read` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `first_codemap` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `warm_codemap` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `passive_tree` | 0 | None | None | None |
+| `warm/linked-worktree/forced-full/1` | `selection` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `materialize_to_root_ready` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `materialize_to_first_search` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `materialize_to_first_read` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `interactive_readiness_us` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `first_search` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `first_read` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `first_codemap` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `warm_codemap` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `passive_tree` | 0 | None | None | None |
+| `warm/linked-worktree/projected/1` | `selection` | 0 | None | None | None |
+
+### Route and work attribution
+
+| cohort | primary retained | follow-on accepted | routes | fallbacks | Git commands p50 | Git µs p50 | FS ops p50 | FS µs p50 | CPU ms | peak physical Δ MB | retained physical Δ MB |
+|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `warm/linked-worktree/forced-full/1` | 0 | 5 | `{}` | `{}` | None | None | None | None | None | None | None |
+| `warm/linked-worktree/projected/1` | 0 | 0 | `{}` | `{}` | None | None | None | None | None | None | None |
+
+### Gates
+
+| gate | result |
+|---|---|
+| projected interactive-readiness p95 improvement >= 30% | `incomplete` |
+| zero correctness mismatches | `incomplete` |
+| zero invalid attempted samples | `fail` |
+| zero eligible warm fallbacks | `fail` |
+| other p95 regression <= 10% | `incomplete` |
+| peak memory regression <= 10% | `incomplete` |
+| complete route/process/checkout/width matrix | `incomplete` |
+| exact actual routes and zero fallbacks | `incomplete` |
+| complete Git/filesystem attribution | `incomplete` |
+| complete CPU attribution | `incomplete` |
+| stable owned-resource teardown | `pass` |
+| required external process/main-root evidence | `incomplete` |
+
+### Evidence
+
+- Correctness results: `{'campaign_count': 0, 'mismatch_count': 0, 'covered_scenarios': []}`
+- Invalid attempted samples: `12`
+- Invalid retained samples: `10`
+- Primary-invalid attempted samples: `12`
+- Follow-on-failed attempted samples: `6`
+- Artifact directories: `/private/tmp/rpce-worktree-startup/v1/20260626T210605Z-warm-forced-full-w1-d854359d, /private/tmp/rpce-worktree-startup/v1/20260626T211136Z-warm-projected-w1-aa4258a3`
+
+### 2026-06-26 prefix-cache final closure measurement detail
+
+- Single approved post-closure relaunch: conductor ticket `7b085439-023d-4db7-95e4-bce309211b4a`; app PID `14526`; CLI SHA-256 `c00311f7ad82d44d5f3867fccf584950cae595afef93986e4a73e5fa48cc8b0c`.
+- Fresh live scope: window `1`, workspace `163E658F-4313-4894-B003-595287E59AE9`, context `C4022447-5D29-4E76-99CA-36D6826F2428`, root `0E948144-824D-412F-97F1-347E0B4DD59A`, sole root `/Users/pvncher/Documents/Git/repoprompt-ce-release`; commit `eaaf34f1d8213d1ff30ca70ba6be9014e1d4f9fe`; tracked files `2142`.
+- Primary plan file/embedded SHA-256: `ac11e6da69e7dfa7144d774c58287b2752b7b53fb9020fff2133961181d5f3f2` / `892f2d5c6a20d60a2505f80cadc4c5bc94a879b56b694abf37cd1fcdcd81fdc7`; confirmation: `c8d41f1bab84b46909eb83fe5dd2818950e2094fd81159d4f53e64a3c1431030` / `c2d265b5b9de209aba36c05a5909334dea70bd688f8563b1a1bd9bde0f2e4d4a`.
+- Exact preflights passed at `/tmp/rpce-worktree-startup/v1/20260626T210528Z-preflight-13b9f1d5` and `/tmp/rpce-worktree-startup/v1/20260626T210530Z-preflight-f2b42736`.
+- Forced-full raw diagnostic routes were exactly `{"fullCrawl":1}` with `{}` fallbacks for all six ordinals. All five retained follow-ons passed, but no primary value was accepted because each resource proof reported `inconsistent_resident_peak_delta`, `inconsistent_resident_retained_delta`, and `inconsistent_physical_footprint_retained_delta`. Unaccepted retained raw interactive-readiness values were `[1071739, 942214, 920476, 1069231, 936891]` µs (p50 `942214`, nearest-rank p95 `1071739`, population CV `6.8458%`).
+- Projected preparation succeeded in `7212568` µs with terminal `admitted`, route `diffSeedServing`, and exact counters: authority captures `2`; prefix cache misses `1`, hits `1`, admissions `1`, scans `1`; bypasses/coalesces/invalidations/evictions all `0`; no saturated counter. The scan enumerated `115864` candidates, pruned `209` directories, and produced `340` control records.
+- Every projected ordinal then recorded mixed raw routes `{"diffSeedServing":1,"fullCrawl":1}` and fallback `{"compatibilityMismatch":1}`. No projected primary or follow-on was accepted. Unaccepted retained raw interactive-readiness values were `[1175865, 1343948, 1376082, 1304783, 1251463]` µs (p50 `1304783`, nearest-rank p95 `1376082`, population CV `5.4851%`).
+- Stop rule applied: no repair, replacement, numeric rerun, confirmation, or correctness-only Agent Mode smoke. Confirmation was both untriggered (CVs were below 50%) and barred because no valid primary comparison existed and projected fell back.
+- Aggregate: `/tmp/rpce-worktree-startup/iteration2-prefix-cache-final-20260626T210455Z/aggregate/summary.json` (SHA-256 `ca9b22b67653727850fa26226edb52a5c32f736892278841339adbc8013feafb`). Final owned cleanup proof: `/tmp/rpce-worktree-startup/iteration2-prefix-cache-final-20260626T210455Z/final-owned-cleanup-proof.json`; 12/12 sessions terminal, 12/12 worktrees absent, samplers stopped, route/diagnostics restored, benchmark gate unchanged, sole workspace root restored, exact ownership marker removed, harness branch refs preserved.
