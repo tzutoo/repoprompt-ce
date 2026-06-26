@@ -253,6 +253,7 @@
             let armedAtNanoseconds: UInt64
             let baselineEventEvictionCount: Int
             let baselineReceiptDecisionEvictionCount: Int
+            let baselineDeltaCompatibilityEvaluationEvictionCount: Int
             var agentSessionID: UUID?
             var startAttemptID: UUID?
             var metricTag: WorktreeStartupInstrumentation.BenchmarkMetricTag?
@@ -550,6 +551,8 @@
                     armedAtNanoseconds: now,
                     baselineEventEvictionCount: instrumentation.eventEvictionCount,
                     baselineReceiptDecisionEvictionCount: instrumentation.receiptDecisionEvictionCount,
+                    baselineDeltaCompatibilityEvaluationEvictionCount: instrumentation
+                        .deltaCompatibilityEvaluationEvictionCount,
                     agentSessionID: nil,
                     startAttemptID: nil,
                     metricTag: nil
@@ -779,6 +782,18 @@
                 let receiptDecisionAmbiguous = receiptDecisions.contains {
                     $0.ambiguousOrDuplicate || $0.creationAttemptCount > 1
                 }
+                let deltaCompatibilityEvaluations = instrumentation.deltaCompatibilityEvaluations.filter {
+                    $0.correlationID == correlationID
+                }
+                let deltaCompatibilityEvaluationEvicted = instrumentation
+                    .deltaCompatibilityEvaluationEvictionCount
+                    > sample.baselineDeltaCompatibilityEvaluationEvictionCount
+                let deltaCompatibilityEvaluationAmbiguous = deltaCompatibilityEvaluations.contains { $0.duplicate }
+                let deltaCompatibilityEvaluationContradictory = deltaCompatibilityEvaluations
+                    .contains { $0.contradictory }
+                let deltaCompatibilityEvaluationValid = !deltaCompatibilityEvaluationEvicted
+                    && !deltaCompatibilityEvaluationAmbiguous
+                    && !deltaCompatibilityEvaluationContradictory
                 let rootReady = eventTimes[.rootReady] != nil
                 let receiptDecisionValid = !receiptDecisionEvicted
                     && receiptDecisions.count <= 1
@@ -828,13 +843,21 @@
                         "interactive_readiness_us": interactiveReadiness.map { $0 as Any } ?? NSNull(),
                         "event_buffer_evicted": eventEvicted,
                         "valid": !eventEvicted && sample.metricTag != nil
-                            && receiptDecisionValid && boundaryEvidence.valid
+                            && receiptDecisionValid && deltaCompatibilityEvaluationValid
+                            && boundaryEvidence.valid
                     ],
                     "receipt_decision_count": receiptDecisions.count,
                     "terminal_receipt_decision_count": terminalReceiptDecisionCount,
                     "receipt_decision_buffer_evicted": receiptDecisionEvicted,
                     "receipt_decision_ambiguous": receiptDecisionAmbiguous,
                     "receipt_decisions": receiptDecisions.map(Self.receiptDecisionPayload),
+                    "delta_compatibility_evaluation_count": deltaCompatibilityEvaluations.count,
+                    "delta_compatibility_evaluation_buffer_evicted": deltaCompatibilityEvaluationEvicted,
+                    "delta_compatibility_evaluation_ambiguous": deltaCompatibilityEvaluationAmbiguous,
+                    "delta_compatibility_evaluation_contradictory": deltaCompatibilityEvaluationContradictory,
+                    "delta_compatibility_evaluations": deltaCompatibilityEvaluations.map(
+                        Self.deltaCompatibilityEvaluationPayload
+                    ),
                     "git": Self.gitPayload(git, families: gitFamilies, priorities: gitPriorities),
                     "work": Self.workPayload(metrics)
                 ]
@@ -1055,6 +1078,39 @@
             payload["projection"] = decision.projection.map(receiptProjectionPayload) ?? NSNull()
             payload["consumption"] = decision.consumption.map(receiptConsumptionPayload) ?? NSNull()
             return payload
+        }
+
+        private static func deltaCompatibilityEvaluationPayload(
+            _ record: WorktreeStartupInstrumentation.DeltaCompatibilityEvaluationRecord
+        ) -> [String: Any] {
+            let evaluation = record.evaluation
+            return [
+                "correlation_id": record.correlationID.uuidString,
+                "source": evaluation.source.rawValue,
+                "decision": evaluation.decision.rawValue,
+                "field_evaluations": evaluation.fieldEvaluations.map {
+                    [
+                        "field": $0.field.rawValue,
+                        "decision": $0.decision.rawValue,
+                        "base_digest": $0.baseDigest,
+                        "target_digest": $0.targetDigest
+                    ]
+                },
+                "mismatched_fields": evaluation.mismatchedFields.map(\.rawValue),
+                "correction_rule_applied": evaluation.correctionRuleApplied.rawValue,
+                "tree_relation": evaluation.treeRelation.rawValue,
+                "exact_snapshot_lookup_reached": record.exactSnapshotLookupReached,
+                "exact_snapshot_lookup_passed": record.exactSnapshotLookupPassed,
+                "target_authority_comparison_reached": record.targetAuthorityComparisonReached,
+                "target_authority_comparison_passed": record.targetAuthorityComparisonPassed,
+                "current_search_abi_reached": record.currentSearchABIReached,
+                "current_search_abi_matched": optional(record.currentSearchABIMatched),
+                "catalog_policy_comparison_reached": record.catalogPolicyComparisonReached,
+                "catalog_policy_matched": optional(record.catalogPolicyMatched),
+                "terminal_fallback": optionalRawValue(record.terminalFallback),
+                "duplicate": record.duplicate,
+                "contradictory": record.contradictory
+            ]
         }
 
         private static func receiptCreationPayload(

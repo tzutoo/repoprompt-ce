@@ -152,6 +152,67 @@ struct WorkspaceRootValidatedCatalogProjection {
     let policyIdentity: WorkspaceRootCatalogPolicyIdentity
 }
 
+enum WorkspaceRootSeedDeltaCompatibilitySource: String, CaseIterable, Hashable {
+    case hintEvaluator
+    case planner
+}
+
+enum WorkspaceRootSeedDeltaCompatibilityDecision: String, Hashable {
+    case compatible
+    case incompatible
+}
+
+enum WorkspaceRootSeedDeltaCompatibilityCorrectionRule: String, Hashable {
+    case none
+    case canonicalMissingResolvedExcludesFileIdentity
+    case canonicalMissingResolvedAttributesFileIdentity
+    case canonicalMissingResolvedExternalAuthorityIdentities
+}
+
+enum WorkspaceRootSeedDeltaCompatibilityField: String, CaseIterable, Hashable {
+    case repositoryNamespace
+    case objectFormat
+    case repositoryRelativeRootPrefix
+    case inventorySchemaVersion
+    case mandatoryIgnorePolicyIdentity
+    case committedIgnoreControlDigest
+    case configuredIgnoreAuthorityDigest
+    case attributePolicyDigest
+    case sparsePolicyDigest
+    case searchABIMatcherSchemaVersion
+    case searchABIProjectedKeySchemaVersion
+    case searchABIComparatorSchemaVersion
+    case searchABIPathNormalizationSchemaVersion
+    case resolvedExcludesFileIdentity
+    case resolvedAttributesFileIdentity
+}
+
+enum WorkspaceRootSeedDeltaCompatibilityFieldDecision: String, Hashable {
+    case match
+    case mismatch
+}
+
+enum WorkspaceRootSeedDeltaCompatibilityTreeRelation: String, Hashable {
+    case sameExcludedFromDeltaCompatibility
+    case differentExcludedFromDeltaCompatibility
+}
+
+struct WorkspaceRootSeedDeltaCompatibilityFieldEvaluation: Hashable {
+    let field: WorkspaceRootSeedDeltaCompatibilityField
+    let decision: WorkspaceRootSeedDeltaCompatibilityFieldDecision
+    let baseDigest: String
+    let targetDigest: String
+}
+
+struct WorkspaceRootSeedDeltaCompatibilityEvaluation: Hashable {
+    let source: WorkspaceRootSeedDeltaCompatibilitySource
+    let decision: WorkspaceRootSeedDeltaCompatibilityDecision
+    let fieldEvaluations: [WorkspaceRootSeedDeltaCompatibilityFieldEvaluation]
+    let mismatchedFields: [WorkspaceRootSeedDeltaCompatibilityField]
+    let correctionRuleApplied: WorkspaceRootSeedDeltaCompatibilityCorrectionRule
+    let treeRelation: WorkspaceRootSeedDeltaCompatibilityTreeRelation
+}
+
 struct WorkspaceRootSeedCompatibilityKey: Hashable {
     static let currentInventorySchemaVersion = 5
 
@@ -174,20 +235,151 @@ struct WorkspaceRootSeedCompatibilityKey: Hashable {
         policyIdentity = authority.policyIdentity
     }
 
+    init(
+        repositoryNamespace: GitBlobRepositoryNamespace,
+        objectFormat: GitObjectFormat,
+        treeOID: GitObjectID,
+        repositoryRelativeRootPrefix: GitRepositoryRelativeRootPrefix,
+        inventorySchemaVersion: Int = Self.currentInventorySchemaVersion,
+        policyIdentity: GitWorkspacePolicyIdentity
+    ) {
+        self.repositoryNamespace = repositoryNamespace
+        self.objectFormat = objectFormat
+        self.treeOID = treeOID
+        self.repositoryRelativeRootPrefix = repositoryRelativeRootPrefix
+        self.inventorySchemaVersion = inventorySchemaVersion
+        self.policyIdentity = policyIdentity
+    }
+
     var searchABI: GitWorkspaceSearchABIIdentity {
         policyIdentity.searchABI
+    }
+
+    func deltaCompatibilityEvaluation(
+        with base: Self,
+        source: WorkspaceRootSeedDeltaCompatibilitySource,
+        correctionRuleApplied: WorkspaceRootSeedDeltaCompatibilityCorrectionRule = .none
+    ) -> WorkspaceRootSeedDeltaCompatibilityEvaluation {
+        let fieldEvaluations = Self.deltaCompatibilityFieldEvaluations(base: base, target: self)
+        let mismatchedFields = fieldEvaluations.compactMap {
+            $0.decision == .mismatch ? $0.field : nil
+        }
+        return WorkspaceRootSeedDeltaCompatibilityEvaluation(
+            source: source,
+            decision: mismatchedFields.isEmpty ? .compatible : .incompatible,
+            fieldEvaluations: fieldEvaluations,
+            mismatchedFields: mismatchedFields,
+            correctionRuleApplied: correctionRuleApplied,
+            treeRelation: treeOID == base.treeOID
+                ? .sameExcludedFromDeltaCompatibility
+                : .differentExcludedFromDeltaCompatibility
+        )
     }
 
     /// Delta reuse deliberately excludes the committed tree object from compatibility.
     /// The planner proves that difference with a bounded tree-to-tree delta; every policy,
     /// prefix, repository, and matcher field must still match exactly.
     func isDeltaCompatible(with other: Self) -> Bool {
-        repositoryNamespace == other.repositoryNamespace
-            && objectFormat == other.objectFormat
-            && repositoryRelativeRootPrefix == other.repositoryRelativeRootPrefix
-            && inventorySchemaVersion == other.inventorySchemaVersion
-            && policyIdentity == other.policyIdentity
-            && searchABI == other.searchABI
+        Self.deltaCompatibilityFieldEvaluations(base: other, target: self).allSatisfy {
+            $0.decision == .match
+        }
+    }
+
+    private static func deltaCompatibilityFieldEvaluations(
+        base: Self,
+        target: Self
+    ) -> [WorkspaceRootSeedDeltaCompatibilityFieldEvaluation] {
+        let basePolicy = base.policyIdentity
+        let targetPolicy = target.policyIdentity
+        let baseABI = basePolicy.searchABI
+        let targetABI = targetPolicy.searchABI
+        return [
+            field(.repositoryNamespace, base.repositoryNamespace.rawValue, target.repositoryNamespace.rawValue),
+            field(.objectFormat, base.objectFormat.rawValue, target.objectFormat.rawValue),
+            field(
+                .repositoryRelativeRootPrefix,
+                base.repositoryRelativeRootPrefix.value,
+                target.repositoryRelativeRootPrefix.value
+            ),
+            field(.inventorySchemaVersion, base.inventorySchemaVersion, target.inventorySchemaVersion),
+            field(
+                .mandatoryIgnorePolicyIdentity,
+                basePolicy.mandatoryIgnorePolicyIdentity,
+                targetPolicy.mandatoryIgnorePolicyIdentity
+            ),
+            field(
+                .committedIgnoreControlDigest,
+                basePolicy.committedIgnoreControlDigest,
+                targetPolicy.committedIgnoreControlDigest
+            ),
+            field(
+                .configuredIgnoreAuthorityDigest,
+                basePolicy.configuredIgnoreAuthorityDigest,
+                targetPolicy.configuredIgnoreAuthorityDigest
+            ),
+            field(.attributePolicyDigest, basePolicy.attributePolicyDigest, targetPolicy.attributePolicyDigest),
+            field(.sparsePolicyDigest, basePolicy.sparsePolicyDigest, targetPolicy.sparsePolicyDigest),
+            field(
+                .searchABIMatcherSchemaVersion,
+                baseABI.matcherSchemaVersion,
+                targetABI.matcherSchemaVersion
+            ),
+            field(
+                .searchABIProjectedKeySchemaVersion,
+                baseABI.projectedKeySchemaVersion,
+                targetABI.projectedKeySchemaVersion
+            ),
+            field(
+                .searchABIComparatorSchemaVersion,
+                baseABI.comparatorSchemaVersion,
+                targetABI.comparatorSchemaVersion
+            ),
+            field(
+                .searchABIPathNormalizationSchemaVersion,
+                baseABI.pathNormalizationSchemaVersion,
+                targetABI.pathNormalizationSchemaVersion
+            ),
+            field(
+                .resolvedExcludesFileIdentity,
+                contentIdentityMaterial(basePolicy.resolvedExcludesFileIdentity),
+                contentIdentityMaterial(targetPolicy.resolvedExcludesFileIdentity)
+            ),
+            field(
+                .resolvedAttributesFileIdentity,
+                contentIdentityMaterial(basePolicy.resolvedAttributesFileIdentity),
+                contentIdentityMaterial(targetPolicy.resolvedAttributesFileIdentity)
+            )
+        ]
+    }
+
+    private static func field(
+        _ field: WorkspaceRootSeedDeltaCompatibilityField,
+        _ base: some CustomStringConvertible,
+        _ target: some CustomStringConvertible
+    ) -> WorkspaceRootSeedDeltaCompatibilityFieldEvaluation {
+        let baseValue = String(describing: base)
+        let targetValue = String(describing: target)
+        return WorkspaceRootSeedDeltaCompatibilityFieldEvaluation(
+            field: field,
+            decision: baseValue == targetValue ? .match : .mismatch,
+            baseDigest: fieldDigest(baseValue, field: field),
+            targetDigest: fieldDigest(targetValue, field: field)
+        )
+    }
+
+    private static func contentIdentityMaterial(_ identity: GitWorkspaceAuthorityContentIdentity?) -> String {
+        guard let identity else { return "present=0" }
+        return "present=1;exists=\(identity.exists ? 1 : 0);sha256=\(identity.sha256);bytes=\(identity.byteCount)"
+    }
+
+    private static func fieldDigest(
+        _ value: String,
+        field: WorkspaceRootSeedDeltaCompatibilityField
+    ) -> String {
+        let domain = "worktree-startup-delta-compatibility-v1/\(field.rawValue)"
+        return SHA256.hash(data: Data("\(domain)\0\(value)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }
 

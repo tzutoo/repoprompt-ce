@@ -671,6 +671,22 @@ enum WorktreeStartupInstrumentation {
             fileprivate(set) var creationAttemptCount = 0
         }
 
+        struct DeltaCompatibilityEvaluationRecord: Equatable {
+            let correlationID: UUID
+            let evaluation: WorkspaceRootSeedDeltaCompatibilityEvaluation
+            let exactSnapshotLookupReached: Bool
+            let exactSnapshotLookupPassed: Bool
+            let targetAuthorityComparisonReached: Bool
+            let targetAuthorityComparisonPassed: Bool
+            let currentSearchABIReached: Bool
+            let currentSearchABIMatched: Bool?
+            let catalogPolicyComparisonReached: Bool
+            let catalogPolicyMatched: Bool?
+            let terminalFallback: WorkspaceRootSeedFallbackReason?
+            fileprivate(set) var duplicate = false
+            fileprivate(set) var contradictory = false
+        }
+
         struct BenchmarkMetricTag: Hashable {
             let correlationID: UUID
             let contextID: UUID
@@ -817,6 +833,8 @@ enum WorktreeStartupInstrumentation {
             let gitCommandEvictionCount: Int
             let receiptDecisions: [ReceiptDecision]
             let receiptDecisionEvictionCount: Int
+            let deltaCompatibilityEvaluations: [DeltaCompatibilityEvaluationRecord]
+            let deltaCompatibilityEvaluationEvictionCount: Int
         #endif
     }
 
@@ -860,11 +878,14 @@ enum WorktreeStartupInstrumentation {
     private static var seedCounters = SeedCounters()
     #if DEBUG
         private static let maximumReceiptDecisionCount = 128
+        private static let maximumDeltaCompatibilityEvaluationCount = 128
         private static let maximumBenchmarkMarkerPublicationCount = 128
         private static var eventEvictionCount = 0
         private static var gitCommandEvictionCount = 0
         private static var storedReceiptDecisions: [ReceiptDecision] = []
         private static var receiptDecisionEvictionCount = 0
+        private static var storedDeltaCompatibilityEvaluations: [DeltaCompatibilityEvaluationRecord] = []
+        private static var deltaCompatibilityEvaluationEvictionCount = 0
         private static var benchmarkMetricsByTag: [BenchmarkMetricTag: BenchmarkMetricSnapshot] = [:]
     #endif
 
@@ -1029,6 +1050,70 @@ enum WorktreeStartupInstrumentation {
             lock.lock()
             defer { lock.unlock() }
             return receiptDecisionEvictionCount
+        }
+
+        static func recordDeltaCompatibilityEvaluation(
+            correlationID: UUID,
+            evaluation: WorkspaceRootSeedDeltaCompatibilityEvaluation,
+            exactSnapshotLookupReached: Bool,
+            exactSnapshotLookupPassed: Bool,
+            targetAuthorityComparisonReached: Bool,
+            targetAuthorityComparisonPassed: Bool,
+            currentSearchABIReached: Bool,
+            currentSearchABIMatched: Bool?,
+            catalogPolicyComparisonReached: Bool,
+            catalogPolicyMatched: Bool?,
+            terminalFallback: WorkspaceRootSeedFallbackReason?
+        ) {
+            let candidate = DeltaCompatibilityEvaluationRecord(
+                correlationID: correlationID,
+                evaluation: evaluation,
+                exactSnapshotLookupReached: exactSnapshotLookupReached,
+                exactSnapshotLookupPassed: exactSnapshotLookupPassed,
+                targetAuthorityComparisonReached: targetAuthorityComparisonReached,
+                targetAuthorityComparisonPassed: targetAuthorityComparisonPassed,
+                currentSearchABIReached: currentSearchABIReached,
+                currentSearchABIMatched: currentSearchABIMatched,
+                catalogPolicyComparisonReached: catalogPolicyComparisonReached,
+                catalogPolicyMatched: catalogPolicyMatched,
+                terminalFallback: terminalFallback
+            )
+            lock.lock()
+            defer { lock.unlock() }
+            if let index = storedDeltaCompatibilityEvaluations.firstIndex(where: {
+                $0.correlationID == correlationID && $0.evaluation.source == evaluation.source
+            }) {
+                var original = storedDeltaCompatibilityEvaluations[index]
+                original.duplicate = false
+                original.contradictory = false
+                storedDeltaCompatibilityEvaluations[index].duplicate = true
+                if original != candidate {
+                    storedDeltaCompatibilityEvaluations[index].contradictory = true
+                }
+                return
+            }
+            if storedDeltaCompatibilityEvaluations.count == maximumDeltaCompatibilityEvaluationCount {
+                storedDeltaCompatibilityEvaluations.removeFirst()
+                deltaCompatibilityEvaluationEvictionCount = incremented(
+                    deltaCompatibilityEvaluationEvictionCount
+                )
+            }
+            storedDeltaCompatibilityEvaluations.append(candidate)
+        }
+
+        static func deltaCompatibilityEvaluations(
+            correlationID: UUID? = nil
+        ) -> [DeltaCompatibilityEvaluationRecord] {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let correlationID else { return storedDeltaCompatibilityEvaluations }
+            return storedDeltaCompatibilityEvaluations.filter { $0.correlationID == correlationID }
+        }
+
+        static func currentDeltaCompatibilityEvaluationEvictionCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return deltaCompatibilityEvaluationEvictionCount
         }
 
         private static func receiptDecisionIndexLocked(correlationID: UUID) -> Int {
@@ -1383,7 +1468,9 @@ enum WorktreeStartupInstrumentation {
                 eventEvictionCount: eventEvictionCount,
                 gitCommandEvictionCount: gitCommandEvictionCount,
                 receiptDecisions: storedReceiptDecisions,
-                receiptDecisionEvictionCount: receiptDecisionEvictionCount
+                receiptDecisionEvictionCount: receiptDecisionEvictionCount,
+                deltaCompatibilityEvaluations: storedDeltaCompatibilityEvaluations,
+                deltaCompatibilityEvaluationEvictionCount: deltaCompatibilityEvaluationEvictionCount
             )
         #else
             return Snapshot(
@@ -1422,6 +1509,8 @@ enum WorktreeStartupInstrumentation {
             gitCommandEvictionCount = 0
             storedReceiptDecisions.removeAll(keepingCapacity: true)
             receiptDecisionEvictionCount = 0
+            storedDeltaCompatibilityEvaluations.removeAll(keepingCapacity: true)
+            deltaCompatibilityEvaluationEvictionCount = 0
             benchmarkMetricsByTag.removeAll(keepingCapacity: true)
             lock.unlock()
         }

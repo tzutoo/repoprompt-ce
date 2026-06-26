@@ -4,6 +4,184 @@ import Darwin
 import XCTest
 
 final class GitWorktreeCreationReceiptTests: XCTestCase {
+    func testDeltaCompatibilityEvaluationCoversEveryFieldAndFailsClosed() throws {
+        let base = WorkspaceRootSeedTestSupport.compatibilityKey()
+
+        func target(mismatching field: WorkspaceRootSeedDeltaCompatibilityField) throws
+            -> WorkspaceRootSeedCompatibilityKey
+        {
+            var namespace = base.repositoryNamespace
+            var objectFormat = base.objectFormat
+            var prefix = base.repositoryRelativeRootPrefix
+            var inventorySchemaVersion = base.inventorySchemaVersion
+            var mandatoryIgnore = base.policyIdentity.mandatoryIgnorePolicyIdentity
+            var committedIgnore = base.policyIdentity.committedIgnoreControlDigest
+            var configuredIgnore = base.policyIdentity.configuredIgnoreAuthorityDigest
+            var attributes = base.policyIdentity.attributePolicyDigest
+            var sparse = base.policyIdentity.sparsePolicyDigest
+            var matcher = base.searchABI.matcherSchemaVersion
+            var projectedKey = base.searchABI.projectedKeySchemaVersion
+            var comparator = base.searchABI.comparatorSchemaVersion
+            var normalization = base.searchABI.pathNormalizationSchemaVersion
+            var excludes = base.policyIdentity.resolvedExcludesFileIdentity
+            var externalAttributes = base.policyIdentity.resolvedAttributesFileIdentity
+
+            switch field {
+            case .repositoryNamespace:
+                namespace = try GitBlobRepositoryNamespace(rawValue: String(repeating: "b", count: 64))
+            case .objectFormat: objectFormat = .sha256
+            case .repositoryRelativeRootPrefix: prefix = try GitRepositoryRelativeRootPrefix("Nested")
+            case .inventorySchemaVersion: inventorySchemaVersion += 1
+            case .mandatoryIgnorePolicyIdentity: mandatoryIgnore = "changed-mandatory-ignore"
+            case .committedIgnoreControlDigest: committedIgnore = "changed-committed-ignore"
+            case .configuredIgnoreAuthorityDigest: configuredIgnore = "changed-configured-ignore"
+            case .attributePolicyDigest: attributes = "changed-attributes"
+            case .sparsePolicyDigest: sparse = "changed-sparse"
+            case .searchABIMatcherSchemaVersion: matcher += 1
+            case .searchABIProjectedKeySchemaVersion: projectedKey += 1
+            case .searchABIComparatorSchemaVersion: comparator += 1
+            case .searchABIPathNormalizationSchemaVersion: normalization += 1
+            case .resolvedExcludesFileIdentity:
+                excludes = GitWorkspaceAuthorityContentIdentity(exists: true, sha256: "exclude-content", byteCount: 7)
+            case .resolvedAttributesFileIdentity:
+                externalAttributes = GitWorkspaceAuthorityContentIdentity(
+                    exists: true,
+                    sha256: "attribute-content",
+                    byteCount: 9
+                )
+            }
+
+            return WorkspaceRootSeedCompatibilityKey(
+                repositoryNamespace: namespace,
+                objectFormat: objectFormat,
+                treeOID: base.treeOID,
+                repositoryRelativeRootPrefix: prefix,
+                inventorySchemaVersion: inventorySchemaVersion,
+                policyIdentity: GitWorkspacePolicyIdentity(
+                    mandatoryIgnorePolicyIdentity: mandatoryIgnore,
+                    committedIgnoreControlDigest: committedIgnore,
+                    configuredIgnoreAuthorityDigest: configuredIgnore,
+                    attributePolicyDigest: attributes,
+                    sparsePolicyDigest: sparse,
+                    searchABI: GitWorkspaceSearchABIIdentity(
+                        matcherSchemaVersion: matcher,
+                        projectedKeySchemaVersion: projectedKey,
+                        comparatorSchemaVersion: comparator,
+                        pathNormalizationSchemaVersion: normalization
+                    ),
+                    resolvedExcludesFileIdentity: excludes,
+                    resolvedAttributesFileIdentity: externalAttributes
+                )
+            )
+        }
+
+        XCTAssertEqual(
+            WorkspaceRootSeedDeltaCompatibilityField.allCases.count,
+            15
+        )
+        for field in WorkspaceRootSeedDeltaCompatibilityField.allCases {
+            let target = try target(mismatching: field)
+            let evaluation = target.deltaCompatibilityEvaluation(with: base, source: .hintEvaluator)
+            XCTAssertEqual(evaluation.source, .hintEvaluator, field.rawValue)
+            XCTAssertEqual(evaluation.decision, .incompatible, field.rawValue)
+            XCTAssertEqual(evaluation.fieldEvaluations.map(\.field), WorkspaceRootSeedDeltaCompatibilityField.allCases)
+            XCTAssertEqual(evaluation.mismatchedFields, [field], field.rawValue)
+            XCTAssertEqual(evaluation.correctionRuleApplied, .none, field.rawValue)
+            XCTAssertEqual(
+                evaluation.fieldEvaluations.filter { $0.decision == .mismatch }.map(\.field),
+                [field],
+                field.rawValue
+            )
+            XCTAssertTrue(evaluation.fieldEvaluations.allSatisfy {
+                $0.baseDigest.count == 64 && $0.targetDigest.count == 64
+            })
+            XCTAssertFalse(target.isDeltaCompatible(with: base), field.rawValue)
+        }
+    }
+
+    func testDeltaCompatibilityEvaluationExcludesTreeAndFreezesMissingExternalRepresentationMismatch() {
+        let base = WorkspaceRootSeedTestSupport.compatibilityKey(treeOID: WorkspaceRootSeedTestSupport.oid("1"))
+        let differentTree = WorkspaceRootSeedCompatibilityKey(
+            repositoryNamespace: base.repositoryNamespace,
+            objectFormat: base.objectFormat,
+            treeOID: WorkspaceRootSeedTestSupport.oid("2"),
+            repositoryRelativeRootPrefix: base.repositoryRelativeRootPrefix,
+            policyIdentity: base.policyIdentity
+        )
+        let treeEvaluation = differentTree.deltaCompatibilityEvaluation(with: base, source: .planner)
+        XCTAssertEqual(treeEvaluation.source, .planner)
+        XCTAssertEqual(treeEvaluation.decision, .compatible)
+        XCTAssertEqual(treeEvaluation.mismatchedFields, [])
+        XCTAssertEqual(treeEvaluation.treeRelation, .differentExcludedFromDeltaCompatibility)
+        XCTAssertTrue(differentTree.isDeltaCompatible(with: base))
+
+        let missingRepresentation = WorkspaceRootSeedCompatibilityKey(
+            repositoryNamespace: base.repositoryNamespace,
+            objectFormat: base.objectFormat,
+            treeOID: base.treeOID,
+            repositoryRelativeRootPrefix: base.repositoryRelativeRootPrefix,
+            policyIdentity: GitWorkspacePolicyIdentity(
+                mandatoryIgnorePolicyIdentity: base.policyIdentity.mandatoryIgnorePolicyIdentity,
+                committedIgnoreControlDigest: base.policyIdentity.committedIgnoreControlDigest,
+                configuredIgnoreAuthorityDigest: base.policyIdentity.configuredIgnoreAuthorityDigest,
+                attributePolicyDigest: base.policyIdentity.attributePolicyDigest,
+                sparsePolicyDigest: base.policyIdentity.sparsePolicyDigest,
+                searchABI: base.searchABI,
+                resolvedExcludesFileIdentity: GitWorkspaceAuthorityContentIdentity(
+                    exists: false,
+                    sha256: "",
+                    byteCount: 0
+                ),
+                resolvedAttributesFileIdentity: nil
+            )
+        )
+        let representationEvaluation = missingRepresentation.deltaCompatibilityEvaluation(
+            with: base,
+            source: .hintEvaluator
+        )
+        XCTAssertEqual(representationEvaluation.decision, .incompatible)
+        XCTAssertEqual(representationEvaluation.mismatchedFields, [.resolvedExcludesFileIdentity])
+        XCTAssertEqual(representationEvaluation.correctionRuleApplied, .none)
+        XCTAssertFalse(String(describing: representationEvaluation).contains("exclude-content"))
+    }
+
+    func testObservedLivePolicyMismatchPairRemainsFailClosed() {
+        let base = WorkspaceRootSeedTestSupport.compatibilityKey()
+        let target = WorkspaceRootSeedCompatibilityKey(
+            repositoryNamespace: base.repositoryNamespace,
+            objectFormat: base.objectFormat,
+            treeOID: base.treeOID,
+            repositoryRelativeRootPrefix: base.repositoryRelativeRootPrefix,
+            policyIdentity: GitWorkspacePolicyIdentity(
+                mandatoryIgnorePolicyIdentity: base.policyIdentity.mandatoryIgnorePolicyIdentity,
+                committedIgnoreControlDigest: "observed-live-committed-ignore-mismatch",
+                configuredIgnoreAuthorityDigest: base.policyIdentity.configuredIgnoreAuthorityDigest,
+                attributePolicyDigest: "observed-live-attribute-mismatch",
+                sparsePolicyDigest: base.policyIdentity.sparsePolicyDigest,
+                searchABI: base.searchABI,
+                resolvedExcludesFileIdentity: base.policyIdentity.resolvedExcludesFileIdentity,
+                resolvedAttributesFileIdentity: base.policyIdentity.resolvedAttributesFileIdentity
+            )
+        )
+        let evaluation = target.deltaCompatibilityEvaluation(
+            with: base,
+            source: .hintEvaluator
+        )
+
+        XCTAssertEqual(evaluation.decision, .incompatible)
+        XCTAssertEqual(
+            evaluation.mismatchedFields,
+            [.committedIgnoreControlDigest, .attributePolicyDigest]
+        )
+        XCTAssertEqual(evaluation.correctionRuleApplied, .none)
+        XCTAssertEqual(
+            evaluation.fieldEvaluations.filter { $0.decision == .match }.map(\.field),
+            WorkspaceRootSeedDeltaCompatibilityField.allCases.filter {
+                ![.committedIgnoreControlDigest, .attributePolicyDigest].contains($0)
+            }
+        )
+    }
+
     func testWitnessCoverageRejectsZeroAndSinceNowJournalCuts() {
         func coverage(start: UInt64, end: UInt64) -> GitWorktreeCreationWitnessCoverage {
             GitWorktreeCreationWitnessCoverage(

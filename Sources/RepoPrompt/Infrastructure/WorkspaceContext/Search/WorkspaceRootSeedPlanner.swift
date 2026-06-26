@@ -398,9 +398,36 @@ actor WorkspaceRootSeedPlanner {
                 throw WorkspaceRootTargetEvidenceCoordinatorError.authoritySnapshotChanged
             }
             let compatibility = WorkspaceRootSeedCompatibilityKey(authority: fence.snapshot)
-            guard compatibility.isDeltaCompatible(with: snapshot.compatibilityKey),
-                  await service.currentWorkspaceRootCatalogPolicyIdentity() == snapshot.catalogPolicyIdentity
-            else { throw PlanningFailure.fallback(.compatibilityMismatch) }
+            let compatibilityEvaluation = compatibility.deltaCompatibilityEvaluation(
+                with: snapshot.compatibilityKey,
+                source: .planner
+            )
+            let catalogPolicyComparisonReached = compatibilityEvaluation.decision == .compatible
+            let catalogPolicyMatched = catalogPolicyComparisonReached
+                ? await service.currentWorkspaceRootCatalogPolicyIdentity() == snapshot.catalogPolicyIdentity
+                : nil
+            let compatibilityFallback: WorkspaceRootSeedFallbackReason? =
+                compatibilityEvaluation.decision == .compatible && catalogPolicyMatched == true
+                    ? nil
+                    : .compatibilityMismatch
+            #if DEBUG
+                WorktreeStartupInstrumentation.recordDeltaCompatibilityEvaluation(
+                    correlationID: hint.correlationID,
+                    evaluation: compatibilityEvaluation,
+                    exactSnapshotLookupReached: true,
+                    exactSnapshotLookupPassed: true,
+                    targetAuthorityComparisonReached: true,
+                    targetAuthorityComparisonPassed: true,
+                    currentSearchABIReached: false,
+                    currentSearchABIMatched: nil,
+                    catalogPolicyComparisonReached: catalogPolicyComparisonReached,
+                    catalogPolicyMatched: catalogPolicyMatched,
+                    terminalFallback: compatibilityFallback
+                )
+            #endif
+            guard compatibilityFallback == nil else {
+                throw PlanningFailure.fallback(.compatibilityMismatch)
+            }
 
             let handle = try await buildAttempt(
                 hint: hint,

@@ -212,6 +212,7 @@ import XCTest
             )
             XCTAssertEqual(instrumentation.events.map(\.phase), [.rootLoadStarted, .rootReady])
             XCTAssertTrue(instrumentation.events.allSatisfy { !$0.observationEnabled && !$0.servingEnabled })
+            XCTAssertTrue(instrumentation.deltaCompatibilityEvaluations.isEmpty)
 
             await materializer.release(sessionID: sessionID)
             await store.unloadRoot(id: logicalRecord.id)
@@ -537,6 +538,70 @@ import XCTest
             XCTAssertEqual(duplicate.creationAttemptCount, 2)
         }
 
+        func testDeltaCompatibilityEvaluationRecordsAreCorrelationScopedBoundedAndFailOnDuplicates() throws {
+            WorktreeStartupInstrumentation.resetForTesting()
+            let correlationID = UUID()
+            let base = WorkspaceRootSeedTestSupport.compatibilityKey()
+            let evaluator = base.deltaCompatibilityEvaluation(with: base, source: .hintEvaluator)
+            let planner = base.deltaCompatibilityEvaluation(with: base, source: .planner)
+
+            func record(
+                _ evaluation: WorkspaceRootSeedDeltaCompatibilityEvaluation,
+                correlationID: UUID = correlationID,
+                terminalFallback: WorkspaceRootSeedFallbackReason? = nil
+            ) {
+                WorktreeStartupInstrumentation.recordDeltaCompatibilityEvaluation(
+                    correlationID: correlationID,
+                    evaluation: evaluation,
+                    exactSnapshotLookupReached: true,
+                    exactSnapshotLookupPassed: true,
+                    targetAuthorityComparisonReached: true,
+                    targetAuthorityComparisonPassed: true,
+                    currentSearchABIReached: evaluation.source == .hintEvaluator,
+                    currentSearchABIMatched: evaluation.source == .hintEvaluator ? true : nil,
+                    catalogPolicyComparisonReached: evaluation.source == .planner,
+                    catalogPolicyMatched: evaluation.source == .planner ? true : nil,
+                    terminalFallback: terminalFallback
+                )
+            }
+
+            record(evaluator)
+            record(planner)
+            XCTAssertEqual(
+                WorktreeStartupInstrumentation.deltaCompatibilityEvaluations(correlationID: correlationID)
+                    .map(\.evaluation.source),
+                [.hintEvaluator, .planner]
+            )
+
+            record(evaluator)
+            var stored = try XCTUnwrap(
+                WorktreeStartupInstrumentation.deltaCompatibilityEvaluations(correlationID: correlationID)
+                    .first { $0.evaluation.source == .hintEvaluator }
+            )
+            XCTAssertTrue(stored.duplicate)
+            XCTAssertFalse(stored.contradictory)
+            XCTAssertEqual(stored.evaluation, evaluator)
+
+            record(evaluator, terminalFallback: .compatibilityMismatch)
+            stored = try XCTUnwrap(
+                WorktreeStartupInstrumentation.deltaCompatibilityEvaluations(correlationID: correlationID)
+                    .first { $0.evaluation.source == .hintEvaluator }
+            )
+            XCTAssertTrue(stored.duplicate)
+            XCTAssertTrue(stored.contradictory)
+            XCTAssertNil(stored.terminalFallback)
+
+            for _ in 0 ..< 127 {
+                record(evaluator, correlationID: UUID())
+            }
+            XCTAssertEqual(WorktreeStartupInstrumentation.deltaCompatibilityEvaluations().count, 128)
+            XCTAssertEqual(WorktreeStartupInstrumentation.currentDeltaCompatibilityEvaluationEvictionCount(), 1)
+
+            WorktreeStartupInstrumentation.resetForTesting()
+            XCTAssertTrue(WorktreeStartupInstrumentation.deltaCompatibilityEvaluations().isEmpty)
+            XCTAssertEqual(WorktreeStartupInstrumentation.currentDeltaCompatibilityEvaluationEvictionCount(), 0)
+        }
+
         func testReceiptDecisionSchemaV5ExportIsTerminalBoundedPathFreeAndOperationCorrelated() throws {
             WorktreeStartupInstrumentation.resetForTesting()
             WorktreeStartupBenchmarkDiagnostics.setGateEnabled(true)
@@ -612,6 +677,31 @@ import XCTest
                 correlationID: arm.correlationID,
                 decision: consumption
             )
+            let compatibility = WorkspaceRootSeedTestSupport.compatibilityKey()
+            func recordCompatibility(
+                _ source: WorkspaceRootSeedDeltaCompatibilitySource,
+                correlationID: UUID = arm.correlationID,
+                terminalFallback: WorkspaceRootSeedFallbackReason? = nil
+            ) {
+                WorktreeStartupInstrumentation.recordDeltaCompatibilityEvaluation(
+                    correlationID: correlationID,
+                    evaluation: compatibility.deltaCompatibilityEvaluation(
+                        with: compatibility,
+                        source: source
+                    ),
+                    exactSnapshotLookupReached: true,
+                    exactSnapshotLookupPassed: true,
+                    targetAuthorityComparisonReached: true,
+                    targetAuthorityComparisonPassed: true,
+                    currentSearchABIReached: source == .hintEvaluator,
+                    currentSearchABIMatched: source == .hintEvaluator ? true : nil,
+                    catalogPolicyComparisonReached: source == .planner,
+                    catalogPolicyMatched: source == .planner ? true : nil,
+                    terminalFallback: terminalFallback
+                )
+            }
+            recordCompatibility(.hintEvaluator)
+            recordCompatibility(.planner)
             let context = WorktreeStartupContext(
                 agentSessionID: consumed.metricTag.agentSessionID,
                 correlationID: arm.correlationID,
@@ -694,6 +784,19 @@ import XCTest
             XCTAssertEqual(payload["terminal_receipt_decision_count"] as? Int, 1)
             XCTAssertEqual(payload["receipt_decision_buffer_evicted"] as? Bool, false)
             XCTAssertEqual(payload["receipt_decision_ambiguous"] as? Bool, false)
+            XCTAssertEqual(payload["delta_compatibility_evaluation_count"] as? Int, 2)
+            XCTAssertEqual(payload["delta_compatibility_evaluation_buffer_evicted"] as? Bool, false)
+            XCTAssertEqual(payload["delta_compatibility_evaluation_ambiguous"] as? Bool, false)
+            XCTAssertEqual(payload["delta_compatibility_evaluation_contradictory"] as? Bool, false)
+            let compatibilityPayloads = try XCTUnwrap(
+                payload["delta_compatibility_evaluations"] as? [[String: Any]]
+            )
+            XCTAssertEqual(compatibilityPayloads.map { $0["source"] as? String }, ["hintEvaluator", "planner"])
+            XCTAssertTrue(compatibilityPayloads.allSatisfy {
+                ($0["field_evaluations"] as? [[String: Any]])?.count == 15
+                    && ($0["mismatched_fields"] as? [String]) == []
+                    && ($0["correction_rule_applied"] as? String) == "none"
+            })
             let sample = try XCTUnwrap(payload["sample"] as? [String: Any])
             XCTAssertEqual(sample["valid"] as? Bool, true)
             XCTAssertEqual(sample["boundary_evidence_available"] as? Bool, true)
@@ -726,6 +829,39 @@ import XCTest
             XCTAssertTrue(exported.contains("\"witness_accepted_destination_event_count\":257"))
             XCTAssertTrue(exported.contains("\"witness_accepted_non_destination_event_count\":43"))
             XCTAssertTrue(exported.contains("\"witness_user_dropped\":false"))
+
+            recordCompatibility(.hintEvaluator)
+            let duplicatePayload = try diagnostics.snapshotPayload(
+                scope: scope,
+                correlationID: arm.correlationID,
+                export: false
+            )
+            XCTAssertEqual(duplicatePayload["delta_compatibility_evaluation_ambiguous"] as? Bool, true)
+            XCTAssertEqual(duplicatePayload["delta_compatibility_evaluation_contradictory"] as? Bool, false)
+            XCTAssertEqual((duplicatePayload["sample"] as? [String: Any])?["valid"] as? Bool, false)
+
+            recordCompatibility(.hintEvaluator, terminalFallback: .compatibilityMismatch)
+            let contradictoryPayload = try diagnostics.snapshotPayload(
+                scope: scope,
+                correlationID: arm.correlationID,
+                export: false
+            )
+            XCTAssertEqual(
+                contradictoryPayload["delta_compatibility_evaluation_contradictory"] as? Bool,
+                true
+            )
+            XCTAssertEqual((contradictoryPayload["sample"] as? [String: Any])?["valid"] as? Bool, false)
+
+            for _ in 0 ..< 127 {
+                recordCompatibility(.hintEvaluator, correlationID: UUID())
+            }
+            let evictedPayload = try diagnostics.snapshotPayload(
+                scope: scope,
+                correlationID: arm.correlationID,
+                export: false
+            )
+            XCTAssertEqual(evictedPayload["delta_compatibility_evaluation_buffer_evicted"] as? Bool, true)
+            XCTAssertEqual((evictedPayload["sample"] as? [String: Any])?["valid"] as? Bool, false)
 
             var boundaryEvents = Dictionary(
                 uniqueKeysWithValues: WorktreeStartupBenchmarkDiagnostics.requiredBoundaryPhasesForTesting

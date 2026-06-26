@@ -49,6 +49,23 @@ EXPECTED_ACTUAL_ROUTE_COUNTS = {
     "forced-full": {"fullCrawl": 1},
     "projected": {"diffSeedServing": 1},
 }
+DELTA_COMPATIBILITY_FIELDS = [
+    "repositoryNamespace",
+    "objectFormat",
+    "repositoryRelativeRootPrefix",
+    "inventorySchemaVersion",
+    "mandatoryIgnorePolicyIdentity",
+    "committedIgnoreControlDigest",
+    "configuredIgnoreAuthorityDigest",
+    "attributePolicyDigest",
+    "sparsePolicyDigest",
+    "searchABIMatcherSchemaVersion",
+    "searchABIProjectedKeySchemaVersion",
+    "searchABIComparatorSchemaVersion",
+    "searchABIPathNormalizationSchemaVersion",
+    "resolvedExcludesFileIdentity",
+    "resolvedAttributesFileIdentity",
+]
 REQUIRED_GIT_FIELDS = {
     "available", "command_count", "families", "priorities", "queue_wait_us",
     "duration_us", "output_bytes", "cancelled_count",
@@ -216,6 +233,31 @@ def secure_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
 
 def save_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
     secure_write(path, (json.dumps(value, indent=2, sort_keys=True) + "\n").encode(), exclusive=exclusive)
+
+
+_CLEANUP_PROOF_SENSITIVE_KEYS = {
+    "path", "session_id", "context_id", "worktree_id", "branch", "head",
+}
+
+
+def redacted_cleanup_proof(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    proof: list[dict[str, Any]] = []
+    for entry in entries:
+        redacted: dict[str, Any] = {}
+        for key, value in entry.items():
+            if key in _CLEANUP_PROOF_SENSITIVE_KEYS and isinstance(value, str):
+                redacted[f"{key}_sha256"] = sha256_bytes(value.encode())
+            elif key not in _CLEANUP_PROOF_SENSITIVE_KEYS:
+                redacted[key] = value
+        proof.append(redacted)
+    return proof
+
+
+def save_cleanup_proof(path: Path, entries: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    save_json(path, redacted_cleanup_proof(entries))
+    os.chmod(path, 0o600)
 
 
 def append_ndjson(path: Path, value: Any) -> None:
@@ -2298,6 +2340,37 @@ def self_test_command(_args: argparse.Namespace) -> int:
             "first_search": 100, "first_read": 100, "first_codemap": 100,
             "warm_codemap": 100, "passive_tree": 100, "selection": 100,
         }
+        delta_evaluations: list[dict[str, Any]] = []
+        if route == "projected":
+            for source in ("hintEvaluator", "planner"):
+                delta_evaluations.append({
+                    "correlation_id": correlation,
+                    "source": source,
+                    "decision": "compatible",
+                    "field_evaluations": [
+                        {
+                            "field": field,
+                            "decision": "match",
+                            "base_digest": "a" * 64,
+                            "target_digest": "a" * 64,
+                        }
+                        for field in DELTA_COMPATIBILITY_FIELDS
+                    ],
+                    "mismatched_fields": [],
+                    "correction_rule_applied": "none",
+                    "tree_relation": "sameExcludedFromDeltaCompatibility",
+                    "exact_snapshot_lookup_reached": True,
+                    "exact_snapshot_lookup_passed": True,
+                    "target_authority_comparison_reached": True,
+                    "target_authority_comparison_passed": True,
+                    "current_search_abi_reached": source == "hintEvaluator",
+                    "current_search_abi_matched": True if source == "hintEvaluator" else None,
+                    "catalog_policy_comparison_reached": source == "planner",
+                    "catalog_policy_matched": True if source == "planner" else None,
+                    "terminal_fallback": None,
+                    "duplicate": False,
+                    "contradictory": False,
+                })
         return {
             "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
             "scope": {"context_id": context_id},
@@ -2324,6 +2397,11 @@ def self_test_command(_args: argparse.Namespace) -> int:
             "receipt_decision_buffer_evicted": False,
             "receipt_decision_ambiguous": False,
             "receipt_decisions": [receipt_fixture(route)],
+            "delta_compatibility_evaluation_count": len(delta_evaluations),
+            "delta_compatibility_evaluation_buffer_evicted": False,
+            "delta_compatibility_evaluation_ambiguous": False,
+            "delta_compatibility_evaluation_contradictory": False,
+            "delta_compatibility_evaluations": delta_evaluations,
             "git": {
                 "available": True, "command_count": 1, "families": {"test": 1},
                 "priorities": {"test": 1}, "queue_wait_us": 0, "duration_us": 1,
@@ -2568,6 +2646,85 @@ def self_test_command(_args: argparse.Namespace) -> int:
     checks["receipt_duplicate_terminal_decision_rejected"] = (
         "terminal_receipt_evidence_invalid"
         in receipt_failures(duplicated_terminal, "projected")
+    )
+
+    forced_delta = export_fixture("forced-full")
+    forced_delta["delta_compatibility_evaluation_count"] = 1
+    forced_delta["delta_compatibility_evaluations"] = [
+        export_fixture("projected")["delta_compatibility_evaluations"][0]
+    ]
+    checks["forced_full_delta_evidence_rejected"] = (
+        "delta_compatibility_evidence_invalid"
+        in validate_delta_compatibility_oracle(
+            forced_delta, "forced-full", expected_correlation=correlation,
+        )
+    )
+    missing_planner = export_fixture("projected")
+    missing_planner["delta_compatibility_evaluation_count"] = 1
+    missing_planner["delta_compatibility_evaluations"].pop()
+    checks["projected_requires_evaluator_and_planner_delta_evidence"] = (
+        "delta_compatibility_evidence_invalid"
+        in validate_delta_compatibility_oracle(
+            missing_planner, "projected", expected_correlation=correlation,
+        )
+    )
+    duplicate_delta = export_fixture("projected")
+    duplicate_delta["delta_compatibility_evaluation_ambiguous"] = True
+    duplicate_delta["delta_compatibility_evaluations"][0]["duplicate"] = True
+    checks["delta_duplicate_rejected"] = (
+        "delta_compatibility_evidence_invalid"
+        in validate_delta_compatibility_oracle(
+            duplicate_delta, "projected", expected_correlation=correlation,
+        )
+    )
+    contradictory_delta = export_fixture("projected")
+    contradictory_delta["delta_compatibility_evaluation_contradictory"] = True
+    contradictory_delta["delta_compatibility_evaluations"][0]["contradictory"] = True
+    checks["delta_contradiction_rejected"] = (
+        "delta_compatibility_evidence_invalid"
+        in validate_delta_compatibility_oracle(
+            contradictory_delta, "projected", expected_correlation=correlation,
+        )
+    )
+    semantic_mismatch = export_fixture("projected")
+    semantic_field = semantic_mismatch["delta_compatibility_evaluations"][0]["field_evaluations"][0]
+    semantic_field["decision"] = "mismatch"
+    semantic_field["target_digest"] = "b" * 64
+    semantic_mismatch["delta_compatibility_evaluations"][0]["mismatched_fields"] = [
+        "repositoryNamespace"
+    ]
+    checks["semantic_delta_correction_rejected"] = (
+        "delta_compatibility_hintEvaluator_correction_contract_mismatch"
+        in validate_delta_compatibility_oracle(
+            semantic_mismatch, "projected", expected_correlation=correlation,
+        )
+    )
+    representation_correction = export_fixture("projected")
+    for evaluation in representation_correction["delta_compatibility_evaluations"]:
+        field = evaluation["field_evaluations"][-2]
+        field["decision"] = "mismatch"
+        field["target_digest"] = "b" * 64
+        evaluation["mismatched_fields"] = ["resolvedExcludesFileIdentity"]
+        evaluation["correction_rule_applied"] = "canonicalMissingResolvedExcludesFileIdentity"
+    checks["authorized_representation_delta_correction_accepted"] = not validate_delta_compatibility_oracle(
+        representation_correction, "projected", expected_correlation=correlation,
+    )
+    malformed_evaluation = export_fixture("projected")
+    malformed_evaluation["delta_compatibility_evaluations"][0] = "not-an-evaluation"
+    checks["delta_malformed_evaluation_entry_rejected_fail_closed"] = (
+        validate_delta_compatibility_oracle(
+            malformed_evaluation, "projected", expected_correlation=correlation,
+        ) == ["delta_compatibility_evaluation_entry_malformed"]
+    )
+    malformed_field = export_fixture("projected")
+    malformed_field["delta_compatibility_evaluations"][0]["field_evaluations"].append(
+        "not-a-field-evaluation"
+    )
+    checks["delta_malformed_extra_field_entry_rejected_fail_closed"] = (
+        "delta_compatibility_hintEvaluator_field_entry_malformed"
+        in validate_delta_compatibility_oracle(
+            malformed_field, "projected", expected_correlation=correlation,
+        )
     )
 
     def follow_on_fixture() -> dict[str, Any]:
@@ -3219,7 +3376,11 @@ def self_test_command(_args: argparse.Namespace) -> int:
 
     run_cleanup = [
         {"action": "terminalize_agent", "terminal": True},
-        {"action": "remove_worktree", "removed": True},
+        {
+            "action": "remove_worktree", "removed": True,
+            "ownership_proven": True, "worktree_absent": True,
+            "branch_absent": True,
+        },
         {"action": "stop_memory_sampler", "ok": True, "verified_stopped": True},
         {"action": "restore_route", "ok": True},
         {"action": "reset_diagnostics", "ok": True},
@@ -3236,6 +3397,30 @@ def self_test_command(_args: argparse.Namespace) -> int:
         [dict(item, verified_stopped=False) if item["action"] == "stop_memory_sampler" else item for item in run_cleanup],
         run_artifact=True, expected_agent_count=1, expected_worktree_count=1,
     )
+    for field in ("ownership_proven", "worktree_absent", "branch_absent"):
+        checks[f"cleanup_{field}_required"] = not validate_cleanup_evidence(
+            [dict(item, **{field: False}) if item["action"] == "remove_worktree" else item
+             for item in run_cleanup],
+            run_artifact=True, expected_agent_count=1, expected_worktree_count=1,
+        )
+    with tempfile.TemporaryDirectory() as cleanup_proof_temp:
+        proof_dir = Path(cleanup_proof_temp) / "private-proof"
+        proof_path = proof_dir / "cleanup.json"
+        save_cleanup_proof(proof_path, [{
+            "action": "terminalize_agent", "ok": True,
+            "session_id": "session-id-sentinel", "path": "/private/path-sentinel",
+        }])
+        proof_text = proof_path.read_text(encoding="utf-8")
+        checks["cleanup_proof_redacts_sensitive_identity"] = (
+            "session-id-sentinel" not in proof_text
+            and "/private/path-sentinel" not in proof_text
+            and "session_id_sha256" in proof_text
+            and "path_sha256" in proof_text
+        )
+        checks["cleanup_proof_permissions_private"] = (
+            proof_dir.stat().st_mode & 0o777 == 0o700
+            and proof_path.stat().st_mode & 0o777 == 0o600
+        )
     setup_failure_cleanup = [
         {"action": "stop_memory_sampler", "ok": True, "verified_stopped": True,
          "reason": "not_acquired"},
@@ -4405,6 +4590,110 @@ def validate_receipt_oracle(
     return failures
 
 
+def validate_delta_compatibility_oracle(
+    checkpoint: dict[str, Any],
+    route: str,
+    *,
+    expected_correlation: str,
+) -> list[str]:
+    failures: list[str] = []
+    evaluations = checkpoint.get("delta_compatibility_evaluations")
+    expected_count = 2 if route == "projected" else 0
+    if (
+        checkpoint.get("delta_compatibility_evaluation_count") != expected_count
+        or checkpoint.get("delta_compatibility_evaluation_buffer_evicted") is not False
+        or checkpoint.get("delta_compatibility_evaluation_ambiguous") is not False
+        or checkpoint.get("delta_compatibility_evaluation_contradictory") is not False
+        or not isinstance(evaluations, list)
+        or len(evaluations) != expected_count
+    ):
+        return ["delta_compatibility_evidence_invalid"]
+    if route != "projected":
+        return failures
+
+    if not all(isinstance(item, dict) for item in evaluations):
+        return ["delta_compatibility_evaluation_entry_malformed"]
+    if [item.get("source") for item in evaluations] != [
+        "hintEvaluator", "planner",
+    ]:
+        failures.append("delta_compatibility_source_contract_mismatch")
+        return failures
+
+    for evaluation in evaluations:
+        source = evaluation.get("source")
+        fields = evaluation.get("field_evaluations")
+        mismatched = evaluation.get("mismatched_fields")
+        correction = evaluation.get("correction_rule_applied")
+        if (
+            evaluation.get("correlation_id") != expected_correlation
+            or evaluation.get("decision") != "compatible"
+            or evaluation.get("duplicate") is not False
+            or evaluation.get("contradictory") is not False
+            or evaluation.get("exact_snapshot_lookup_reached") is not True
+            or evaluation.get("exact_snapshot_lookup_passed") is not True
+            or evaluation.get("target_authority_comparison_reached") is not True
+            or evaluation.get("target_authority_comparison_passed") is not True
+            or evaluation.get("terminal_fallback") is not None
+            or evaluation.get("tree_relation") not in {
+                "sameExcludedFromDeltaCompatibility",
+                "differentExcludedFromDeltaCompatibility",
+            }
+        ):
+            failures.append(f"delta_compatibility_{source}_decision_contract_mismatch")
+        if not isinstance(fields, list):
+            failures.append(f"delta_compatibility_{source}_field_contract_mismatch")
+            continue
+        if not all(isinstance(item, dict) for item in fields):
+            failures.append(f"delta_compatibility_{source}_field_entry_malformed")
+            continue
+        if [item.get("field") for item in fields] != DELTA_COMPATIBILITY_FIELDS:
+            failures.append(f"delta_compatibility_{source}_field_contract_mismatch")
+            continue
+        for field in fields:
+            if (
+                not isinstance(field, dict)
+                or field.get("decision") not in {"match", "mismatch"}
+                or not isinstance(field.get("base_digest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", field["base_digest"]) is None
+                or not isinstance(field.get("target_digest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", field["target_digest"]) is None
+                or (field.get("decision") == "match" and field["base_digest"] != field["target_digest"])
+            ):
+                failures.append(f"delta_compatibility_{source}_field_digest_invalid")
+                break
+        derived_mismatches = [field["field"] for field in fields if field.get("decision") == "mismatch"]
+        if mismatched != derived_mismatches:
+            failures.append(f"delta_compatibility_{source}_mismatch_set_invalid")
+        authorized_corrections = {
+            (): "none",
+            ("resolvedExcludesFileIdentity",): "canonicalMissingResolvedExcludesFileIdentity",
+            ("resolvedAttributesFileIdentity",): "canonicalMissingResolvedAttributesFileIdentity",
+            (
+                "resolvedExcludesFileIdentity",
+                "resolvedAttributesFileIdentity",
+            ): "canonicalMissingResolvedExternalAuthorityIdentities",
+        }
+        if authorized_corrections.get(tuple(derived_mismatches)) != correction:
+            failures.append(f"delta_compatibility_{source}_correction_contract_mismatch")
+        if source == "hintEvaluator":
+            if (
+                evaluation.get("current_search_abi_reached") is not True
+                or evaluation.get("current_search_abi_matched") is not True
+                or evaluation.get("catalog_policy_comparison_reached") is not False
+                or evaluation.get("catalog_policy_matched") is not None
+            ):
+                failures.append("delta_compatibility_hintEvaluator_gate_contract_mismatch")
+        elif source == "planner":
+            if (
+                evaluation.get("current_search_abi_reached") is not False
+                or evaluation.get("current_search_abi_matched") is not None
+                or evaluation.get("catalog_policy_comparison_reached") is not True
+                or evaluation.get("catalog_policy_matched") is not True
+            ):
+                failures.append("delta_compatibility_planner_gate_contract_mismatch")
+    return failures
+
+
 def validate_primary_checkpoint(
     checkpoint: dict[str, Any],
     route: str,
@@ -4522,6 +4811,9 @@ def validate_primary_checkpoint(
         expected_session=expected_session,
         expected_invocation=expected_invocation,
         expected_ordinal=expected_ordinal,
+    ))
+    failures.extend(validate_delta_compatibility_oracle(
+        checkpoint, route, expected_correlation=expected_correlation,
     ))
     return failures
 
@@ -4847,39 +5139,104 @@ def clean_owned_worktree(
     *,
     expected_branch: str | None = None,
     expected_path: str | None = None,
+    expected_head: str | None = None,
+    ownership_proven: bool = False,
 ) -> dict[str, Any]:
     candidate = Path(path)
     result: dict[str, Any] = {
-        "action": "remove_worktree", "path": path, "removed": False, "reason": None,
+        "action": "remove_worktree",
+        "path_sha256": sha256_bytes(str(candidate.resolve(strict=False)).encode()),
+        "branch_sha256": sha256_bytes(expected_branch.encode()) if expected_branch else None,
+        "head_sha256": sha256_bytes(expected_head.encode()) if expected_head else None,
+        "ownership_proven": ownership_proven,
+        "worktree_removed": False,
+        "worktree_absent": False,
+        "branch_removed": False,
+        "branch_absent": False,
+        "removed": False,
+        "reason": None,
     }
     if not terminal:
         result["reason"] = "session_nonterminal"
         return result
-    if not candidate.exists():
-        result["reason"] = "already_absent"
-        return result
     if expected_path is not None and candidate.resolve() != Path(expected_path).resolve():
         result["reason"] = "ownership_path_mismatch"
         return result
-    if expected_branch is None and expected_path is None:
+    if (
+        not ownership_proven
+        or expected_path is None
+        or expected_head is None
+    ):
         result["reason"] = "ownership_unproven"
         return result
-    if expected_branch is not None and worktree_branch(candidate, repo) != expected_branch:
-        result["reason"] = "ownership_branch_mismatch"
+    branch_ref = f"refs/heads/{expected_branch}" if expected_branch else None
+    if branch_ref:
+        branch_lookup = run_local(
+            ["git", "show-ref", "--verify", "--hash", branch_ref], repo, check=False
+        )
+        if branch_lookup.returncode == 0 and branch_lookup.stdout.strip() != expected_head:
+            result["reason"] = "ownership_head_mismatch"
+            return result
+
+    if candidate.exists():
+        if worktree_branch(candidate, repo) != expected_branch:
+            result["reason"] = "ownership_branch_mismatch"
+            return result
+        worktree_head = run_local(["git", "-C", str(candidate), "rev-parse", "HEAD"], repo, check=False)
+        if worktree_head.returncode != 0 or worktree_head.stdout.strip() != expected_head:
+            result["reason"] = "ownership_head_mismatch"
+            return result
+        listed = run_local(["git", "worktree", "list", "--porcelain"], repo).stdout
+        if f"worktree {candidate.resolve()}\n" not in listed:
+            result["reason"] = "not_registered"
+            return result
+        dirty = run_local(
+            ["git", "-C", str(candidate), "status", "--porcelain=v1", "--untracked-files=all"],
+            repo,
+            check=False,
+        ).stdout.strip()
+        if dirty:
+            result["reason"] = "dirty"
+            return result
+        removal = run_local(["git", "worktree", "remove", str(candidate)], repo, check=False)
+        if removal.returncode != 0:
+            result["reason"] = "git_worktree_remove_failed"
+            return result
+        result["worktree_removed"] = True
+
+    listed_after_removal = run_local(["git", "worktree", "list", "--porcelain"], repo).stdout
+    result["worktree_absent"] = (
+        not candidate.exists() and f"worktree {candidate.resolve(strict=False)}\n" not in listed_after_removal
+    )
+    if not result["worktree_absent"]:
+        result["reason"] = "worktree_absence_unproven"
         return result
-    listed = run_local(["git", "worktree", "list", "--porcelain"], repo).stdout
-    if f"worktree {candidate.resolve()}\n" not in listed:
-        result["reason"] = "not_registered"
-        return result
-    dirty = run_local(
-        ["git", "-C", str(candidate), "status", "--porcelain=v1", "--untracked-files=all"], repo, check=False
-    ).stdout.strip()
-    if dirty:
-        result["reason"] = "dirty"
-        return result
-    removal = run_local(["git", "worktree", "remove", str(candidate)], repo, check=False)
-    result["removed"] = removal.returncode == 0
-    result["reason"] = None if result["removed"] else "git_worktree_remove_failed"
+
+    if branch_ref:
+        branch_lookup = run_local(
+            ["git", "show-ref", "--verify", "--hash", branch_ref], repo, check=False
+        )
+        if branch_lookup.returncode == 0:
+            if branch_lookup.stdout.strip() != expected_head:
+                result["reason"] = "ownership_head_mismatch"
+                return result
+            if f"branch {branch_ref}\n" in listed_after_removal:
+                result["reason"] = "branch_still_checked_out"
+                return result
+            deletion = run_local(["git", "branch", "-D", "--", expected_branch], repo, check=False)
+            if deletion.returncode != 0:
+                result["reason"] = "git_branch_remove_failed"
+                return result
+            result["branch_removed"] = True
+
+        branch_verification = run_local(
+            ["git", "show-ref", "--verify", "--quiet", branch_ref], repo, check=False
+        )
+        result["branch_absent"] = branch_verification.returncode != 0
+    else:
+        result["branch_absent"] = True
+    result["removed"] = result["worktree_absent"] and result["branch_absent"]
+    result["reason"] = None if result["removed"] else "branch_absence_unproven"
     return result
 
 
@@ -5152,7 +5509,8 @@ def run_command(args: argparse.Namespace) -> int:
                 session["status"] = f"cleanup_error:{cleanup_error!r}"
                 session["terminal"] = False
             cleanup.append({
-                "action": "terminalize_agent", "session_id": session["session_id"],
+                "action": "terminalize_agent",
+                "session_id_sha256": sha256_bytes(session["session_id"].encode()),
                 "status": session.get("status"), "terminal": session.get("terminal") is True,
             })
         cleanup.extend([
@@ -5169,11 +5527,20 @@ def run_command(args: argparse.Namespace) -> int:
                 cleanup.append(clean_owned_worktree(
                     root, worktree["path"], all(item.get("terminal") for item in state["sessions"]),
                     expected_branch=worktree.get("branch"),
+                    expected_path=worktree["path"],
+                    expected_head=plan["dataset"]["base_commit_oid"],
+                    ownership_proven=True,
                 ))
             except BaseException as cleanup_error:
                 cleanup.append({
-                    "action": "remove_worktree", "path": worktree["path"],
-                    "removed": False, "reason": f"cleanup_error:{cleanup_error!r}",
+                    "action": "remove_worktree",
+                    "path_sha256": sha256_bytes(worktree["path"].encode()),
+                    "branch_sha256": sha256_bytes(worktree["branch"].encode()),
+                    "ownership_proven": True,
+                    "worktree_absent": False,
+                    "branch_absent": False,
+                    "removed": False,
+                    "reason": "cleanup_error",
                 })
         final_target_ok = False
         try:
@@ -5182,7 +5549,7 @@ def run_command(args: argparse.Namespace) -> int:
         except BenchmarkError:
             pass
         cleanup.append({"action": "restore_workspace_roots", "ok": final_target_ok})
-        save_json(artifact / "cleanup.json", cleanup, exclusive=True)
+        save_cleanup_proof(artifact / "cleanup.json", cleanup)
         save_json(artifact / "state.json", state)
     cleanup_ok = validate_cleanup_evidence(
         cleanup, run_artifact=True, expected_agent_count=len(state["sessions"]),
@@ -7108,14 +7475,16 @@ def smoke_command(args: argparse.Namespace) -> int:
                 child_status = terminalize(runner, child_session)
                 relevant_agent_status[child_session] = child_status
             smoke_cleanup.append({
-                "action": "terminalize_child", "session_id": child_session,
+                "action": "terminalize_child",
+                "session_id_sha256": sha256_bytes(child_session.encode()),
                 "status": child_status, "terminal": child_status in TERMINAL_STATES,
             })
         if parent_session:
             parent_status = terminalize(runner, parent_session)
             relevant_agent_status[parent_session] = parent_status
             smoke_cleanup.append({
-                "action": "terminalize_parent", "session_id": parent_session,
+                "action": "terminalize_parent",
+                "session_id_sha256": sha256_bytes(parent_session.encode()),
                 "status": parent_status, "terminal": parent_status in TERMINAL_STATES,
             })
         all_relevant_terminal = bool(relevant_agent_status) and all(
@@ -7123,14 +7492,21 @@ def smoke_command(args: argparse.Namespace) -> int:
         )
         if parent_worktree:
             smoke_cleanup.append(clean_owned_worktree(
-                root, str(parent_worktree), all_relevant_terminal, expected_branch=parent_branch
+                root,
+                str(parent_worktree),
+                all_relevant_terminal,
+                expected_branch=parent_branch,
+                expected_path=str(parent_worktree),
+                expected_head=base_commit_oid,
+                ownership_proven=True,
             ))
         if linked_secondary and linked_secondary.resolve() in detached_workspace_roots:
             if linked_file and linked_file.exists():
                 linked_file.unlink()
             smoke_cleanup.append(clean_owned_worktree(
                 root, str(linked_secondary), all_relevant_terminal,
-                expected_path=str(linked_secondary)
+                expected_path=str(linked_secondary), expected_head=base_commit_oid,
+                ownership_proven=True,
             ))
         if linked_parent:
             try:
@@ -7154,7 +7530,7 @@ def smoke_command(args: argparse.Namespace) -> int:
             {"action": "benchmark_setting_unchanged", "ok": True},
             {"action": "diagnostics_reset_not_required", "ok": True},
         ])
-    save_json(artifact / "cleanup.json", smoke_cleanup, exclusive=True)
+    save_cleanup_proof(artifact / "cleanup.json", smoke_cleanup)
     for scenario in CORRECTNESS_SCENARIOS:
         results.setdefault(scenario, {"ok": False, "reason": "not_exercised"})
     smoke_cleanup_ok = all(
@@ -8276,9 +8652,8 @@ def codemap_gate_command(args: argparse.Namespace) -> int:
             cleaned = clean_owned_worktree(
                 root, worktree["path"], all_terminal,
                 expected_branch=worktree.get("branch"), expected_path=worktree["path"],
+                expected_head=plan["dataset"]["base_commit_oid"], ownership_proven=True,
             )
-            if isinstance(cleaned.get("path"), str):
-                cleaned["path_sha256"] = sha256_bytes(cleaned.pop("path").encode())
             cleanup.append(cleaned)
         try:
             memory_cleanup, resources = cleanup_memory_sampler_acquisition(
@@ -8326,7 +8701,7 @@ def codemap_gate_command(args: argparse.Namespace) -> int:
                     path.rmdir()
                 except OSError:
                     pass
-        save_json(artifact / "cleanup.json", cleanup)
+        save_cleanup_proof(artifact / "cleanup.json", cleanup)
         save_json(artifact / "state.json", state)
         save_json(artifact / "resources.json", resources)
 
@@ -8567,6 +8942,14 @@ def validate_cleanup_evidence(
     if run_artifact and len(by_action.get("terminalize_agent", [])) != expected_agent_count:
         return False
     if len(by_action.get("remove_worktree", [])) != expected_worktree_count:
+        return False
+    if any(
+        item.get("ownership_proven") is not True
+        or item.get("worktree_absent") is not True
+        or item.get("branch_absent") is not True
+        or item.get("removed") is not True
+        for item in by_action.get("remove_worktree", [])
+    ):
         return False
     required = (
         {
@@ -9931,7 +10314,8 @@ def cleanup_command(args: argparse.Namespace) -> int:
             if isinstance(session, dict):
                 session["terminal"] = False
             actions.append({
-                "action": "terminalize_agent", "session_id": session_id,
+                "action": "terminalize_agent",
+                "session_id_sha256": sha256_bytes(str(session_id).encode()),
                 "terminal": False, "ownership_proven": False,
                 "manual_cleanup": True, "reason": proof["reason"],
             })
@@ -9943,7 +10327,8 @@ def cleanup_command(args: argparse.Namespace) -> int:
         )
         session["status"], session["terminal"] = status, status in TERMINAL_STATES
         actions.append({
-            "action": "terminalize_agent", "session_id": session["session_id"],
+            "action": "terminalize_agent",
+            "session_id_sha256": sha256_bytes(str(session["session_id"]).encode()),
             "status": status, "terminal": session["terminal"], "ownership_proven": True,
         })
     if state.get("kind") == "codemap-gate":
@@ -10003,14 +10388,16 @@ def cleanup_command(args: argparse.Namespace) -> int:
             if not ownership_proven or not all_recorded_agents_terminal:
                 reason = "ownership_not_proven" if not ownership_proven else "agents_not_terminal"
                 actions.append({
-                    "action": "remove_workspace_root", "path": str(candidate), "ok": False,
+                    "action": "remove_workspace_root",
+                    "path_sha256": sha256_bytes(str(candidate).encode()), "ok": False,
                     "manual_cleanup": True, "reason": reason,
                 })
                 remaining_added_roots.append(item)
                 continue
             if str(candidate) not in current_roots:
                 actions.append({
-                    "action": "remove_workspace_root", "path": str(candidate),
+                    "action": "remove_workspace_root",
+                    "path_sha256": sha256_bytes(str(candidate).encode()),
                     "ok": True, "reason": "already_absent",
                 })
                 continue
@@ -10022,7 +10409,8 @@ def cleanup_command(args: argparse.Namespace) -> int:
             )
             ok = call_succeeded(response)
             actions.append({
-                "action": "remove_workspace_root", "path": str(candidate), "ok": ok,
+                "action": "remove_workspace_root",
+                "path_sha256": sha256_bytes(str(candidate).encode()), "ok": ok,
                 "ownership_proven": True,
                 "ownership_basis": (
                     "live_cleanup_worktree_ownership_evidence"
@@ -10071,8 +10459,16 @@ def cleanup_command(args: argparse.Namespace) -> int:
             artifact_name=artifact.name, plan_commit_oid=plan_commit_oid,
         )
         if not proof["ok"]:
+            item_path = item.get("path") if isinstance(item, dict) else None
+            item_branch = item.get("branch") if isinstance(item, dict) else None
             actions.append({
-                "action": "remove_worktree", "path": item.get("path") if isinstance(item, dict) else None,
+                "action": "remove_worktree",
+                "path_sha256": (
+                    sha256_bytes(str(item_path).encode()) if isinstance(item_path, str) else None
+                ),
+                "branch_sha256": (
+                    sha256_bytes(item_branch.encode()) if isinstance(item_branch, str) else None
+                ),
                 "removed": False, "ownership_proven": False, "manual_cleanup": True,
                 "reason": proof["reason"],
             })
@@ -10080,6 +10476,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
         actions.append(clean_owned_worktree(
             root, proof["path"], all(session.get("terminal") for session in state.get("sessions", [])),
             expected_branch=proof["branch"], expected_path=proof["path"],
+            expected_head=plan_commit_oid, ownership_proven=True,
         ))
     final_roots_restored = False
     try:
@@ -10093,7 +10490,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
         expected_worktree_count=len(state.get("worktrees", [])),
     )
     state["cleanup_complete"] = cleanup_complete
-    save_json(artifact / "cleanup.json", actions)
+    save_cleanup_proof(artifact / "cleanup.json", actions)
     save_json(artifact / "state.json", state)
     print(json.dumps(actions, indent=2, sort_keys=True))
     return 0 if cleanup_complete else 1

@@ -53,11 +53,34 @@ actor WorkspaceRootMaterializationHintEvaluator {
                 return .fallback(.authorityUnstable)
             }
             let currentCompatibility = WorkspaceRootSeedCompatibilityKey(authority: current)
-            guard currentCompatibility.isDeltaCompatible(
-                with: hint.creationReceipt.parentCompatibilityKey
-            ),
-                currentCompatibility.searchABI == .current
-            else {
+            let compatibilityEvaluation = currentCompatibility.deltaCompatibilityEvaluation(
+                with: hint.creationReceipt.parentCompatibilityKey,
+                source: .hintEvaluator
+            )
+            let currentSearchABIReached = compatibilityEvaluation.decision == .compatible
+            let currentSearchABIMatched = currentSearchABIReached
+                ? currentCompatibility.searchABI == .current
+                : nil
+            let compatibilityFallback: WorkspaceRootSeedFallbackReason? =
+                compatibilityEvaluation.decision == .compatible && currentSearchABIMatched == true
+                    ? nil
+                    : .compatibilityMismatch
+            #if DEBUG
+                WorktreeStartupInstrumentation.recordDeltaCompatibilityEvaluation(
+                    correlationID: hint.correlationID,
+                    evaluation: compatibilityEvaluation,
+                    exactSnapshotLookupReached: true,
+                    exactSnapshotLookupPassed: true,
+                    targetAuthorityComparisonReached: true,
+                    targetAuthorityComparisonPassed: true,
+                    currentSearchABIReached: currentSearchABIReached,
+                    currentSearchABIMatched: currentSearchABIMatched,
+                    catalogPolicyComparisonReached: false,
+                    catalogPolicyMatched: nil,
+                    terminalFallback: compatibilityFallback
+                )
+            #endif
+            guard compatibilityFallback == nil else {
                 return .fallback(.compatibilityMismatch)
             }
             return .eligible(hint.creationReceipt.parentSnapshotIdentity)
