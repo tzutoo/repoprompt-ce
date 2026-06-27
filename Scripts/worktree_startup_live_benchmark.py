@@ -924,6 +924,14 @@ def find_object(value: Any, key: str) -> dict[str, Any]:
     raise BenchmarkError(f"response omitted {key!r}")
 
 
+def nested_response_object(value: Any, key: str) -> dict[str, Any]:
+    enclosing = find_object(value, key)
+    nested = enclosing.get(key)
+    if not isinstance(nested, dict):
+        raise BenchmarkError(f"response {key!r} payload was not an object")
+    return nested
+
+
 def response_text(value: Any) -> str:
     chunks: list[str] = []
     for candidate in walk_json(value):
@@ -1232,6 +1240,20 @@ def resolve_cli(raw: str | None) -> Path:
             if path.is_file() and os.access(path, os.X_OK):
                 return path.resolve(strict=True)
     raise BenchmarkError("rpce-cli-debug was not found")
+
+
+def exact_live_build_identity(cli: Path, plan: dict[str, Any]) -> dict[str, str]:
+    resolved_cli = cli.resolve(strict=True)
+    app_executable = resolved_cli.parent / "RepoPrompt"
+    if not app_executable.is_file() or not os.access(app_executable, os.X_OK):
+        raise BenchmarkError("resolved CE CLI did not identify the exact RepoPrompt app executable")
+    source = Path(__file__).resolve(strict=True)
+    return {
+        "cli_sha256": sha256_bytes(resolved_cli.read_bytes()),
+        "app_executable_sha256": sha256_bytes(app_executable.read_bytes()),
+        "harness_source_sha256": sha256_bytes(source.read_bytes()),
+        "base_commit_oid": str(plan["dataset"]["base_commit_oid"]),
+    }
 
 
 def validate_uuid(value: str, label: str) -> str:
@@ -1811,6 +1833,67 @@ def self_test_command(_args: argparse.Namespace) -> int:
         transcript_evidence["call_count"] == 2
         and transcript_evidence["reported_result_status_count"] == 0
     )
+    fixture_worktree_id = "wt-transcript-fixture"
+    fixture_worktree_path = Path("/tmp/rpce-transcript-physical").resolve()
+    worktree_scope = {
+        "kind": "session_bound_worktree",
+        "display_identity": "logical_canonical_root",
+        "effective_identity": "bound_worktree_root",
+        "root_mappings": [{
+            "worktree_id": fixture_worktree_id,
+            "logical_root_path": str(fixture_root),
+            "effective_root_path": str(fixture_worktree_path),
+        }],
+    }
+    structured_search_record = dict(search_record, worktree_scope=worktree_scope)
+    structured_read_record = dict(read_record, worktree_scope=worktree_scope)
+    strict_transcript = "".join((
+        '<tool_call name="mcp__file_search">',
+        html.escape(json.dumps({
+            "pattern": marker, "regex": False,
+            "filter": {"paths": [str(fixture_file)]},
+        })),
+        "</tool_call>",
+        '<tool_result name="mcp__file_search">',
+        html.escape(json.dumps(structured_search_record)),
+        "</tool_result>",
+        '<tool_call name="mcp__read_file">',
+        html.escape(json.dumps({"path": str(fixture_file)})),
+        "</tool_call>",
+        '<tool_result name="mcp__read_file">',
+        html.escape(json.dumps(structured_read_record)),
+        "</tool_result>",
+        "<assistant>RPCE_STRICT_TRANSCRIPT_OK</assistant>",
+    ))
+    strict_expectations = {
+        "root_id": fixture_root_id,
+        "root_path": str(fixture_root),
+        "root_type": "linkedWorktree",
+        "worktree_id": fixture_worktree_id,
+        "worktree_path": str(fixture_worktree_path),
+        "read_marker": marker,
+    }
+    strict_evidence = verify_agent_file_tool_transcript(
+        strict_transcript,
+        expected_output="RPCE_STRICT_TRANSCRIPT_OK",
+        expected_marker=marker,
+        expected_file_path=str(fixture_file),
+        strict_result_expectations=strict_expectations,
+    )
+    checks["strict_transcript_structured_results_accepted"] = (
+        len(strict_evidence["structured_result_evidence"]) == 2
+    )
+    try:
+        verify_agent_file_tool_transcript(
+            transcript,
+            expected_output="RPCE_INHERITED_CHILD_OK",
+            expected_marker=marker,
+            expected_file_path=str(fixture_file),
+            strict_result_expectations=strict_expectations,
+        )
+        checks["strict_transcript_spartan_results_rejected"] = False
+    except BenchmarkError:
+        checks["strict_transcript_spartan_results_rejected"] = True
     parent_transcript = "".join([
         "".join((
             '<tool_call name="mcp__file_search">',
@@ -3511,6 +3594,256 @@ def self_test_command(_args: argparse.Namespace) -> int:
     checks["resource_core_range_rejected"] = "invalid_resource_core_utilization" in validate_resource_evidence(
         dict(resource_fixture, peak_interval_core_utilization_percent=10.0)
     )
+    quantized_resource = dict(
+        resource_fixture,
+        baseline_resident_mb=408.8,
+        peak_resident_mb=465.7,
+        final_resident_mb=420.0,
+        peak_resident_delta_mb=57.0,
+        retained_resident_delta_mb=11.2,
+    )
+    checks["resource_quantized_point_one_discrepancy_accepted"] = not validate_resource_evidence(
+        quantized_resource
+    )
+    checks["resource_quantized_point_two_discrepancy_rejected"] = (
+        "inconsistent_resident_peak_delta" in validate_resource_evidence(
+            dict(quantized_resource, peak_resident_delta_mb=57.1)
+        )
+    )
+    checks["resource_off_grid_rejected"] = "invalid_resident_absolute_mb" in validate_resource_evidence(
+        dict(resource_fixture, peak_resident_mb=120.05)
+    )
+    negative_retained_resource = dict(
+        resource_fixture,
+        final_resident_mb=99.9,
+        retained_resident_delta_mb=-0.1,
+        final_physical_footprint_mb=79.9,
+        retained_physical_footprint_delta_mb=-0.1,
+    )
+    checks["resource_negative_retained_deltas_accepted"] = not validate_resource_evidence(
+        negative_retained_resource
+    )
+    checks["resource_negative_peak_delta_rejected"] = (
+        "inconsistent_resident_peak_delta" in validate_resource_evidence(
+            dict(resource_fixture, peak_resident_delta_mb=-20.0)
+        )
+    )
+    checks["resource_nonfinite_signed_delta_rejected"] = (
+        "invalid_resident_delta_mb" in validate_resource_evidence(
+            dict(resource_fixture, retained_resident_delta_mb=float("-inf"))
+        )
+    )
+    drained_fixture = {
+        "contains_paths": False, "is_drained": True,
+        **{field: 0 for field in DRAIN_ZERO_COUNT_FIELDS},
+    }
+    checks["session_drain_zero_snapshot_accepted"] = valid_drain_snapshot(drained_fixture)
+    checks["session_drain_nonzero_snapshot_rejected"] = not valid_drain_snapshot(
+        dict(drained_fixture, matching_live_root_count=1)
+    )
+    recovery_shape = {
+        "content": [{"type": "text", "text": json.dumps({
+            "ok": True, "recovery": {"phase": "provider_start", "worktree_id": "worktree-1"},
+        })}],
+    }
+    drain_shape = {
+        "structuredContent": {
+            "ok": True, "drain": {"is_drained": True, "reserved_load_flight_count": 0},
+        },
+    }
+    checks["recovery_nested_payload_normalized"] = nested_response_object(
+        recovery_shape, "recovery"
+    ) == {"phase": "provider_start", "worktree_id": "worktree-1"}
+    checks["drain_nested_payload_normalized"] = nested_response_object(
+        drain_shape, "drain"
+    ) == {"is_drained": True, "reserved_load_flight_count": 0}
+    try:
+        nested_response_object({"recovery": "not-an-object"}, "recovery")
+        checks["nested_payload_wrong_shape_rejected"] = False
+    except BenchmarkError:
+        checks["nested_payload_wrong_shape_rejected"] = True
+    try:
+        required_cleanup_worktree_inventory({"isError": True})
+        checks["failed_final_status_free_inventory_rejected"] = False
+    except BenchmarkError:
+        checks["failed_final_status_free_inventory_rejected"] = True
+    failed_final_inventory_state = {
+        "cleanup_manual_required": True,
+        "attempts": [{
+            "path": None,
+            "manual_cleanup": True,
+            "cleanup_reason": "final_status_free_inventory_failed",
+        }],
+    }
+    checks["cleanup_command_nil_path_manual_inventory_failure_rejected"] = not (
+        cleanup_command_acceptance(True, failed_final_inventory_state)
+    )
+
+    projected_artifact_id = "projected-fixture"
+    projected_plan_fixture = {
+        "plan_sha256": "1" * 64,
+        "scope": {
+            "window_id": 1,
+            "workspace_id": str(uuid.uuid4()).upper(),
+            "context_id": str(uuid.uuid4()).upper(),
+            "root_id": str(uuid.uuid4()).upper(),
+            "root_path": "/tmp/projected-root",
+        },
+    }
+    projected_build_fixture = {
+        "cli_sha256": "2" * 64,
+        "app_executable_sha256": "3" * 64,
+        "harness_source_sha256": "4" * 64,
+        "base_commit_oid": "5" * 40,
+    }
+    projected_invocation = 7
+    projected_summary_fixture = {
+        "status": "completed",
+        "artifact_id": projected_artifact_id,
+        "plan_sha256": projected_plan_fixture["plan_sha256"],
+        "build_identity": projected_build_fixture,
+        "process_state": "warm",
+        "checkout_kind": "linked-worktree",
+        "route": "projected",
+        "width": 1,
+        "invocation": projected_invocation,
+        "warmup_groups": 1,
+        "retained_groups": FIXED_RETAINED_SAMPLES,
+        "expected_sample_count": 1 + FIXED_RETAINED_SAMPLES,
+        "sample_count": 1 + FIXED_RETAINED_SAMPLES,
+        "valid_retained_count": FIXED_RETAINED_SAMPLES,
+        "primary_valid_retained_count": FIXED_RETAINED_SAMPLES,
+        "follow_on_accepted_retained_count": FIXED_RETAINED_SAMPLES,
+        "invalid_count": 0,
+        "operational_error": None,
+        "cleanup_complete": True,
+    }
+
+    def projected_sample_fixture(ordinal: int) -> dict[str, Any]:
+        return {
+            "artifact_id": projected_artifact_id,
+            "plan_sha256": projected_plan_fixture["plan_sha256"],
+            "process_state": "warm",
+            "checkout_kind": "linked-worktree",
+            "route": "projected",
+            "width": 1,
+            "invocation": projected_invocation,
+            "ordinal": ordinal,
+            "warmup": ordinal == 1,
+            "valid": True,
+            "invalid_reasons": [],
+            "primary_performance": {
+                "valid": True,
+                "identity": {
+                    "build": projected_build_fixture,
+                    "invocation": projected_invocation,
+                    "ordinal": ordinal,
+                },
+                "diagnostic_checkpoint": {
+                    "sample": {
+                        "invocation": projected_invocation,
+                        "ordinal": ordinal,
+                        "route_counts": expected_actual_route_counts("projected"),
+                        "fallback_counts": {},
+                    },
+                },
+            },
+            "follow_on_acceptance": {"accepted": True},
+        }
+
+    projected_samples_fixture = [
+        projected_sample_fixture(ordinal)
+        for ordinal in range(1, 2 + FIXED_RETAINED_SAMPLES)
+    ]
+    require_exact_projected_inference_identity(
+        projected_summary_fixture,
+        projected_plan_fixture,
+        projected_plan_fixture,
+        artifact_id=projected_artifact_id,
+        expected_build=projected_build_fixture,
+    )
+    require_exact_projected_inference_cohort(
+        projected_summary_fixture,
+        projected_samples_fixture,
+        artifact_id=projected_artifact_id,
+        plan_sha256=projected_plan_fixture["plan_sha256"],
+        expected_build=projected_build_fixture,
+    )
+    checks["projected_prerequisite_exact_fixture_accepted"] = True
+    bad_root_plan = json.loads(json.dumps(projected_plan_fixture))
+    bad_root_plan["scope"]["root_path"] = "/tmp/wrong-root"
+    try:
+        require_exact_projected_inference_identity(
+            projected_summary_fixture,
+            bad_root_plan,
+            projected_plan_fixture,
+            artifact_id=projected_artifact_id,
+            expected_build=projected_build_fixture,
+        )
+        checks["projected_prerequisite_wrong_root_rejected"] = False
+    except BenchmarkError:
+        checks["projected_prerequisite_wrong_root_rejected"] = True
+    bad_build_summary = dict(
+        projected_summary_fixture,
+        build_identity=dict(projected_build_fixture, harness_source_sha256="9" * 64),
+    )
+    try:
+        require_exact_projected_inference_identity(
+            bad_build_summary,
+            projected_plan_fixture,
+            projected_plan_fixture,
+            artifact_id=projected_artifact_id,
+            expected_build=projected_build_fixture,
+        )
+        checks["projected_prerequisite_wrong_source_rejected"] = False
+    except BenchmarkError:
+        checks["projected_prerequisite_wrong_source_rejected"] = True
+    for field in ("cli_sha256", "app_executable_sha256", "base_commit_oid"):
+        wrong_value = "8" * (40 if field == "base_commit_oid" else 64)
+        wrong_summary = dict(
+            projected_summary_fixture,
+            build_identity=dict(projected_build_fixture, **{field: wrong_value}),
+        )
+        check_name = f"projected_prerequisite_wrong_{field}_rejected"
+        try:
+            require_exact_projected_inference_identity(
+                wrong_summary,
+                projected_plan_fixture,
+                projected_plan_fixture,
+                artifact_id=projected_artifact_id,
+                expected_build=projected_build_fixture,
+            )
+            checks[check_name] = False
+        except BenchmarkError:
+            checks[check_name] = True
+    bad_samples = json.loads(json.dumps(projected_samples_fixture))
+    bad_samples[0]["warmup"] = False
+    bad_samples[1]["primary_performance"]["diagnostic_checkpoint"]["sample"][
+        "fallback_counts"
+    ] = {"unexpected": 1}
+    try:
+        require_exact_projected_inference_cohort(
+            projected_summary_fixture,
+            bad_samples,
+            artifact_id=projected_artifact_id,
+            plan_sha256=projected_plan_fixture["plan_sha256"],
+            expected_build=projected_build_fixture,
+        )
+        checks["projected_prerequisite_bad_warmup_fallback_rejected"] = False
+    except BenchmarkError:
+        checks["projected_prerequisite_bad_warmup_fallback_rejected"] = True
+    bad_summary = dict(projected_summary_fixture, invalid_count=1)
+    try:
+        require_exact_projected_inference_cohort(
+            bad_summary,
+            projected_samples_fixture,
+            artifact_id=projected_artifact_id,
+            plan_sha256=projected_plan_fixture["plan_sha256"],
+            expected_build=projected_build_fixture,
+        )
+        checks["projected_prerequisite_invalid_sample_rejected"] = False
+    except BenchmarkError:
+        checks["projected_prerequisite_invalid_sample_rejected"] = True
     checks["git_family_count_rejected"] = "invalid_git_family_counts" in validate_git_evidence({
         "available": True, "command_count": 2, "families": {"status": 1},
         "priorities": {"normal": 2}, "queue_wait_us": 0, "duration_us": 1,
@@ -4852,6 +5185,22 @@ def validate_filesystem_evidence(value: Any) -> list[str]:
     return failures
 
 
+PUBLISHED_MEMORY_GRID_MB = 0.1
+PUBLISHED_MEMORY_DELTA_TOLERANCE_MB = PUBLISHED_MEMORY_GRID_MB + 1e-9
+
+
+def published_memory_value(value: Any, *, signed: bool = False) -> bool:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or (not signed and float(value) < 0)
+    ):
+        return False
+    scaled = float(value) / PUBLISHED_MEMORY_GRID_MB
+    return math.isclose(scaled, round(scaled), rel_tol=0.0, abs_tol=1e-8)
+
+
 def validate_resource_evidence(value: Any) -> list[str]:
     required = REQUIRED_RESOURCE_FIELDS - {"physical_footprint_available"}
     if (
@@ -4872,21 +5221,33 @@ def validate_resource_evidence(value: Any) -> list[str]:
         final = value.get(f"final_{family}_mb")
         peak_delta = value.get(f"peak_{family}_delta_mb")
         retained_delta = value.get(f"retained_{family}_delta_mb")
-        if not all(finite_number(item, positive=True) for item in (baseline, peak, final)):
+        if not all(
+            finite_number(item, positive=True) and published_memory_value(item)
+            for item in (baseline, peak, final)
+        ):
             failures.append(f"invalid_{family}_absolute_mb")
             continue
         if not all(
-            isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item))
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and math.isfinite(float(item))
+            and published_memory_value(item, signed=True)
             for item in (peak_delta, retained_delta)
         ):
             failures.append(f"invalid_{family}_delta_mb")
             continue
         if float(peak) < max(float(baseline), float(final)):
             failures.append(f"invalid_{family}_peak_mb")
-        tolerance = 1e-6 * max(1.0, abs(float(peak)), abs(float(final)), abs(float(baseline)))
-        if not math.isclose(float(peak_delta), float(peak) - float(baseline), abs_tol=tolerance):
+        # Absolute values and deltas are independently published on a 0.1 MiB grid.
+        # Their displayed arithmetic may legitimately differ by one grid cell, never two.
+        tolerance = PUBLISHED_MEMORY_DELTA_TOLERANCE_MB
+        if not math.isclose(
+            float(peak_delta), float(peak) - float(baseline), rel_tol=0.0, abs_tol=tolerance
+        ):
             failures.append(f"inconsistent_{family}_peak_delta")
-        if not math.isclose(float(retained_delta), float(final) - float(baseline), abs_tol=tolerance):
+        if not math.isclose(
+            float(retained_delta), float(final) - float(baseline), rel_tol=0.0, abs_tol=tolerance
+        ):
             failures.append(f"inconsistent_{family}_retained_delta")
     for field in (
         "session_cpu_ms", "session_user_cpu_ms", "session_system_cpu_ms",
@@ -6048,10 +6409,7 @@ def run_command(args: argparse.Namespace) -> int:
     root = Path(plan["scope"]["root_path"])
     validate_planned_base_commit(plan, root)
     resolved_cli = cli.resolve(strict=True)
-    build_identity = {
-        "cli_sha256": sha256_bytes(resolved_cli.read_bytes()),
-        "base_commit_oid": str(plan["dataset"]["base_commit_oid"]),
-    }
+    build_identity = exact_live_build_identity(cli, plan)
     committed_fixture = {
         "base_commit_oid": str(plan["dataset"]["base_commit_oid"]),
         "read_blob_sha256": str(plan["dataset"]["read_blob_sha256"]),
@@ -6071,7 +6429,7 @@ def run_command(args: argparse.Namespace) -> int:
     save_json(artifact / "plan.json", plan, exclusive=True)
     state: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "plan_sha256": plan["plan_sha256"], "sessions": [],
-        "worktrees": [], "control_id": None, "scope_reset": False,
+        "worktrees": [], "attempts": [], "control_id": None, "scope_reset": False,
         "benchmark_gate_expected_enabled": True, "memory_session_id": None,
         "build_identity": build_identity,
     }
@@ -6123,6 +6481,21 @@ def run_command(args: argparse.Namespace) -> int:
                     invocation, global_ordinal, warmup, branch,
                 )
                 armed.append((global_ordinal, token, correlation, branch))
+                state["attempts"].append({
+                    "correlation_id": correlation,
+                    "control_id": control_id,
+                    "invocation": invocation,
+                    "ordinal": global_ordinal,
+                    "warmup": warmup,
+                    "branch": branch,
+                    "expected_head": plan["dataset"]["base_commit_oid"],
+                    "state": "armed",
+                    "session_id": None,
+                    "context_id": None,
+                    "worktree_id": None,
+                    "path": None,
+                })
+                save_json(artifact / "state.json", state)
             starts: dict[int, Any] = {}
             with ThreadPoolExecutor(max_workers=args.width) as pool:
                 futures = {
@@ -6146,6 +6519,16 @@ def run_command(args: argparse.Namespace) -> int:
                 )
                 if bound_worktree_path != str(owned_worktree):
                     raise BenchmarkError("agent worktree binding path changed after discovery")
+                attempt = next(
+                    item for item in state["attempts"]
+                    if item["correlation_id"] == correlation
+                )
+                attempt.update({
+                    "state": "started", "session_id": session_id,
+                    "context_id": context_id, "worktree_id": worktree_id,
+                    "path": str(owned_worktree),
+                    "path_sha256": sha256_bytes(str(owned_worktree).encode()),
+                })
                 state["sessions"].append({"session_id": session_id, "context_id": context_id, "terminal": False})
                 state["worktrees"].append({
                     "path": str(owned_worktree), "worktree_id": worktree_id,
@@ -6269,6 +6652,14 @@ def run_command(args: argparse.Namespace) -> int:
             }
         save_json(artifact / "resources.json", resources, exclusive=True)
         state["memory_stopped"] = memory_cleanup.get("verified_stopped") is True
+        try:
+            cleanup.extend(cleanup_benchmark_attempts(runner, plan, state, artifact.name))
+        except BaseException as cleanup_error:
+            state["cleanup_manual_required"] = True
+            cleanup.append({
+                "action": "recover_agent_worktrees", "ok": False,
+                "manual_cleanup": True, "reason": operation_failure_type(cleanup_error),
+            })
         state["route_restored"] = control_id is None
         if control_id is not None:
             try:
@@ -6293,19 +6684,6 @@ def run_command(args: argparse.Namespace) -> int:
             state["benchmark_gate_unchanged"] = True
         except BenchmarkError:
             state["benchmark_gate_unchanged"] = False
-        for session in state["sessions"]:
-            try:
-                if not session.get("terminal"):
-                    session["status"] = terminalize(runner, session["session_id"])
-                    session["terminal"] = session["status"] in TERMINAL_STATES
-            except BaseException as cleanup_error:
-                session["status"] = f"cleanup_error:{cleanup_error!r}"
-                session["terminal"] = False
-            cleanup.append({
-                "action": "terminalize_agent",
-                "session_id_sha256": sha256_bytes(session["session_id"].encode()),
-                "status": session.get("status"), "terminal": session.get("terminal") is True,
-            })
         cleanup.extend([
             memory_cleanup,
             {
@@ -6315,26 +6693,6 @@ def run_command(args: argparse.Namespace) -> int:
             {"action": "reset_diagnostics", "ok": state["scope_reset"]},
             {"action": "preserve_benchmark_setting", "ok": state["benchmark_gate_unchanged"]},
         ])
-        for worktree in {item["path"]: item for item in state["worktrees"]}.values():
-            try:
-                cleanup.append(clean_owned_worktree(
-                    root, worktree["path"], all(item.get("terminal") for item in state["sessions"]),
-                    expected_branch=worktree.get("branch"),
-                    expected_path=worktree["path"],
-                    expected_head=plan["dataset"]["base_commit_oid"],
-                    ownership_proven=True,
-                ))
-            except BaseException as cleanup_error:
-                cleanup.append({
-                    "action": "remove_worktree",
-                    "path_sha256": sha256_bytes(worktree["path"].encode()),
-                    "branch_sha256": sha256_bytes(worktree["branch"].encode()),
-                    "ownership_proven": True,
-                    "worktree_absent": False,
-                    "branch_absent": False,
-                    "removed": False,
-                    "reason": "cleanup_error",
-                })
         final_target_ok = False
         try:
             verify_disposable_target(runner, plan, require_only_planned_root=True)
@@ -6345,15 +6703,18 @@ def run_command(args: argparse.Namespace) -> int:
         save_cleanup_proof(artifact / "cleanup.json", cleanup)
         save_json(artifact / "state.json", state)
     cleanup_ok = validate_cleanup_evidence(
-        cleanup, run_artifact=True, expected_agent_count=len(state["sessions"]),
-        expected_worktree_count=len({item["path"] for item in state["worktrees"]}),
+        cleanup, run_artifact=True, expected_agent_count=len(state.get("attempts", [])),
+        expected_worktree_count=len({
+            item.get("path") for item in state.get("attempts", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }),
     )
     resource_metrics = find_value(resources, "metrics")
     resource_failures = validate_resource_evidence(resource_metrics)
     try:
         build_unchanged = (
             resolved_cli.exists()
-            and sha256_bytes(resolved_cli.read_bytes()) == build_identity["cli_sha256"]
+            and exact_live_build_identity(cli, plan) == build_identity
             and validate_planned_base_commit(plan, root) == build_identity["base_commit_oid"]
         )
     except (BenchmarkError, OSError):
@@ -6590,6 +6951,7 @@ def verify_agent_file_tool_transcript(
     expected_marker: str,
     expected_file_path: str,
     expected_pairs: int = 1,
+    strict_result_expectations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     records = parse_agent_transcript_records(transcript_xml)
     if expected_pairs < 1:
@@ -6609,6 +6971,7 @@ def verify_agent_file_tool_transcript(
     statuses = {"ok", "complete", "completed", "ready", "success"}
     previous_ordinal = 0
     reported_statuses: list[str] = []
+    structured_results: list[dict[str, Any]] = []
     for call, result in zip(records["calls"], records["results"], strict=True):
         if not (previous_ordinal < call["ordinal"] < result["ordinal"]):
             raise BenchmarkError("transcript tool calls/results were unordered")
@@ -6630,13 +6993,43 @@ def verify_agent_file_tool_transcript(
         else:
             if arguments.get("path") != expected_file_path:
                 raise BenchmarkError("read_file transcript arguments did not match the exact request")
+        if strict_result_expectations is not None:
+            result_payload = result.get("result")
+            if not isinstance(result_payload, dict):
+                raise BenchmarkError("transcript result omitted structured file-tool evidence")
+            expected_content = (
+                expected_marker if call["tool"] == "file_search"
+                else strict_result_expectations["read_marker"]
+            )
+            evidence = structured_success_evidence(
+                result_payload,
+                call["tool"],
+                expected_root_id=strict_result_expectations["root_id"],
+                expected_root_path=strict_result_expectations["root_path"],
+                expected_root_type=strict_result_expectations["root_type"],
+                expected_file_path=expected_file_path,
+                expected_file_type="file",
+                expected_content=expected_content,
+                expected_worktree_id=strict_result_expectations["worktree_id"],
+                expected_physical_worktree_path=strict_result_expectations["worktree_path"],
+            )
+            if evidence.get("ok") is not True:
+                raise BenchmarkError(
+                    f"transcript {call['tool']} result evidence was invalid: {evidence.get('error')}"
+                )
+            structured_results.append(evidence)
     if not records["assistants"] or records["assistants"][-1] != expected_output:
         raise BenchmarkError("transcript final assistant output mismatch")
     return {
         "call_count": expected_pairs * 2, "result_count": expected_pairs * 2,
         "search_call_count": expected_pairs, "read_call_count": expected_pairs,
         "reported_result_status_count": len(reported_statuses),
-        "proof_basis": "spartan ordered invocations and paired result events",
+        "structured_result_evidence": structured_results,
+        "proof_basis": (
+            "successful structured result content and exact bound-root identity"
+            if strict_result_expectations is not None
+            else "spartan ordered invocations and paired result events"
+        ),
         "final_output": records["assistants"][-1],
     }
 
@@ -6695,6 +7088,7 @@ def wait_agent_success(
     expected_file_path: str,
     context_id: str,
     expected_pairs: int = 1,
+    strict_result_expectations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     waited = runner.call(
         f"wait-success-{session_id[:8]}", "agent_run",
@@ -6714,6 +7108,7 @@ def wait_agent_success(
             transcript_xml_from_log(log), expected_output=expected_output,
             expected_marker=expected_marker, expected_file_path=expected_file_path,
             expected_pairs=expected_pairs,
+            strict_result_expectations=strict_result_expectations,
         )
     except BenchmarkError as error:
         transcript_error = str(error)
@@ -9812,6 +10207,16 @@ def validate_cleanup_evidence(
     return required <= set(by_action)
 
 
+def cleanup_command_acceptance(
+    cleanup_evidence_complete: bool,
+    state: dict[str, Any],
+) -> bool:
+    return (
+        cleanup_evidence_complete
+        and state.get("cleanup_manual_required") is not True
+    )
+
+
 def memory_sampler_record(value: Any, action: str) -> dict[str, Any]:
     if not call_succeeded(value):
         raise BenchmarkError(f"memory sampler {action} query failed")
@@ -10492,7 +10897,10 @@ def aggregate_command(args: argparse.Namespace) -> int:
             build_identity = item.get("build_identity")
             if (
                 not isinstance(build_identity, dict)
-                or set(build_identity) != {"cli_sha256", "base_commit_oid"}
+                or set(build_identity) != {
+                    "cli_sha256", "app_executable_sha256",
+                    "harness_source_sha256", "base_commit_oid",
+                }
                 or build_identity.get("base_commit_oid") != plan["dataset"]["base_commit_oid"]
                 or not isinstance(build_identity.get("cli_sha256"), str)
                 or len(build_identity["cli_sha256"]) != 64
@@ -10982,6 +11390,31 @@ def aggregate_command(args: argparse.Namespace) -> int:
     return 0 if decision == "pass" else 2 if decision == "incomplete" else 1
 
 
+def cleanup_live_worktree_inventory(value: Any) -> list[dict[str, str]]:
+    final = benchmark_final_response(value)
+    worktrees = final.get("worktrees") if isinstance(final, dict) else None
+    if not isinstance(worktrees, list):
+        return []
+    records: list[dict[str, str]] = []
+    for worktree in worktrees:
+        if not isinstance(worktree, dict):
+            continue
+        worktree_id = worktree.get("worktree_id")
+        path, branch, head = worktree.get("path"), worktree.get("branch"), worktree.get("head")
+        repository_id = find_value(worktree, "repository_id")
+        if all(isinstance(item, str) and item for item in (worktree_id, path, branch, head)):
+            resolved_path = str(Path(path).resolve(strict=False))
+            records.append({
+                "worktree_id": worktree_id,
+                "path": resolved_path,
+                "path_sha256": sha256_bytes(resolved_path.encode()),
+                "branch": branch,
+                "head": head.lower(),
+                "repository_id": repository_id if isinstance(repository_id, str) else "",
+            })
+    return records
+
+
 def cleanup_live_worktree_records(value: Any) -> set[tuple[str, str, str, str]]:
     final = benchmark_final_response(value)
     worktrees = final.get("worktrees") if isinstance(final, dict) else None
@@ -11082,6 +11515,232 @@ def cleanup_worktree_ownership_evidence(
     }
 
 
+DRAIN_ZERO_COUNT_FIELDS = (
+    "installed_token_count", "provisional_token_count", "root_claim_count",
+    "path_reservation_count", "matching_live_root_count",
+    "matching_watcher_attachment_count", "pending_seeded_root_count",
+    "pending_visibility_waiter_count", "queued_publication_count",
+    "applying_publication_count", "outstanding_publication_count",
+    "publisher_waiter_count", "unloading_root_count", "reserved_load_flight_count",
+)
+
+
+def valid_drain_snapshot(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("is_drained") is True
+        and value.get("contains_paths") is False
+        and all(value.get(field) == 0 for field in DRAIN_ZERO_COUNT_FIELDS)
+    )
+
+
+def required_cleanup_worktree_inventory(response: Any) -> list[dict[str, Any]]:
+    if not call_succeeded(response):
+        raise BenchmarkError("status-free worktree inventory failed")
+    return cleanup_live_worktree_inventory(response)
+
+
+def cleanup_benchmark_attempts(
+    runner: CLIRunner,
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    artifact_name: str,
+) -> list[dict[str, Any]]:
+    """Fail-closed logical-release-before-physical-removal cleanup for armed starts."""
+    actions: list[dict[str, Any]] = []
+    attempts = [item for item in state.get("attempts", []) if isinstance(item, dict)]
+    inventory_response = runner.call(
+        "cleanup-live-worktrees", "manage_worktree",
+        {"op": "list", "repo_root": plan["scope"]["root_path"]},
+        check=False, timeout=30,
+    )
+    inventory = cleanup_live_worktree_inventory(inventory_response) if call_succeeded(inventory_response) else []
+    inventory_ok = call_succeeded(inventory_response)
+    logical_safe = inventory_ok
+
+    for attempt in attempts:
+        correlation = attempt.get("correlation_id")
+        control_id = attempt.get("control_id") or state.get("control_id")
+        if not isinstance(correlation, str) or not isinstance(control_id, str):
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = "missing_recovery_identity"
+            logical_safe = False
+            continue
+        attempt["control_id"] = control_id
+        common = diagnostic_payload(
+            plan, "start_recovery_snapshot", correlation_id=correlation,
+            control_id=control_id,
+        )
+        try:
+            snapshot_response = runner.call(
+                f"cleanup-recovery-{attempt.get('ordinal')}", DEBUG_TOOL,
+                common, check=False, timeout=15,
+            )
+            recovery = nested_response_object(snapshot_response, "recovery") if call_succeeded(snapshot_response) else {}
+            abort_response = runner.call(
+                f"cleanup-abort-{attempt.get('ordinal')}", DEBUG_TOOL,
+                diagnostic_payload(
+                    plan, "start_recovery_abort", correlation_id=correlation,
+                    control_id=control_id,
+                ),
+                check=False, timeout=15,
+            )
+            if call_succeeded(abort_response):
+                recovery = nested_response_object(abort_response, "recovery")
+            else:
+                raise BenchmarkError("recoverable-start abort failed")
+        except BaseException as error:
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = f"recovery_failed:{operation_failure_type(error)}"
+            logical_safe = False
+            continue
+
+        expected = {
+            "worktree_id": recovery.get("worktree_id"),
+            "branch": recovery.get("branch"),
+            "head": str(recovery.get("head") or "").lower(),
+            "repository_id": recovery.get("repository_id"),
+            "path_sha256": recovery.get("worktree_path_sha256"),
+        }
+        matches = [item for item in inventory if all(
+            not expected[key] or item.get(key) == expected[key]
+            for key in expected
+        )]
+        if expected["worktree_id"] and len(matches) != 1:
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = "ambiguous_status_free_inventory"
+            logical_safe = False
+            continue
+        matched = matches[0] if matches else None
+        if matched:
+            attempt.update({
+                "worktree_id": matched["worktree_id"], "path": matched["path"],
+                "path_sha256": matched["path_sha256"], "branch": matched["branch"],
+                "head": matched["head"], "repository_id": matched["repository_id"],
+            })
+        session_id = recovery.get("agent_session_id")
+        context_id = recovery.get("target_tab_id")
+        requires_cancel = find_value(abort_response, "requires_agent_cancel") is True
+        discard_completed = find_value(abort_response, "discard_completed") is True
+        terminal = discard_completed
+        status = "discarded" if discard_completed else None
+        if requires_cancel and isinstance(session_id, str) and isinstance(context_id, str):
+            try:
+                status = terminalize(runner, session_id, context_id)
+                terminal = status in TERMINAL_STATES
+            except BaseException as error:
+                status = f"cleanup_error:{operation_failure_type(error)}"
+        actions.append({
+            "action": "terminalize_agent",
+            "session_id_sha256": sha256_bytes(str(session_id).encode()),
+            "status": status, "terminal": terminal,
+            "ownership_proven": isinstance(session_id, str),
+        })
+        if not terminal or not isinstance(session_id, str):
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = "agent_not_terminal"
+            logical_safe = False
+            continue
+        attempt["session_id"], attempt["context_id"] = session_id, context_id
+        if not discard_completed:
+            unbind = runner.call(
+                f"cleanup-unbind-{attempt.get('ordinal')}", "manage_worktree",
+                {"op": "unbind", "session_id": session_id, "all": True},
+                check=False, timeout=30,
+            )
+            actions.append({
+                "action": "unbind_session_worktree",
+                "session_id_sha256": sha256_bytes(session_id.encode()),
+                "ok": call_succeeded(unbind),
+            })
+            if not call_succeeded(unbind):
+                attempt["manual_cleanup"] = True
+                attempt["cleanup_reason"] = "unbind_failed"
+                logical_safe = False
+                continue
+        drain_response = runner.call(
+            f"cleanup-drain-{attempt.get('ordinal')}", DEBUG_TOOL,
+            diagnostic_payload(
+                plan, "session_worktree_drain_snapshot", correlation_id=correlation,
+                control_id=control_id,
+            ),
+            check=False, timeout=15,
+        )
+        drain = nested_response_object(drain_response, "drain") if call_succeeded(drain_response) else {}
+        attempt["drain"] = drain
+        attempt["drained"] = valid_drain_snapshot(drain)
+        actions.append({
+            "action": "prove_session_worktree_drain",
+            "session_id_sha256": sha256_bytes(session_id.encode()),
+            "ok": attempt["drained"], "drain": drain,
+        })
+        if not attempt["drained"]:
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = "store_not_drained"
+            logical_safe = False
+
+    if logical_safe:
+        for attempt in attempts:
+            path = attempt.get("path")
+            branch = attempt.get("branch")
+            if not isinstance(path, str) or not isinstance(branch, str):
+                continue
+            actions.append(clean_owned_worktree(
+                Path(plan["scope"]["root_path"]), path, True,
+                expected_branch=branch, expected_path=path,
+                expected_head=plan["dataset"]["base_commit_oid"], ownership_proven=True,
+            ))
+
+    final_inventory_response = runner.call(
+        "cleanup-final-live-worktrees", "manage_worktree",
+        {"op": "list", "repo_root": plan["scope"]["root_path"]},
+        check=False, timeout=30,
+    )
+    try:
+        final_inventory = required_cleanup_worktree_inventory(final_inventory_response)
+    except BenchmarkError:
+        final_inventory = None
+        logical_safe = False
+        for attempt in attempts:
+            attempt["manual_cleanup"] = True
+            attempt["cleanup_reason"] = "final_status_free_inventory_failed"
+    for attempt in attempts:
+        path_digest = attempt.get("path_sha256")
+        correlation, control_id = attempt.get("correlation_id"), attempt.get("control_id")
+        absent = (
+            final_inventory is not None
+            and isinstance(path_digest, str)
+            and not any(item["path_sha256"] == path_digest for item in final_inventory)
+        )
+        final_drain: dict[str, Any] = {}
+        if isinstance(correlation, str) and isinstance(control_id, str):
+            response = runner.call(
+                f"cleanup-final-drain-{attempt.get('ordinal')}", DEBUG_TOOL,
+                diagnostic_payload(
+                    plan, "session_worktree_drain_snapshot", correlation_id=correlation,
+                    control_id=control_id,
+                ),
+                check=False, timeout=15,
+            )
+            final_drain = nested_response_object(response, "drain") if call_succeeded(response) else {}
+        attempt["final_absent"] = absent
+        attempt["final_drain"] = final_drain
+        actions.append({
+            "action": "final_session_worktree_proof",
+            "path_sha256": path_digest,
+            "worktree_absent": absent,
+            "drain": final_drain,
+            "ok": attempt.get("path") is None
+                or (absent and valid_drain_snapshot(final_drain)),
+        })
+        if attempt.get("path") is not None and (not absent or not valid_drain_snapshot(final_drain)):
+            attempt["manual_cleanup"] = True
+            logical_safe = False
+    state["attempts"] = attempts
+    state["cleanup_manual_required"] = not logical_safe
+    return actions
+
+
 def cleanup_command(args: argparse.Namespace) -> int:
     if not args.confirm_live_debug_app or not args.confirm_owned_resources:
         raise BenchmarkError("cleanup requires live-app and owned-resource confirmations")
@@ -11099,12 +11758,14 @@ def cleanup_command(args: argparse.Namespace) -> int:
         raise BenchmarkError("cleanup plan omitted a valid immutable base commit OID")
     worktree_inventory = runner.call(
         "cleanup-live-worktrees", "manage_worktree",
-        {"op": "list", "repo_root": str(root), "include_status": True}, check=False,
+        {"op": "list", "repo_root": str(root)}, check=False, timeout=30,
     )
     live_worktrees = (
         cleanup_live_worktree_records(worktree_inventory) if call_succeeded(worktree_inventory) else set()
     )
     actions: list[dict[str, Any]] = []
+    if state.get("attempts"):
+        actions.extend(cleanup_benchmark_attempts(runner, plan, state, artifact.name))
     if state.get("kind") == "codemap-gate":
         for hold in state.get("codemap_holds", []):
             if not isinstance(hold, dict) or hold.get("released") is True:
@@ -11131,7 +11792,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
             })
 
     session_proofs: list[dict[str, Any]] = []
-    for session in state.get("sessions", []):
+    for session in ([] if state.get("attempts") else state.get("sessions", [])):
         session_id = session.get("session_id") if isinstance(session, dict) else None
         context_id = session.get("context_id") if isinstance(session, dict) else None
         try:
@@ -11298,7 +11959,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
     actions.append({
         "action": "preserve_benchmark_setting", "ok": state["benchmark_gate_unchanged"],
     })
-    for item in state.get("worktrees", []):
+    for item in ([] if state.get("attempts") else state.get("worktrees", [])):
         proof = cleanup_worktree_ownership_evidence(
             item, live_worktrees=live_worktrees, proven_sessions=session_proofs,
             artifact_name=artifact.name, plan_commit_oid=plan_commit_oid,
@@ -11330,15 +11991,354 @@ def cleanup_command(args: argparse.Namespace) -> int:
     except BenchmarkError:
         pass
     actions.append({"action": "restore_workspace_roots", "ok": final_roots_restored})
-    cleanup_complete = validate_cleanup_evidence(
-        actions, run_artifact=True, expected_agent_count=len(state.get("sessions", [])),
-        expected_worktree_count=len(state.get("worktrees", [])),
+    cleanup_evidence_complete = validate_cleanup_evidence(
+        actions, run_artifact=True,
+        expected_agent_count=(
+            len(state.get("attempts", [])) if state.get("attempts")
+            else len(state.get("sessions", []))
+        ),
+        expected_worktree_count=(
+            len({
+                item.get("path") for item in state.get("attempts", [])
+                if isinstance(item, dict) and isinstance(item.get("path"), str)
+            }) if state.get("attempts") else len(state.get("worktrees", []))
+        ),
+    )
+    cleanup_complete = cleanup_command_acceptance(
+        cleanup_evidence_complete,
+        state,
     )
     state["cleanup_complete"] = cleanup_complete
     save_cleanup_proof(artifact / "cleanup.json", actions)
     save_json(artifact / "state.json", state)
     print(json.dumps(actions, indent=2, sort_keys=True))
     return 0 if cleanup_complete else 1
+
+
+def require_exact_projected_inference_identity(
+    summary: dict[str, Any],
+    projected_plan: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    artifact_id: str,
+    expected_build: dict[str, str],
+) -> None:
+    if (
+        summary.get("artifact_id") != artifact_id
+        or summary.get("plan_sha256") != plan.get("plan_sha256")
+        or summary.get("build_identity") != expected_build
+        or projected_plan != plan
+    ):
+        raise BenchmarkError("projected prerequisite plan/root/build identity was not exact")
+
+
+def require_exact_projected_inference_cohort(
+    summary: dict[str, Any],
+    samples: list[dict[str, Any]],
+    *,
+    artifact_id: str,
+    plan_sha256: str,
+    expected_build: dict[str, str],
+) -> None:
+    invocation = summary.get("invocation")
+    exact_summary = {
+        "status": "completed",
+        "artifact_id": artifact_id,
+        "plan_sha256": plan_sha256,
+        "build_identity": expected_build,
+        "process_state": "warm",
+        "checkout_kind": "linked-worktree",
+        "route": "projected",
+        "width": 1,
+        "warmup_groups": 1,
+        "retained_groups": FIXED_RETAINED_SAMPLES,
+        "expected_sample_count": 1 + FIXED_RETAINED_SAMPLES,
+        "sample_count": 1 + FIXED_RETAINED_SAMPLES,
+        "valid_retained_count": FIXED_RETAINED_SAMPLES,
+        "primary_valid_retained_count": FIXED_RETAINED_SAMPLES,
+        "follow_on_accepted_retained_count": FIXED_RETAINED_SAMPLES,
+        "invalid_count": 0,
+        "operational_error": None,
+        "cleanup_complete": True,
+    }
+    if (
+        not positive_integer(invocation)
+        or any(summary.get(key) != value for key, value in exact_summary.items())
+        or len(samples) != 1 + FIXED_RETAINED_SAMPLES
+    ):
+        raise BenchmarkError("projected prerequisite cohort summary was not exact")
+    for index, sample in enumerate(samples, start=1):
+        primary = sample.get("primary_performance")
+        checkpoint = primary.get("diagnostic_checkpoint") if isinstance(primary, dict) else None
+        diagnostic_sample = checkpoint.get("sample") if isinstance(checkpoint, dict) else None
+        identity = primary.get("identity") if isinstance(primary, dict) else None
+        follow_on = sample.get("follow_on_acceptance")
+        if (
+            sample.get("artifact_id") != artifact_id
+            or sample.get("plan_sha256") != plan_sha256
+            or sample.get("process_state") != "warm"
+            or sample.get("checkout_kind") != "linked-worktree"
+            or sample.get("route") != "projected"
+            or sample.get("width") != 1
+            or sample.get("invocation") != invocation
+            or sample.get("ordinal") != index
+            or sample.get("warmup") is not (index == 1)
+            or sample.get("valid") is not True
+            or sample.get("invalid_reasons") != []
+            or not isinstance(primary, dict)
+            or primary.get("valid") is not True
+            or not isinstance(follow_on, dict)
+            or follow_on.get("accepted") is not True
+            or not isinstance(identity, dict)
+            or identity.get("build") != expected_build
+            or identity.get("invocation") != invocation
+            or identity.get("ordinal") != index
+            or not isinstance(diagnostic_sample, dict)
+            or diagnostic_sample.get("invocation") != invocation
+            or diagnostic_sample.get("ordinal") != index
+            or diagnostic_sample.get("route_counts") != expected_actual_route_counts("projected")
+            or diagnostic_sample.get("fallback_counts") != {}
+        ):
+            raise BenchmarkError("projected prerequisite sample identity/routes/fallbacks were not exact")
+
+
+def projected_inference_prerequisite(
+    projected: Path,
+    plan: dict[str, Any],
+    cli: Path,
+) -> dict[str, Any]:
+    required_files = ("summary.json", "plan.json", "samples.ndjson", "resources.json", "cleanup.json")
+    files = {name: projected / name for name in required_files}
+    if not all(path.is_file() for path in files.values()):
+        raise BenchmarkError("projected prerequisite omitted a required artifact file")
+    projected_summary = json.loads(files["summary.json"].read_text(encoding="utf-8"))
+    projected_plan = load_plan(files["plan.json"])
+    samples: list[dict[str, Any]] = []
+    for line in files["samples.ndjson"].read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise BenchmarkError("projected prerequisite sample was not an object")
+        samples.append(value)
+    expected_build = exact_live_build_identity(cli, plan)
+    require_exact_projected_inference_identity(
+        projected_summary,
+        projected_plan,
+        plan,
+        artifact_id=projected.name,
+        expected_build=expected_build,
+    )
+    require_exact_projected_inference_cohort(
+        projected_summary,
+        samples,
+        artifact_id=projected.name,
+        plan_sha256=plan["plan_sha256"],
+        expected_build=expected_build,
+    )
+    scope = plan["scope"]
+    root_identity = {
+        key: scope[key]
+        for key in ("window_id", "workspace_id", "context_id", "root_id", "root_path")
+    }
+    return {
+        "artifact_id": projected.name,
+        "plan_sha256": plan["plan_sha256"],
+        "build_identity": expected_build,
+        "root_identity": root_identity,
+        "root_identity_sha256": sha256_bytes(canonical_json(root_identity)),
+        "artifact_sha256": {
+            name: sha256_bytes(path.read_bytes()) for name, path in sorted(files.items())
+        },
+    }
+
+
+def live_inference_gate_command(args: argparse.Namespace) -> int:
+    if not args.confirm_live_debug_app or not args.confirm_owned_resources:
+        raise BenchmarkError("live-inference-gate requires live-app and owned-resource confirmations")
+    plan = load_plan(Path(args.plan))
+    cli = resolve_cli(args.cli)
+    root = Path(plan["scope"]["root_path"])
+    validate_planned_base_commit(plan, root)
+    projected = Path(args.projected_artifact).expanduser().resolve(strict=True)
+    prerequisite = projected_inference_prerequisite(projected, plan, cli)
+    artifact = make_artifact(Path(args.output_root), "live-inference-gate")
+    runner = CLIRunner(
+        cli, plan["scope"]["window_id"], plan["scope"]["context_id"], root, artifact
+    )
+    save_json(artifact / "plan.json", plan, exclusive=True)
+    state: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION, "plan_sha256": plan["plan_sha256"],
+        "kind": "live-inference-gate", "sessions": [], "worktrees": [],
+        "attempts": [], "control_id": None, "route_restored": False,
+        "scope_reset": False, "projected_prerequisite": prerequisite,
+    }
+    save_json(artifact / "state.json", state)
+    verify_scope(runner, plan)
+    require_benchmark_gate(runner)
+    verify_disposable_target(runner, plan, require_only_planned_root=True)
+    control_id: str | None = None
+    result: dict[str, Any] = {
+        "ok": False,
+        "projected_prerequisite": prerequisite,
+    }
+    cleanup: list[dict[str, Any]] = []
+    try:
+        control_id, _ = set_route(runner, plan, "projected")
+        state["control_id"] = control_id
+        branch = safe_name(f"rpce-bench-{artifact.name}-i1-o1")[:120]
+        token, correlation = arm_sample(
+            runner, plan, control_id, "projected", "warm", 1, 1, False, branch
+        )
+        attempt = {
+            "correlation_id": correlation, "control_id": control_id,
+            "invocation": 1, "ordinal": 1, "warmup": False,
+            "branch": branch, "expected_head": plan["dataset"]["base_commit_oid"],
+            "state": "armed", "session_id": None, "context_id": None,
+            "worktree_id": None, "path": None,
+        }
+        state["attempts"].append(attempt)
+        save_json(artifact / "state.json", state)
+        sentinel = "RPCE_LIVE_INFERENCE_FILE_TOOLS_OK"
+        message = (
+            "Use exactly two tools in this order and no others. First call file_search with "
+            f"pattern {plan['dataset']['search_marker']!r}, regex false, and filter.paths exactly "
+            f"[{plan['dataset']['read_path']!r}]. Then call read_file with path exactly "
+            f"{plan['dataset']['read_path']!r}. Do not use shell, edits, delegation, or any other tool. "
+            f"After both results, reply exactly {sentinel}."
+        )
+        start = runner.call(
+            "live-inference-start", "agent_run",
+            {
+                "op": "start", "detach": True, "message": message,
+                "session_name": "RPCE live inference gate",
+                "worktree_create": True, "worktree_branch": branch,
+                "worktree_base_ref": plan["dataset"]["base_commit_oid"],
+                "worktree_label": "RPCE live inference gate",
+                "context_id": plan["scope"]["context_id"],
+                "_worktree_startup_benchmark_token": token,
+            },
+            timeout=180,
+        )
+        session_id, context_id = response_session_id(start), response_context_id(start)
+        if not isinstance(context_id, str):
+            raise BenchmarkError("live inference start omitted child context")
+        owned_worktree = discover_owned_worktree(start, root, branch)
+        worktree_id, bound_path = exact_response_worktree_binding(start, owned_worktree)
+        if bound_path != str(owned_worktree):
+            raise BenchmarkError("live inference worktree binding mismatch")
+        attempt.update({
+            "state": "started", "session_id": session_id, "context_id": context_id,
+            "worktree_id": worktree_id, "path": str(owned_worktree),
+            "path_sha256": sha256_bytes(str(owned_worktree).encode()),
+        })
+        state["sessions"].append({
+            "session_id": session_id, "context_id": context_id, "terminal": False,
+        })
+        state["worktrees"].append({
+            "path": str(owned_worktree), "worktree_id": worktree_id,
+            "owned": True, "branch": branch,
+        })
+        save_json(artifact / "state.json", state)
+        transcript = wait_agent_success(
+            runner, session_id, expected_output=sentinel,
+            expected_marker=plan["dataset"]["search_marker"],
+            expected_file_path=plan["dataset"]["read_path"],
+            context_id=context_id,
+            expected_pairs=1,
+            strict_result_expectations={
+                "root_id": plan["scope"]["root_id"],
+                "root_path": plan["scope"]["root_path"],
+                "root_type": "primary_workspace",
+                "worktree_id": worktree_id,
+                "worktree_path": str(owned_worktree),
+                "read_marker": plan["dataset"]["read_marker"],
+            },
+        )
+        correctness, direct, _ = first_search_read(
+            runner, plan, correlation, context_id, owned_worktree, worktree_id
+        )
+        export, capture = capture_diagnostic(
+            runner, plan, correlation, action="export", label="live-inference-export"
+        )
+        sample = export.get("sample") if isinstance(export, dict) else None
+        identity_ok = isinstance(sample, dict) and all((
+            str(sample.get("correlation_id", "")).upper() == correlation.upper(),
+            str(sample.get("agent_session_id", "")).upper() == session_id.upper(),
+            sample.get("invocation") == 1, sample.get("ordinal") == 1,
+            sample.get("route_counts") == {"diffSeedServing": 1},
+            sample.get("fallback_counts") == {},
+        ))
+        result = {
+            "ok": transcript.get("ok") is True
+                and correctness == {"search": True, "read": True}
+                and direct.get("search", {}).get("ok") is True
+                and direct.get("read", {}).get("ok") is True
+                and capture.get("ok") is True and identity_ok,
+            "transcript": transcript,
+            "direct_bound_probes": direct,
+            "diagnostic_identity_valid": identity_ok,
+            "assistant_prose_accepted_as_evidence": False,
+        }
+    finally:
+        cleanup.extend(cleanup_benchmark_attempts(runner, plan, state, artifact.name))
+        if control_id is not None:
+            restored = runner.call(
+                "live-inference-restore", DEBUG_TOOL,
+                diagnostic_payload(plan, "restore_flags", control_id=control_id), check=False,
+            )
+            state["route_restored"] = call_succeeded(restored)
+        reset = runner.call(
+            "live-inference-reset", DEBUG_TOOL, diagnostic_payload(plan, "reset"), check=False
+        )
+        state["scope_reset"] = call_succeeded(reset)
+        sampler_cleanup = verify_resumed_memory_sampler_inactive(
+            runner,
+            expected_session_id=None,
+            expected_label=artifact.name,
+        )
+        try:
+            require_benchmark_gate(runner)
+            state["benchmark_gate_unchanged"] = True
+        except BenchmarkError:
+            state["benchmark_gate_unchanged"] = False
+        roots_restored = False
+        try:
+            verify_disposable_target(runner, plan, require_only_planned_root=True)
+            roots_restored = True
+        except BenchmarkError:
+            pass
+        cleanup.extend([
+            sampler_cleanup,
+            {"action": "restore_route", "ok": state["route_restored"]},
+            {"action": "reset_diagnostics", "ok": state["scope_reset"]},
+            {
+                "action": "preserve_benchmark_setting",
+                "ok": state["benchmark_gate_unchanged"],
+            },
+            {"action": "restore_workspace_roots", "ok": roots_restored},
+        ])
+        cleanup_complete = validate_cleanup_evidence(
+            cleanup,
+            run_artifact=True,
+            expected_agent_count=len(state.get("attempts", [])),
+            expected_worktree_count=len({
+                item.get("path")
+                for item in state.get("attempts", [])
+                if isinstance(item, dict) and isinstance(item.get("path"), str)
+            }),
+        )
+        state["cleanup_manual_required"] = (
+            state.get("cleanup_manual_required", False) or not cleanup_complete
+        )
+        save_cleanup_proof(artifact / "cleanup.json", cleanup)
+        save_json(artifact / "state.json", state)
+    result["cleanup_complete"] = not state.get("cleanup_manual_required", True)
+    result["artifact_directory"] = str(artifact)
+    result["ok"] = result.get("ok") is True and result["cleanup_complete"]
+    save_json(artifact / "summary.json", result, exclusive=True)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["ok"] else 1
 
 
 def add_live_common(parser: argparse.ArgumentParser) -> None:
@@ -11465,6 +12465,15 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--append-scoreboard")
     aggregate.add_argument("--confirm-append-scoreboard", action="store_true")
     aggregate.set_defaults(func=aggregate_command)
+
+    inference = sub.add_parser(
+        "live-inference-gate",
+        help="run one fail-fast real Agent Mode file-tool correctness gate",
+    )
+    add_live_common(inference)
+    inference.add_argument("--projected-artifact", required=True)
+    inference.add_argument("--confirm-owned-resources", action="store_true")
+    inference.set_defaults(func=live_inference_gate_command)
 
     cleanup = sub.add_parser("cleanup", help="resume idempotent cleanup for an interrupted run")
     cleanup.add_argument("--artifact", required=True)

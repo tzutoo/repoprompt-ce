@@ -321,6 +321,44 @@ passive tree, selection, Git/filesystem/planner/lock, and marker evidence in
 actual-route evidence for both validity decisions. Append iteration results to
 `prompt-exports/optimize-worktree-interactive-readiness-runs.md`.
 
+### Iteration 1 measurement-integrity remediation
+
+Resource receipts publish absolute resident/physical-footprint values and their
+deltas independently on a 0.1 MiB grid. Validation therefore accepts a displayed
+arithmetic discrepancy of exactly 0.1 MiB and rejects 0.2 MiB; all fields must
+remain finite and on that published grid. This tolerance does not weaken CPU,
+availability, sample-count, peak-ordering, or other resource gates.
+
+Every armed start is written to `state.json` before `agent_run.start`. Normal and
+resumed cleanup use the same bounded state machine: status-free
+`manage_worktree list`; exact correlation/control recovery and cooperative abort;
+cancel or terminalize; unbind/release logical ownership; one session-specific
+store-drain proof; physical cleanup; then a second status-free inventory and
+final drain proof. Recovery never requests `include_status`. Missing, expired,
+timed-out, nonzero, or ambiguous evidence sets `manual_cleanup` and preserves the
+physical resource. The DEBUG recovery registry and drain snapshot are bounded
+diagnostic records, not enterprise file-count limits; they return IDs, counts,
+digests, phases, and actor-entry delay, never raw enterprise paths.
+
+After a same-build projected one-plus-five artifact is valid, run one
+non-aggregatable real Agent Mode gate:
+
+```bash
+python3 Scripts/worktree_startup_live_benchmark.py live-inference-gate \
+  --plan /tmp/rpce-real-readiness-iteration-0.json \
+  --projected-artifact '<valid-projected-artifact-directory>' \
+  --confirm-live-debug-app --confirm-owned-resources
+```
+
+The gate fails unless the raw transcript contains exactly one ordered
+`file_search` call/result pair followed by one `read_file` call/result pair, no
+other tool, terminal `completed`, and the fixed sentinel. Spartan transcript
+events prove invocation/order only. Exact same-context direct structured probes
+must independently prove logical root, physical `worktree_scope`, worktree ID,
+path, and content, with exact correlation/session/invocation/ordinal,
+`{"diffSeedServing":1}`, and empty fallbacks. Assistant prose and inference wall
+time are never evidence.
+
 ### Dedicated workspace and plan
 
 Use a disposable workspace whose name starts with `RPCE 8E Bench ` or the
@@ -582,14 +620,16 @@ python3 Scripts/worktree_startup_live_benchmark.py cleanup \
 ```
 
 Resumed cleanup treats `state.json` resource IDs as selectors, never as ownership
-proof. It does not use `agent_manage.list_sessions` or depend on any inventory
-limit. Instead, it directly polls every recorded session ID in that session's
-recorded context, independently reads the live worktree inventory, and requires
-the artifact-derived benchmark branch prefix, the plan's frozen base commit OID,
-and one exact live session-to-worktree ID/path/branch/head relationship. Missing
-or ambiguous proof causes no cancellation or deletion; the cleanup action is
-reported as manual cleanup and the cleanup remains incomplete. These Git-worktree
-ownership gates are separate from the current typed non-Git-root handling.
+proof. It does not use `agent_manage.list_sessions`, request per-worktree status,
+or depend on any inventory limit. It first reads the cheap status-free worktree
+inventory, then uses the exact benchmark correlation/control record to recover
+the server-known session, target tab, repository, worktree, branch, head, binding,
+phase, and physical-path digest. Logical unbind/release and a zero-count
+session-specific store-drain snapshot are mandatory before physical deletion.
+The final status-free inventory and drain snapshot must remain clear. Missing or
+ambiguous identity, timeouts, nonterminal agents, shared roots, open watchers,
+queued/applying publications, dirty worktrees, or nonzero drain counts cause no
+physical deletion; the action is reported as manual cleanup.
 
 The DEBUG memory sampler returns an immutable `session_id`, rejects every
 occupied `start` (including requests that contain legacy `reset:true`), refuses

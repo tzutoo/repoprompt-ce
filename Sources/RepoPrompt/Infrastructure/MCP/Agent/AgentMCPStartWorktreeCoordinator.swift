@@ -229,6 +229,20 @@ struct AgentMCPStartWorktreeCoordinator {
                         standardizedPath($0.logicalRootPath) == standardizedPath(context.logicalRoot.standardizedFullPath)
                     }
                 )
+                #if DEBUG
+                    if WorktreeStartupBenchmarkDiagnostics.currentPendingStart != nil {
+                        guard let correlationID = startupContext?.correlationID else {
+                            throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                        }
+                        let diagnostics = WorktreeStartupBenchmarkDiagnostics.shared
+                        try diagnostics.recordRecoverableStartBinding(
+                            correlationID: correlationID,
+                            bindingID: binding.id,
+                            physicalRootPath: binding.worktreeRootPath
+                        )
+                        try diagnostics.requireRecoverableStartNotAborted(correlationID: correlationID)
+                    }
+                #endif
                 var desiredBindings = agentModeVM.worktreeBindings(forAgentSessionID: targetSessionID)
                     .filter { standardizedPath($0.logicalRootPath) != standardizedPath(context.logicalRoot.standardizedFullPath) }
                 desiredBindings.append(binding)
@@ -270,6 +284,13 @@ struct AgentMCPStartWorktreeCoordinator {
                     initializationHintsByBindingID
                 )
                 #if DEBUG
+                    if WorktreeStartupBenchmarkDiagnostics.currentPendingStart != nil,
+                       let correlationID = startupContext?.correlationID
+                    {
+                        try WorktreeStartupBenchmarkDiagnostics.shared.requireRecoverableStartNotAborted(
+                            correlationID: correlationID
+                        )
+                    }
                     let metricTag = startupContext.flatMap {
                         WorktreeStartupInstrumentation.benchmarkMetricTag(correlationID: $0.correlationID)
                     }
@@ -290,6 +311,19 @@ struct AgentMCPStartWorktreeCoordinator {
                         startupContext: startupContext,
                         initializationHintsByBindingID: initializationHintsByBindingID
                     )
+                #endif
+                #if DEBUG
+                    if WorktreeStartupBenchmarkDiagnostics.currentPendingStart != nil,
+                       let correlationID = startupContext?.correlationID
+                    {
+                        try WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                            correlationID: correlationID,
+                            phase: .ownershipCommitted
+                        )
+                        try WorktreeStartupBenchmarkDiagnostics.shared.requireRecoverableStartNotAborted(
+                            correlationID: correlationID
+                        )
+                    }
                 #endif
             } catch {
                 #if DEBUG
@@ -528,21 +562,43 @@ struct AgentMCPStartWorktreeCoordinator {
         } else {
             nil
         }
+        let result: GitWorktreeCreateResult
         #if DEBUG
-            return try await WorktreeStartupInstrumentation.$currentBenchmarkMetricTag.withValue(benchmarkMetricTag) {
+            result = try await WorktreeStartupInstrumentation.$currentBenchmarkMetricTag.withValue(benchmarkMetricTag) {
                 try await vcsService.createGitWorktreeWithResult(
                     request: plan.createRequest,
                     at: context.repo.rootURL,
                     initializationContext: initializationContext
                 )
             }
+            if WorktreeStartupBenchmarkDiagnostics.currentPendingStart != nil {
+                guard let correlationID = startupContext?.correlationID else {
+                    throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                }
+                let descriptor = result.descriptor
+                guard let head = descriptor.head else {
+                    throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                }
+                let diagnostics = WorktreeStartupBenchmarkDiagnostics.shared
+                try diagnostics.recordRecoverableStartWorktree(
+                    correlationID: correlationID,
+                    worktreeID: descriptor.worktreeID,
+                    repositoryID: descriptor.repository.repositoryID,
+                    repositoryKey: descriptor.repository.repoKey,
+                    branch: descriptor.branch,
+                    head: head,
+                    physicalPath: descriptor.path
+                )
+                try diagnostics.requireRecoverableStartNotAborted(correlationID: correlationID)
+            }
         #else
-            return try await vcsService.createGitWorktreeWithResult(
+            result = try await vcsService.createGitWorktreeWithResult(
                 request: plan.createRequest,
                 at: context.repo.rootURL,
                 initializationContext: initializationContext
             )
         #endif
+        return result
     }
 
     private func repositoryRelativeRootPrefix(

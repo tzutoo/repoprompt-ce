@@ -157,6 +157,89 @@ import MCP
                         "route": result.route.name,
                         "expires_in_seconds": expiry
                     ])
+                case "start_recovery_snapshot":
+                    let correlationID = try debugRequiredUUID(arguments, key: "correlation_id")
+                    let controlID = try debugRequiredUUID(arguments, key: "control_id")
+                    let snapshot = try diagnostics.recoverableStartSnapshot(
+                        scope: scope,
+                        correlationID: correlationID,
+                        controlID: controlID
+                    )
+                    return debugDiagnosticsResult([
+                        "ok": true,
+                        "op": op,
+                        "action": action,
+                        "recovery": debugRecoverableStartPayload(snapshot)
+                    ])
+                case "start_recovery_abort":
+                    let correlationID = try debugRequiredUUID(arguments, key: "correlation_id")
+                    let controlID = try debugRequiredUUID(arguments, key: "control_id")
+                    let decision = try diagnostics.requestRecoverableStartAbort(
+                        scope: scope,
+                        correlationID: correlationID,
+                        controlID: controlID
+                    )
+                    var discardAttempted = false
+                    var discardCompleted = decision.snapshot.phase == .discardCompleted
+                    if !decision.requiresAgentCancel, let target = decision.target {
+                        switch target.origin {
+                        case .createdNewTab, .createdForSessionResume:
+                            discardAttempted = true
+                            try diagnostics.recordRecoverableStartPhase(
+                                correlationID: correlationID,
+                                phase: .discardRequested,
+                                providerRunActive: false,
+                                errorCategory: "abort_requested"
+                            )
+                            await resolved.agentModeVM.mcpDiscardSessionTarget(target)
+                            try diagnostics.recordRecoverableStartPhase(
+                                correlationID: correlationID,
+                                phase: .discardCompleted,
+                                providerRunActive: false
+                            )
+                            discardCompleted = true
+                        case .existingSession, .existingTab:
+                            throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                        }
+                    }
+                    let snapshot = try diagnostics.recoverableStartSnapshot(
+                        scope: scope,
+                        correlationID: correlationID,
+                        controlID: controlID
+                    )
+                    return debugDiagnosticsResult([
+                        "ok": true,
+                        "op": op,
+                        "action": action,
+                        "requires_agent_cancel": decision.requiresAgentCancel,
+                        "discard_attempted": discardAttempted,
+                        "discard_completed": discardCompleted,
+                        "recovery": debugRecoverableStartPayload(snapshot)
+                    ])
+                case "session_worktree_drain_snapshot":
+                    let requestedAt = DispatchTime.now().uptimeNanoseconds
+                    let correlationID = try debugRequiredUUID(arguments, key: "correlation_id")
+                    let controlID = try debugRequiredUUID(arguments, key: "control_id")
+                    let recovery = try diagnostics.recoverableStartSnapshot(
+                        scope: scope,
+                        correlationID: correlationID,
+                        controlID: controlID
+                    )
+                    guard let ownerID = recovery.agentSessionID,
+                          !recovery.ownedPhysicalPathDigests.isEmpty
+                    else { throw DebugWorktreeStartupBenchmarkError.invalidRecovery }
+                    let drain = try await resolved.store.sessionWorktreeOwnershipDrainSnapshotForTesting(
+                        ownerID: ownerID,
+                        expectedPhysicalPathDigests: Set(recovery.ownedPhysicalPathDigests),
+                        requestedAtNanoseconds: requestedAt
+                    )
+                    return debugDiagnosticsResult([
+                        "ok": true,
+                        "op": op,
+                        "action": action,
+                        "correlation_id": correlationID.uuidString,
+                        "drain": debugSessionWorktreeDrainPayload(drain)
+                    ])
                 case "mark":
                     let correlationID = try debugRequiredUUID(arguments, key: "correlation_id")
                     let phase = try debugWorktreeStartupBenchmarkMark(arguments)
@@ -361,7 +444,8 @@ import MCP
         ) async throws -> (
             scope: DebugWorktreeStartupBenchmarkScope,
             rootPath: String,
-            store: WorkspaceFileContextStore
+            store: WorkspaceFileContextStore,
+            agentModeVM: AgentModeViewModel
         ) {
             let suppliedWindowID = try debugRequiredBoundedInt(arguments, key: "window_id", range: 1 ... Int.max)
             let hiddenWindowID = try debugRequiredBoundedInt(arguments, key: "_windowID", range: 1 ... Int.max)
@@ -421,7 +505,8 @@ import MCP
                     rootID: selectedRoot.rootID
                 ),
                 (selectedRoot.rootPath as NSString).standardizingPath,
-                window.workspaceFileContextStore
+                window.workspaceFileContextStore,
+                window.agentModeViewModel
             )
         }
 
@@ -481,6 +566,65 @@ import MCP
             case "selection_completed": .benchmarkSelectionCompleted
             default: throw DebugWorktreeStartupBenchmarkRequestError.invalidParameter
             }
+        }
+
+        private nonisolated func debugRecoverableStartPayload(
+            _ snapshot: WorktreeStartupBenchmarkDiagnostics.RecoverableStartSnapshot
+        ) -> [String: Any] {
+            [
+                "bounded": true,
+                "contains_paths": false,
+                "correlation_id": snapshot.correlationID.uuidString,
+                "control_id": snapshot.controlID.uuidString,
+                "invocation": snapshot.invocation,
+                "ordinal": snapshot.ordinal,
+                "warmup": snapshot.warmup,
+                "phase": snapshot.phase.rawValue,
+                "abort_requested": snapshot.abortRequested,
+                "agent_session_id": snapshot.agentSessionID?.uuidString ?? NSNull(),
+                "target_tab_id": snapshot.targetTabID?.uuidString ?? NSNull(),
+                "target_origin": snapshot.targetOrigin ?? NSNull(),
+                "worktree_id": snapshot.worktreeID ?? NSNull(),
+                "repository_id": snapshot.repositoryID ?? NSNull(),
+                "repository_key": snapshot.repositoryKey ?? NSNull(),
+                "branch": snapshot.branch ?? NSNull(),
+                "head": snapshot.head ?? NSNull(),
+                "worktree_path_sha256": snapshot.worktreePathDigest ?? NSNull(),
+                "owned_physical_path_sha256": snapshot.ownedPhysicalPathDigests,
+                "binding_id": snapshot.bindingID ?? NSNull(),
+                "provider_dispatch_started": snapshot.providerDispatchStarted,
+                "provider_run_active": snapshot.providerRunActive,
+                "error_category": snapshot.errorCategory ?? NSNull(),
+                "expires_at_monotonic_ns": snapshot.expiresAtNanoseconds
+            ]
+        }
+
+        private nonisolated func debugSessionWorktreeDrainPayload(
+            _ snapshot: WorkspaceFileContextStore.SessionWorktreeOwnershipDrainDebugSnapshot
+        ) -> [String: Any] {
+            [
+                "bounded": true,
+                "contains_paths": false,
+                "owner_id": snapshot.ownerID.uuidString,
+                "owner_generation": snapshot.ownerGeneration,
+                "expected_physical_path_sha256": snapshot.expectedPhysicalPathDigests,
+                "actor_entry_delay_us": snapshot.actorEntryDelayNanoseconds / 1000,
+                "installed_token_count": snapshot.installedTokenCount,
+                "provisional_token_count": snapshot.provisionalTokenCount,
+                "root_claim_count": snapshot.rootClaimCount,
+                "path_reservation_count": snapshot.pathReservationCount,
+                "matching_live_root_count": snapshot.matchingLiveRootCount,
+                "matching_watcher_attachment_count": snapshot.matchingWatcherAttachmentCount,
+                "pending_seeded_root_count": snapshot.pendingSeededRootCount,
+                "pending_visibility_waiter_count": snapshot.pendingVisibilityWaiterCount,
+                "queued_publication_count": snapshot.queuedPublicationCount,
+                "applying_publication_count": snapshot.applyingPublicationCount,
+                "outstanding_publication_count": snapshot.outstandingPublicationCount,
+                "publisher_waiter_count": snapshot.publisherWaiterCount,
+                "unloading_root_count": snapshot.unloadingRootCount,
+                "reserved_load_flight_count": snapshot.reservedLoadFlightCount,
+                "is_drained": snapshot.isDrained
+            ]
         }
 
         private nonisolated func debugCodemapProjectionPayload(

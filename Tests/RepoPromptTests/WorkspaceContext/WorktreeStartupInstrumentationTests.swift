@@ -1223,6 +1223,147 @@ import XCTest
             XCTAssertEqual(try diagnostics.reset(scope: scope)["control_count"], 0)
         }
 
+        func testRecoverableStartRegistryIsBoundedScopedAndAbortIsIdempotent() throws {
+            WorktreeStartupBenchmarkDiagnostics.setGateEnabled(true)
+            defer { WorktreeStartupBenchmarkDiagnostics.setGateEnabled(false) }
+            let diagnostics = WorktreeStartupBenchmarkDiagnostics(
+                maximumRecoverableStartRecordCount: 1
+            )
+            let scope = DebugWorktreeStartupBenchmarkScope(
+                windowID: 614,
+                workspaceID: UUID(),
+                contextID: UUID(),
+                rootID: UUID()
+            )
+            let expected = benchmarkExpectedStart(scope: scope)
+            let control = try diagnostics.setFlags(
+                scope: scope,
+                observe: true,
+                serve: true,
+                forceFullCrawl: false,
+                expiresSeconds: 120
+            )
+            let arm = try diagnostics.arm(
+                expectedStart: expected,
+                controlID: control.controlID,
+                scenario: "clean_same_tree",
+                invocation: 3,
+                ordinal: 4,
+                warmup: false,
+                expiresSeconds: 120
+            )
+            let sessionID = UUID()
+            let tabID = UUID()
+            try diagnostics.registerRecoverableStartTarget(
+                correlationID: arm.correlationID,
+                agentSessionID: sessionID,
+                targetTabID: tabID,
+                targetOrigin: .createdNewTab
+            )
+            try diagnostics.recordRecoverableStartWorktree(
+                correlationID: arm.correlationID,
+                worktreeID: "worktree-1",
+                repositoryID: "repository-1",
+                repositoryKey: "repo-key",
+                branch: "benchmark-branch",
+                head: String(repeating: "a", count: 40),
+                physicalPath: "/tmp/private-enterprise-path"
+            )
+            try diagnostics.recordRecoverableStartBinding(
+                correlationID: arm.correlationID,
+                bindingID: "binding-1",
+                physicalRootPath: "/tmp/private-enterprise-path/Nested"
+            )
+            try diagnostics.recordRecoverableStartPhase(
+                correlationID: arm.correlationID,
+                phase: .ownershipCommitted
+            )
+
+            let snapshot = try diagnostics.recoverableStartSnapshot(
+                scope: scope,
+                correlationID: arm.correlationID,
+                controlID: control.controlID
+            )
+            XCTAssertEqual(snapshot.agentSessionID, sessionID)
+            XCTAssertEqual(snapshot.targetTabID, tabID)
+            XCTAssertEqual(snapshot.phase, .ownershipCommitted)
+            XCTAssertEqual(snapshot.worktreePathDigest?.count, 64)
+            XCTAssertFalse(snapshot.worktreePathDigest?.contains("private") == true)
+            XCTAssertEqual(snapshot.ownedPhysicalPathDigests.count, 1)
+            XCTAssertFalse(snapshot.ownedPhysicalPathDigests[0].contains("private"))
+
+            let firstAbort = try diagnostics.requestRecoverableStartAbort(
+                scope: scope,
+                correlationID: arm.correlationID,
+                controlID: control.controlID
+            )
+            let secondAbort = try diagnostics.requestRecoverableStartAbort(
+                scope: scope,
+                correlationID: arm.correlationID,
+                controlID: control.controlID
+            )
+            XCTAssertTrue(firstAbort.snapshot.abortRequested)
+            XCTAssertEqual(firstAbort.snapshot, secondAbort.snapshot)
+            XCTAssertFalse(firstAbort.requiresAgentCancel)
+            XCTAssertThrowsError(
+                try diagnostics.requireRecoverableStartNotAborted(correlationID: arm.correlationID)
+            ) { error in
+                XCTAssertEqual(error as? DebugWorktreeStartupBenchmarkError, .startAborted)
+            }
+            XCTAssertThrowsError(try diagnostics.arm(
+                expectedStart: expected,
+                controlID: control.controlID,
+                scenario: "clean_same_tree",
+                invocation: 3,
+                ordinal: 5,
+                warmup: false,
+                expiresSeconds: 120
+            )) { error in
+                XCTAssertEqual(error as? DebugWorktreeStartupBenchmarkError, .recoveryCapacityExceeded)
+            }
+            XCTAssertEqual(try diagnostics.reset(scope: scope)["recovery_count"], 1)
+
+            let postLaunchControl = try diagnostics.setFlags(
+                scope: scope,
+                observe: true,
+                serve: true,
+                forceFullCrawl: false,
+                expiresSeconds: 120
+            )
+            let postLaunchArm = try diagnostics.arm(
+                expectedStart: expected,
+                controlID: postLaunchControl.controlID,
+                scenario: "clean_same_tree",
+                invocation: 3,
+                ordinal: 6,
+                warmup: false,
+                expiresSeconds: 120
+            )
+            try diagnostics.beginRecoverableProviderDispatch(
+                correlationID: postLaunchArm.correlationID
+            )
+            XCTAssertTrue(
+                try diagnostics.recoverableStartSnapshot(
+                    scope: scope,
+                    correlationID: postLaunchArm.correlationID,
+                    controlID: postLaunchControl.controlID
+                ).providerDispatchStarted
+            )
+            WorktreeStartupBenchmarkDiagnostics.setGateEnabled(false)
+            XCTAssertNil(
+                diagnostics.recoverableStartAbortRequested(
+                    correlationID: postLaunchArm.correlationID
+                ),
+                "Gate revocation after provider dispatch must make bookkeeping unavailable, not fail the live start."
+            )
+            XCTAssertNil(try? diagnostics.recordRecoverableStartPhase(
+                correlationID: postLaunchArm.correlationID,
+                phase: .responsePrepared,
+                providerRunActive: true
+            ))
+            WorktreeStartupBenchmarkDiagnostics.setGateEnabled(true)
+        }
+
         private func benchmarkExpectedStart(
             scope: DebugWorktreeStartupBenchmarkScope
         ) -> DebugWorktreeStartupBenchmarkExpectedStart {

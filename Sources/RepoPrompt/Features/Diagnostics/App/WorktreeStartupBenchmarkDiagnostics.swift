@@ -1,4 +1,5 @@
 #if DEBUG
+    import CryptoKit
     import Foundation
 
     enum DebugWorktreeStartupBenchmarkError: Error, Equatable {
@@ -12,6 +13,9 @@
         case sampleNotFound
         case invalidPreparation
         case preparationCapacityExceeded
+        case recoveryCapacityExceeded
+        case invalidRecovery
+        case startAborted
         case startIdentityMismatch
         case baseSnapshotUnavailable(BaseSnapshotFailure)
 
@@ -41,6 +45,9 @@
             case .sampleNotFound: "sample_not_found"
             case .invalidPreparation: "invalid_preparation"
             case .preparationCapacityExceeded: "preparation_capacity_exceeded"
+            case .recoveryCapacityExceeded: "recovery_capacity_exceeded"
+            case .invalidRecovery: "invalid_recovery"
+            case .startAborted: "start_aborted"
             case .startIdentityMismatch: "start_identity_mismatch"
             case .baseSnapshotUnavailable: "base_snapshot_unavailable"
             }
@@ -122,6 +129,23 @@
     struct DebugWorktreeStartupBenchmarkPendingStart: Hashable {
         let token: UUID
         let startAttemptID: UUID
+    }
+
+    enum DebugRecoverableStartPhase: String, CaseIterable {
+        case armed
+        case targetRegistered = "target_registered"
+        case worktreeCreated = "worktree_created"
+        case bindingConstructed = "binding_constructed"
+        case ownershipCommitted = "ownership_committed"
+        case providerStart = "provider_start"
+        case responsePrepared = "response_prepared"
+        case failed
+        case discardRequested = "discard_requested"
+        case discardCompleted = "discard_completed"
+
+        var rank: Int {
+            Self.allCases.firstIndex(of: self) ?? 0
+        }
     }
 
     struct DebugWorktreeStartupBenchmarkRoutingProvenance: Equatable {
@@ -220,6 +244,37 @@
             let servingControl: WorktreeStartupServingControl
         }
 
+        struct RecoverableStartSnapshot: Equatable {
+            let correlationID: UUID
+            let controlID: UUID
+            let invocation: Int
+            let ordinal: Int
+            let warmup: Bool
+            let phase: DebugRecoverableStartPhase
+            let abortRequested: Bool
+            let agentSessionID: UUID?
+            let targetTabID: UUID?
+            let targetOrigin: String?
+            let worktreeID: String?
+            let repositoryID: String?
+            let repositoryKey: String?
+            let branch: String?
+            let head: String?
+            let worktreePathDigest: String?
+            let ownedPhysicalPathDigests: [String]
+            let bindingID: String?
+            let providerDispatchStarted: Bool
+            let providerRunActive: Bool
+            let errorCategory: String?
+            let expiresAtNanoseconds: UInt64
+        }
+
+        struct RecoverableStartAbortDecision {
+            let snapshot: RecoverableStartSnapshot
+            let target: AgentModeViewModel.MCPSessionTarget?
+            let requiresAgentCancel: Bool
+        }
+
         private struct ControlLease {
             let id: UUID
             let scope: DebugWorktreeStartupBenchmarkScope
@@ -240,6 +295,32 @@
             let expiresAtNanoseconds: UInt64
             let gateGeneration: UInt64
             var consumed: Bool
+        }
+
+        private struct RecoverableStartRecord {
+            let correlationID: UUID
+            let controlID: UUID
+            let scope: DebugWorktreeStartupBenchmarkScope
+            let invocation: Int
+            let ordinal: Int
+            let warmup: Bool
+            let expiresAtNanoseconds: UInt64
+            var phase: DebugRecoverableStartPhase = .armed
+            var abortRequested = false
+            var agentSessionID: UUID?
+            var targetTabID: UUID?
+            var targetOrigin: AgentModeViewModel.MCPSessionTarget.Origin?
+            var worktreeID: String?
+            var repositoryID: String?
+            var repositoryKey: String?
+            var branch: String?
+            var head: String?
+            var worktreePathDigest: String?
+            var ownedPhysicalPathDigests: [String] = []
+            var bindingID: String?
+            var providerDispatchStarted = false
+            var providerRunActive = false
+            var errorCategory: String?
         }
 
         private struct SampleState {
@@ -274,21 +355,25 @@
 
         private let lock = NSLock()
         private let maximumPreparationRecordCount: Int
+        private let maximumRecoverableStartRecordCount: Int
         private let completedPreparationTTLNanoseconds: UInt64
         private let afterControlLeaseForTesting: (@Sendable () async -> Void)?
         private var currentControlIDByScope: [DebugWorktreeStartupBenchmarkScope: UUID] = [:]
         private var controlsByID: [UUID: ControlLease] = [:]
         private var tokensByID: [UUID: TokenLease] = [:]
         private var samplesByCorrelationID: [UUID: SampleState] = [:]
+        private var recoverableStartsByCorrelationID: [UUID: RecoverableStartRecord] = [:]
         private var preparationsByID: [UUID: PreparationRecord] = [:]
         private var nextPreparationOrdinal: UInt64 = 0
 
         init(
             maximumPreparationRecordCount: Int = 32,
+            maximumRecoverableStartRecordCount: Int = 32,
             completedPreparationTTLNanoseconds: UInt64 = 15 * 60 * 1_000_000_000,
             afterControlLeaseForTesting: (@Sendable () async -> Void)? = nil
         ) {
             self.maximumPreparationRecordCount = max(1, maximumPreparationRecordCount)
+            self.maximumRecoverableStartRecordCount = max(1, maximumRecoverableStartRecordCount)
             self.completedPreparationTTLNanoseconds = completedPreparationTTLNanoseconds
             self.afterControlLeaseForTesting = afterControlLeaseForTesting
         }
@@ -524,6 +609,10 @@
                     control.expiresAtNanoseconds,
                     Self.deadline(now: now, seconds: expiresSeconds)
                 )
+                guard recoverableStartsByCorrelationID.count < maximumRecoverableStartRecordCount else {
+                    lock.unlock()
+                    throw DebugWorktreeStartupBenchmarkError.recoveryCapacityExceeded
+                }
                 let instrumentation = WorktreeStartupInstrumentation.snapshot()
                 let token = UUID()
                 let correlationID = UUID()
@@ -539,6 +628,15 @@
                     expiresAtNanoseconds: expires,
                     gateGeneration: gateGeneration,
                     consumed: false
+                )
+                recoverableStartsByCorrelationID[correlationID] = RecoverableStartRecord(
+                    correlationID: correlationID,
+                    controlID: controlID,
+                    scope: scope,
+                    invocation: invocation,
+                    ordinal: ordinal,
+                    warmup: warmup,
+                    expiresAtNanoseconds: expires
                 )
                 samplesByCorrelationID[correlationID] = SampleState(
                     correlationID: correlationID,
@@ -642,6 +740,175 @@
                     servingControl: lease.route.servingControl,
                     routeName: lease.route.name,
                     metricTag: tag
+                )
+            }
+        }
+
+        func registerRecoverableStartTarget(
+            correlationID: UUID,
+            agentSessionID: UUID,
+            targetTabID: UUID,
+            targetOrigin: AgentModeViewModel.MCPSessionTarget.Origin
+        ) throws {
+            try mutateRecoverableStart(correlationID: correlationID) { record in
+                guard record.agentSessionID == nil || record.agentSessionID == agentSessionID,
+                      record.targetTabID == nil || record.targetTabID == targetTabID
+                else { throw DebugWorktreeStartupBenchmarkError.invalidRecovery }
+                record.agentSessionID = agentSessionID
+                record.targetTabID = targetTabID
+                record.targetOrigin = targetOrigin
+                Self.advanceRecoverableStart(&record, to: .targetRegistered)
+            }
+        }
+
+        func recordRecoverableStartWorktree(
+            correlationID: UUID,
+            worktreeID: String,
+            repositoryID: String,
+            repositoryKey: String,
+            branch: String?,
+            head: String,
+            physicalPath: String
+        ) throws {
+            try mutateRecoverableStart(correlationID: correlationID) { record in
+                let digest = Self.physicalPathDigest(physicalPath)
+                guard record.worktreeID == nil || record.worktreeID == worktreeID,
+                      record.repositoryID == nil || record.repositoryID == repositoryID,
+                      record.worktreePathDigest == nil || record.worktreePathDigest == digest
+                else { throw DebugWorktreeStartupBenchmarkError.invalidRecovery }
+                record.worktreeID = worktreeID
+                record.repositoryID = repositoryID
+                record.repositoryKey = repositoryKey
+                record.branch = branch
+                record.head = head
+                record.worktreePathDigest = digest
+                Self.advanceRecoverableStart(&record, to: .worktreeCreated)
+            }
+        }
+
+        func recordRecoverableStartBinding(
+            correlationID: UUID,
+            bindingID: String,
+            physicalRootPath: String
+        ) throws {
+            try mutateRecoverableStart(correlationID: correlationID) { record in
+                let digest = Self.physicalPathDigest(physicalRootPath)
+                guard record.bindingID == nil || record.bindingID == bindingID,
+                      record.ownedPhysicalPathDigests.isEmpty
+                      || record.ownedPhysicalPathDigests.contains(digest),
+                      record.ownedPhysicalPathDigests.count < 16
+                else {
+                    throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                }
+                record.bindingID = bindingID
+                if !record.ownedPhysicalPathDigests.contains(digest) {
+                    record.ownedPhysicalPathDigests.append(digest)
+                }
+                Self.advanceRecoverableStart(&record, to: .bindingConstructed)
+            }
+        }
+
+        func beginRecoverableProviderDispatch(correlationID: UUID) throws {
+            try mutateRecoverableStart(correlationID: correlationID) { record in
+                guard !record.abortRequested else {
+                    throw DebugWorktreeStartupBenchmarkError.startAborted
+                }
+                record.providerDispatchStarted = true
+                record.providerRunActive = true
+                Self.advanceRecoverableStart(&record, to: .providerStart)
+            }
+        }
+
+        func recoverableStartAbortRequested(correlationID: UUID) -> Bool? {
+            guard WorktreeStartupBenchmarkGate.shared.snapshot().enabled else { return nil }
+            lock.lock()
+            defer { lock.unlock() }
+            guard let record = recoverableStartsByCorrelationID[correlationID] else { return nil }
+            return record.abortRequested
+        }
+
+        func recordRecoverableStartPhase(
+            correlationID: UUID,
+            phase: DebugRecoverableStartPhase,
+            providerRunActive: Bool? = nil,
+            errorCategory: String? = nil
+        ) throws {
+            try mutateRecoverableStart(correlationID: correlationID) { record in
+                Self.advanceRecoverableStart(&record, to: phase)
+                if let providerRunActive {
+                    record.providerRunActive = providerRunActive
+                }
+                if let errorCategory {
+                    record.errorCategory = errorCategory
+                }
+            }
+        }
+
+        func requireRecoverableStartNotAborted(correlationID: UUID) throws {
+            try WorktreeStartupBenchmarkGate.shared.requireEnabled { _ in
+                lock.lock()
+                defer { lock.unlock() }
+                let now = DispatchTime.now().uptimeNanoseconds
+                purgeExpiredLocked(now: now)
+                guard let record = recoverableStartsByCorrelationID[correlationID] else {
+                    throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                }
+                guard !record.abortRequested else {
+                    throw DebugWorktreeStartupBenchmarkError.startAborted
+                }
+            }
+        }
+
+        func recoverableStartSnapshot(
+            scope: DebugWorktreeStartupBenchmarkScope,
+            correlationID: UUID,
+            controlID: UUID
+        ) throws -> RecoverableStartSnapshot {
+            try WorktreeStartupBenchmarkGate.shared.requireEnabled { _ in
+                lock.lock()
+                defer { lock.unlock() }
+                let now = DispatchTime.now().uptimeNanoseconds
+                purgeExpiredLocked(now: now)
+                guard let record = recoverableStartsByCorrelationID[correlationID],
+                      record.scope == scope,
+                      record.controlID == controlID
+                else { throw DebugWorktreeStartupBenchmarkError.invalidRecovery }
+                return Self.recoverableStartSnapshot(record)
+            }
+        }
+
+        func requestRecoverableStartAbort(
+            scope: DebugWorktreeStartupBenchmarkScope,
+            correlationID: UUID,
+            controlID: UUID
+        ) throws -> RecoverableStartAbortDecision {
+            try WorktreeStartupBenchmarkGate.shared.requireEnabled { _ in
+                lock.lock()
+                defer { lock.unlock() }
+                let now = DispatchTime.now().uptimeNanoseconds
+                purgeExpiredLocked(now: now)
+                guard var record = recoverableStartsByCorrelationID[correlationID],
+                      record.scope == scope,
+                      record.controlID == controlID
+                else { throw DebugWorktreeStartupBenchmarkError.invalidRecovery }
+                record.abortRequested = true
+                recoverableStartsByCorrelationID[correlationID] = record
+                let target: AgentModeViewModel.MCPSessionTarget? = if let tabID = record.targetTabID,
+                                                                      let origin = record.targetOrigin
+                {
+                    AgentModeViewModel.MCPSessionTarget(
+                        tabID: tabID,
+                        sessionID: record.agentSessionID,
+                        origin: origin
+                    )
+                } else {
+                    nil
+                }
+                return RecoverableStartAbortDecision(
+                    snapshot: Self.recoverableStartSnapshot(record),
+                    target: target,
+                    requiresAgentCancel: record.providerDispatchStarted
+                        && record.phase != .discardCompleted
                 )
             }
         }
@@ -879,6 +1146,9 @@
                 let preparationIDs = preparationsByID.compactMap { id, record in
                     record.scope == scope ? id : nil
                 }
+                let recoveryIDs = recoverableStartsByCorrelationID.compactMap { id, record in
+                    record.scope == scope ? id : nil
+                }
                 controlIDs.forEach { controlsByID.removeValue(forKey: $0) }
                 tokenIDs.forEach { tokensByID.removeValue(forKey: $0) }
                 for sample in samples {
@@ -887,11 +1157,13 @@
                 }
                 currentControlIDByScope.removeValue(forKey: scope)
                 preparationIDs.forEach { preparationsByID.removeValue(forKey: $0) }
+                recoveryIDs.forEach { recoverableStartsByCorrelationID.removeValue(forKey: $0) }
                 return [
                     "control_count": controlIDs.count,
                     "token_count": tokenIDs.count,
                     "sample_count": samples.count,
-                    "preparation_count": preparationIDs.count
+                    "preparation_count": preparationIDs.count,
+                    "recovery_count": recoveryIDs.count
                 ]
             }
         }
@@ -902,9 +1174,79 @@
             controlsByID.removeAll(keepingCapacity: true)
             tokensByID.removeAll(keepingCapacity: true)
             samplesByCorrelationID.removeAll(keepingCapacity: true)
+            recoverableStartsByCorrelationID.removeAll(keepingCapacity: true)
             preparationsByID.removeAll(keepingCapacity: true)
             lock.unlock()
             WorktreeStartupInstrumentation.resetBenchmarkMetrics()
+        }
+
+        private func mutateRecoverableStart(
+            correlationID: UUID,
+            _ mutation: (inout RecoverableStartRecord) throws -> Void
+        ) throws {
+            try WorktreeStartupBenchmarkGate.shared.requireEnabled { _ in
+                lock.lock()
+                defer { lock.unlock() }
+                let now = DispatchTime.now().uptimeNanoseconds
+                purgeExpiredLocked(now: now)
+                guard var record = recoverableStartsByCorrelationID[correlationID] else {
+                    throw DebugWorktreeStartupBenchmarkError.invalidRecovery
+                }
+                try mutation(&record)
+                recoverableStartsByCorrelationID[correlationID] = record
+            }
+        }
+
+        private static func advanceRecoverableStart(
+            _ record: inout RecoverableStartRecord,
+            to phase: DebugRecoverableStartPhase
+        ) {
+            if phase.rank >= record.phase.rank {
+                record.phase = phase
+            }
+        }
+
+        private static func recoverableStartSnapshot(
+            _ record: RecoverableStartRecord
+        ) -> RecoverableStartSnapshot {
+            let origin: String? = switch record.targetOrigin {
+            case .existingSession?: "existing_session"
+            case .existingTab?: "existing_tab"
+            case .createdForSessionResume?: "created_for_session_resume"
+            case .createdNewTab?: "created_new_tab"
+            case nil: nil
+            }
+            return RecoverableStartSnapshot(
+                correlationID: record.correlationID,
+                controlID: record.controlID,
+                invocation: record.invocation,
+                ordinal: record.ordinal,
+                warmup: record.warmup,
+                phase: record.phase,
+                abortRequested: record.abortRequested,
+                agentSessionID: record.agentSessionID,
+                targetTabID: record.targetTabID,
+                targetOrigin: origin,
+                worktreeID: record.worktreeID,
+                repositoryID: record.repositoryID,
+                repositoryKey: record.repositoryKey,
+                branch: record.branch,
+                head: record.head,
+                worktreePathDigest: record.worktreePathDigest,
+                ownedPhysicalPathDigests: record.ownedPhysicalPathDigests.sorted(),
+                bindingID: record.bindingID,
+                providerDispatchStarted: record.providerDispatchStarted,
+                providerRunActive: record.providerRunActive,
+                errorCategory: record.errorCategory,
+                expiresAtNanoseconds: record.expiresAtNanoseconds
+            )
+        }
+
+        private static func physicalPathDigest(_ path: String) -> String {
+            let standardized = StandardizedPath.absolute((path as NSString).expandingTildeInPath)
+            return SHA256.hash(data: Data(standardized.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
         }
 
         private func beginPreparation(
@@ -1042,6 +1384,9 @@
                 .map(\.token)
             for tokenID in expiredTokenIDs {
                 tokensByID.removeValue(forKey: tokenID)
+            }
+            recoverableStartsByCorrelationID = recoverableStartsByCorrelationID.filter {
+                $0.value.expiresAtNanoseconds > now
             }
             let expiredControls = controlsByID.values.filter { $0.expiresAtNanoseconds <= now }
             for lease in expiredControls {

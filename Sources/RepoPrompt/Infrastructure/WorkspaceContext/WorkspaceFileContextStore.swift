@@ -2,6 +2,9 @@ import Combine
 import CoreServices
 import Dispatch
 import Foundation
+#if DEBUG
+    import CryptoKit
+#endif
 
 enum WorkspaceFileTreePresentationMode: String {
     case none
@@ -651,9 +654,18 @@ actor WorkspaceFileContextStore {
     }
 
     private struct SessionWorktreeReservedLoadFlight {
+        let ownerID: UUID
         let standardizedPath: String
         let flight: RootLoadFlight
     }
+
+    #if DEBUG
+        private struct SessionWorktreeOrphanLoadCleanup {
+            let ownerID: UUID
+            let standardizedPath: String
+            let task: Task<Void, Never>
+        }
+    #endif
 
     private struct SessionWorktreeOwnershipRemoval {
         var ownedRoots: [WorkspaceSessionWorktreeOwnedRoot] = []
@@ -1128,6 +1140,8 @@ actor WorkspaceFileContextStore {
 
     #if DEBUG
         private var rootLoadWillStartHandler: (@Sendable (String) async -> Void)?
+        private var sessionWorktreeDrainDidEnterLoadFlightWaitHandler: (@Sendable () -> Void)?
+        private var sessionWorktreeDrainLoadFlightWaiterCount = 0
         private var rootLoadDidJoinInFlightHandler: (@Sendable (String) async -> Void)?
         private var rootUnloadDidDetachHandler: (@Sendable ([String]) async -> Void)?
         private var ensureIndexedFilesEligibilityDidResolveHandler: (@Sendable (UUID, String) async -> Void)?
@@ -1328,6 +1342,16 @@ actor WorkspaceFileContextStore {
 
         func setRootLoadWillStartHandler(_ handler: (@Sendable (String) async -> Void)?) {
             rootLoadWillStartHandler = handler
+        }
+
+        func setSessionWorktreeDrainDidEnterLoadFlightWaitHandler(
+            _ handler: (@Sendable () -> Void)?
+        ) {
+            sessionWorktreeDrainDidEnterLoadFlightWaitHandler = handler
+        }
+
+        func sessionWorktreeDrainLoadFlightWaiterCountForTesting() -> Int {
+            sessionWorktreeDrainLoadFlightWaiterCount
         }
 
         func setRootLoadDidJoinInFlightHandler(_ handler: (@Sendable (String) async -> Void)?) {
@@ -2289,6 +2313,11 @@ actor WorkspaceFileContextStore {
     private var sessionWorktreeReservationTokensByStandardizedPath: [String: Set<WorkspaceSessionWorktreeOwnershipToken>] = [:]
     private var sessionWorktreeReservedPathsByToken: [WorkspaceSessionWorktreeOwnershipToken: Set<String>] = [:]
     private var sessionWorktreeReservationLoadFlightsByToken: [WorkspaceSessionWorktreeOwnershipToken: [String: RootLoadFlight]] = [:]
+    #if DEBUG
+        private var sessionWorktreeOrphanLoadCleanupsByID: [UUID: SessionWorktreeOrphanLoadCleanup] = [:]
+        private var sessionWorktreeOrphanLoadCleanupOverflowCount = 0
+        private static let maximumSessionWorktreeOrphanLoadCleanupRecords = 64
+    #endif
     private var pendingSeededRootsByID: [WorkspacePendingSeededRootID: PendingSeededRoot] = [:]
     private var pendingSeededRootIDsByStandardizedPath: [String: WorkspacePendingSeededRootID] = [:]
     #if DEBUG
@@ -4807,6 +4836,32 @@ actor WorkspaceFileContextStore {
     }
 
     #if DEBUG
+        enum SessionWorktreeOwnershipDrainDebugError: Error {
+            case invalidExpectedPathDigests
+        }
+
+        struct SessionWorktreeOwnershipDrainDebugSnapshot: Equatable {
+            let ownerID: UUID
+            let ownerGeneration: UInt64
+            let expectedPhysicalPathDigests: [String]
+            let actorEntryDelayNanoseconds: UInt64
+            let installedTokenCount: Int
+            let provisionalTokenCount: Int
+            let rootClaimCount: Int
+            let pathReservationCount: Int
+            let matchingLiveRootCount: Int
+            let matchingWatcherAttachmentCount: Int
+            let pendingSeededRootCount: Int
+            let pendingVisibilityWaiterCount: Int
+            let queuedPublicationCount: Int
+            let applyingPublicationCount: Int
+            let outstandingPublicationCount: Int
+            let publisherWaiterCount: Int
+            let unloadingRootCount: Int
+            let reservedLoadFlightCount: Int
+            let isDrained: Bool
+        }
+
         struct SessionWorktreeOwnershipDebugSnapshot: Equatable {
             let installedOwnerCount: Int
             let provisionalOwnerCount: Int
@@ -4815,6 +4870,129 @@ actor WorkspaceFileContextStore {
             let explicitWatcherDemandCount: Int
             let pendingSeededRootCount: Int
             let pendingVisibilityWaiterCount: Int
+        }
+
+        func sessionWorktreeOwnershipDrainSnapshotForTesting(
+            ownerID: UUID,
+            expectedPhysicalPathDigests: Set<String>,
+            requestedAtNanoseconds: UInt64
+        ) async throws -> SessionWorktreeOwnershipDrainDebugSnapshot {
+            guard !expectedPhysicalPathDigests.isEmpty,
+                  expectedPhysicalPathDigests.count <= 16,
+                  expectedPhysicalPathDigests.allSatisfy({
+                      $0.count == 64 && $0.allSatisfy(\.isHexDigit)
+                  })
+            else { throw SessionWorktreeOwnershipDrainDebugError.invalidExpectedPathDigests }
+
+            let matchingCleanupTasks: [Task<Void, Never>] =
+                sessionWorktreeOrphanLoadCleanupsByID.values.compactMap { cleanup in
+                    guard cleanup.ownerID == ownerID,
+                          expectedPhysicalPathDigests.contains(
+                              Self.sessionWorktreePathDigest(cleanup.standardizedPath)
+                          )
+                    else { return nil }
+                    return cleanup.task
+                }
+            if !matchingCleanupTasks.isEmpty {
+                sessionWorktreeDrainLoadFlightWaiterCount += 1
+                sessionWorktreeDrainDidEnterLoadFlightWaitHandler?()
+                for task in matchingCleanupTasks {
+                    await task.value
+                }
+                sessionWorktreeDrainLoadFlightWaiterCount -= 1
+            }
+
+            let entry = DispatchTime.now().uptimeNanoseconds
+            let ownerTokens = Set(sessionWorktreeOwnershipRecordsByToken.keys.filter { $0.ownerID == ownerID })
+            let installedToken = installedSessionWorktreeOwnershipTokenByOwnerID[ownerID]
+            let installedTokenCount = installedToken.map { ownerTokens.contains($0) ? 1 : 0 } ?? 0
+            let provisionalTokenCount = ownerTokens.count - installedTokenCount
+            let rootClaimCount = sessionWorktreeOwnershipTokensByRootLifetime.values.reduce(0) {
+                $0 + $1.intersection(ownerTokens).count
+            }
+            let pathReservationCount = sessionWorktreeReservationTokensByStandardizedPath.values.reduce(0) {
+                $0 + $1.intersection(ownerTokens).count
+            }
+            let matchingLiveRootIDs: Set<UUID> = Set(rootStatesByID.compactMap { entry -> UUID? in
+                let (rootID, state) = entry
+                guard state.root.kind == .sessionWorktree,
+                      expectedPhysicalPathDigests.contains(Self.sessionWorktreePathDigest(state.root.standardizedFullPath))
+                else { return nil }
+                return rootID
+            })
+            let matchingPending = pendingSeededRootsByID.values.filter {
+                expectedPhysicalPathDigests.contains(Self.sessionWorktreePathDigest($0.standardizedPath))
+            }
+            var matchingIngressRootIDs = matchingLiveRootIDs
+            matchingIngressRootIDs.formUnion(matchingPending.map(\.state.root.id))
+            let matchingWatcherAttachmentCount = watcherPublisherAttachmentsByKey.keys.count {
+                matchingIngressRootIDs.contains($0.rootID)
+            }
+            let pendingVisibilityWaiterCount = pendingSeededRootVisibilityWaitersByPath.reduce(0) {
+                expectedPhysicalPathDigests.contains(Self.sessionWorktreePathDigest($1.key))
+                    ? $0 + $1.value.count
+                    : $0
+            }
+            let ingressSnapshots = matchingIngressRootIDs.map {
+                publisherIngressCoordinator.debugSnapshot(rootID: $0)
+            }
+            let queuedPublicationCount = ingressSnapshots.reduce(0) { $0 + $1.queuedPublicationCount }
+            let applyingPublicationCount = ingressSnapshots.reduce(0) { $0 + $1.applyingPublicationCount }
+            let outstandingPublicationCount = ingressSnapshots.reduce(0) { $0 + $1.outstandingPublicationCount }
+            let publisherWaiterCount = ingressSnapshots.reduce(0) { $0 + $1.waiterCount }
+            let unloadingRootCount = unloadingRootPaths.count {
+                expectedPhysicalPathDigests.contains(Self.sessionWorktreePathDigest($0))
+            }
+            let reservedLoadFlightCount = sessionWorktreeOrphanLoadCleanupsByID.values.count { cleanup in
+                cleanup.ownerID == ownerID
+                    && expectedPhysicalPathDigests.contains(
+                        Self.sessionWorktreePathDigest(cleanup.standardizedPath)
+                    )
+            } + sessionWorktreeOrphanLoadCleanupOverflowCount
+            let componentCounts = [
+                installedTokenCount,
+                provisionalTokenCount,
+                rootClaimCount,
+                pathReservationCount,
+                matchingLiveRootIDs.count,
+                matchingWatcherAttachmentCount,
+                matchingPending.count,
+                pendingVisibilityWaiterCount,
+                queuedPublicationCount,
+                applyingPublicationCount,
+                outstandingPublicationCount,
+                publisherWaiterCount,
+                unloadingRootCount,
+                reservedLoadFlightCount
+            ]
+            return SessionWorktreeOwnershipDrainDebugSnapshot(
+                ownerID: ownerID,
+                ownerGeneration: latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] ?? 0,
+                expectedPhysicalPathDigests: expectedPhysicalPathDigests.sorted(),
+                actorEntryDelayNanoseconds: entry >= requestedAtNanoseconds ? entry - requestedAtNanoseconds : 0,
+                installedTokenCount: installedTokenCount,
+                provisionalTokenCount: provisionalTokenCount,
+                rootClaimCount: rootClaimCount,
+                pathReservationCount: pathReservationCount,
+                matchingLiveRootCount: matchingLiveRootIDs.count,
+                matchingWatcherAttachmentCount: matchingWatcherAttachmentCount,
+                pendingSeededRootCount: matchingPending.count,
+                pendingVisibilityWaiterCount: pendingVisibilityWaiterCount,
+                queuedPublicationCount: queuedPublicationCount,
+                applyingPublicationCount: applyingPublicationCount,
+                outstandingPublicationCount: outstandingPublicationCount,
+                publisherWaiterCount: publisherWaiterCount,
+                unloadingRootCount: unloadingRootCount,
+                reservedLoadFlightCount: reservedLoadFlightCount,
+                isDrained: componentCounts.allSatisfy { $0 == 0 }
+            )
+        }
+
+        private nonisolated static func sessionWorktreePathDigest(_ path: String) -> String {
+            let standardized = StandardizedPath.absolute((path as NSString).expandingTildeInPath)
+            return SHA256.hash(data: Data(standardized.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
         }
 
         func sessionWorktreeOwnershipDebugSnapshotForTesting() -> SessionWorktreeOwnershipDebugSnapshot {
@@ -4983,6 +5161,7 @@ actor WorkspaceFileContextStore {
             reservedLoadFlights: reservedLoadFlightsByPath.compactMap { path, flight in
                 guard reservedPaths.contains(path) else { return nil }
                 return SessionWorktreeReservedLoadFlight(
+                    ownerID: token.ownerID,
                     standardizedPath: path,
                     flight: flight
                 )
@@ -5054,21 +5233,62 @@ actor WorkspaceFileContextStore {
     ) {
         var scheduledFlightIDs = Set<UUID>()
         for reservation in reservations where scheduledFlightIDs.insert(reservation.flight.id).inserted {
-            let flight = reservation.flight
-            Task { [weak self] in
-                guard let root = try? await flight.task.value,
-                      let identity = flight.completion.identity(),
-                      root.id == identity.rootID
-                else { return }
-                await self?.cleanupOrphanedSessionWorktreeRoots([
-                    WorkspaceSessionWorktreeOwnedRoot(
-                        rootID: identity.rootID,
-                        lifetimeID: identity.lifetimeID,
-                        standardizedPhysicalPath: reservation.standardizedPath
+            #if DEBUG
+                let cleanupID = UUID()
+                let tracked = sessionWorktreeOrphanLoadCleanupsByID.count
+                    < Self.maximumSessionWorktreeOrphanLoadCleanupRecords
+                if !tracked {
+                    sessionWorktreeOrphanLoadCleanupOverflowCount &+= 1
+                }
+                let task = Task { [weak self] in
+                    guard let self else { return }
+                    await self.completeOrphanedSessionWorktreeLoadFlightCleanup(
+                        reservation,
+                        cleanupID: tracked ? cleanupID : nil
                     )
-                ])
-            }
+                }
+                if tracked {
+                    sessionWorktreeOrphanLoadCleanupsByID[cleanupID] = SessionWorktreeOrphanLoadCleanup(
+                        ownerID: reservation.ownerID,
+                        standardizedPath: reservation.standardizedPath,
+                        task: task
+                    )
+                }
+            #else
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.completeOrphanedSessionWorktreeLoadFlightCleanup(
+                        reservation,
+                        cleanupID: nil
+                    )
+                }
+            #endif
         }
+    }
+
+    private func completeOrphanedSessionWorktreeLoadFlightCleanup(
+        _ reservation: SessionWorktreeReservedLoadFlight,
+        cleanupID: UUID?
+    ) async {
+        if let root = try? await reservation.flight.task.value,
+           let identity = reservation.flight.completion.identity(),
+           root.id == identity.rootID
+        {
+            await cleanupOrphanedSessionWorktreeRoots([
+                WorkspaceSessionWorktreeOwnedRoot(
+                    rootID: identity.rootID,
+                    lifetimeID: identity.lifetimeID,
+                    standardizedPhysicalPath: reservation.standardizedPath
+                )
+            ])
+        }
+        #if DEBUG
+            if let cleanupID {
+                sessionWorktreeOrphanLoadCleanupsByID.removeValue(forKey: cleanupID)
+            } else if sessionWorktreeOrphanLoadCleanupOverflowCount > 0 {
+                sessionWorktreeOrphanLoadCleanupOverflowCount -= 1
+            }
+        #endif
     }
 
     private func sessionWorktreeOwnerCount(rootID: UUID, lifetimeID: UUID) -> Int {

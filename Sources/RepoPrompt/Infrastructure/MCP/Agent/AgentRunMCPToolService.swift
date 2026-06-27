@@ -229,6 +229,8 @@ struct AgentRunMCPToolService {
     #if DEBUG
         var testAgentModeViewModel: AgentModeViewModel?
         var testBeforeExplicitTabWorktreeValidation: (() -> Void)?
+        var testBeforeProviderDispatch: (() async -> Void)?
+        var testAfterProviderStartBeforeBookkeeping: (() async -> Void)?
     #endif
     var vcsService: VCSService = .shared
     var gitTargetResolver: GitRepoTargetResolver = .init()
@@ -407,6 +409,35 @@ struct AgentRunMCPToolService {
             await agentModeVM.mcpDiscardSessionTarget(target)
             throw MCPError.internalError("agent_run.start target did not resolve a session ID.")
         }
+        #if DEBUG
+            if worktreeStartupBenchmarkToken != nil {
+                do {
+                    let diagnostics = WorktreeStartupBenchmarkDiagnostics.shared
+                    try diagnostics.registerRecoverableStartTarget(
+                        correlationID: worktreeStartupCorrelationID,
+                        agentSessionID: targetSessionID,
+                        targetTabID: target.tabID,
+                        targetOrigin: target.origin
+                    )
+                    try diagnostics.requireRecoverableStartNotAborted(
+                        correlationID: worktreeStartupCorrelationID
+                    )
+                } catch {
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardRequested,
+                        errorCategory: "target_registration"
+                    )
+                    await agentModeVM.mcpDiscardSessionTarget(target)
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardCompleted,
+                        providerRunActive: false
+                    )
+                    throw error
+                }
+            }
+        #endif
         let worktreeStartupContext = WorktreeStartupContext(
             agentSessionID: targetSessionID,
             correlationID: worktreeStartupCorrelationID,
@@ -520,7 +551,35 @@ struct AgentRunMCPToolService {
                 context: worktreeStartupContext,
                 fallback: error is CancellationError ? .cancellation : nil
             )
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    let category = error is CancellationError
+                        ? "cancellation"
+                        : (error as? DebugWorktreeStartupBenchmarkError) == .startAborted
+                        ? "abort_requested"
+                        : "worktree_preparation"
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .failed,
+                        providerRunActive: false,
+                        errorCategory: category
+                    )
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardRequested
+                    )
+                }
+            #endif
             await agentModeVM.mcpDiscardSessionTarget(target)
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardCompleted,
+                        providerRunActive: false
+                    )
+                }
+            #endif
             throw error
         }
         #if DEBUG
@@ -538,6 +597,14 @@ struct AgentRunMCPToolService {
         let outcome: AgentExternalMCPRunStarter.StartOutcome
         do {
             WorktreeStartupInstrumentation.record(.providerStart, context: worktreeStartupContext)
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    await testBeforeProviderDispatch?()
+                    try WorktreeStartupBenchmarkDiagnostics.shared.beginRecoverableProviderDispatch(
+                        correlationID: worktreeStartupCorrelationID
+                    )
+                }
+            #endif
             outcome = try await startRun(
                 target,
                 message,
@@ -552,15 +619,61 @@ struct AgentRunMCPToolService {
                 spawnParentSessionID,
                 oracleLaunchSource.source
             )
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    await testAfterProviderStartBeforeBookkeeping?()
+                    if WorktreeStartupBenchmarkDiagnostics.shared.recoverableStartAbortRequested(
+                        correlationID: worktreeStartupCorrelationID
+                    ) == true {
+                        await agentModeVM.cancelAgentRun(
+                            tabID: target.tabID,
+                            completion: .terminalPublished
+                        )
+                        throw DebugWorktreeStartupBenchmarkError.startAborted
+                    }
+                }
+            #endif
         } catch {
             let decoratedError = startWorktreeCoordinator.providerStartError(
                 error,
                 targetSessionID: target.sessionID,
                 agentModeVM: agentModeVM
             )
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .failed,
+                        providerRunActive: false,
+                        errorCategory: error is CancellationError ? "cancellation" : "provider_start"
+                    )
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardRequested
+                    )
+                }
+            #endif
             await agentModeVM.mcpDiscardSessionTarget(target)
+            #if DEBUG
+                if worktreeStartupBenchmarkToken != nil {
+                    try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                        correlationID: worktreeStartupCorrelationID,
+                        phase: .discardCompleted,
+                        providerRunActive: false
+                    )
+                }
+            #endif
             throw decoratedError
         }
+        #if DEBUG
+            if worktreeStartupBenchmarkToken != nil {
+                try? WorktreeStartupBenchmarkDiagnostics.shared.recordRecoverableStartPhase(
+                    correlationID: worktreeStartupCorrelationID,
+                    phase: .responsePrepared,
+                    providerRunActive: outcome.snapshot.status == .running
+                )
+            }
+        #endif
         if detach || outcome.snapshot.status != .running || timeoutSeconds <= 0 {
             return decoratedRunValue(snapshot: outcome.snapshot, workflow: workflow, delivery: outcome.delivery)
         }

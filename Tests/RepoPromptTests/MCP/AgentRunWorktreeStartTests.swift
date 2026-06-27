@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import MCP
@@ -2124,6 +2125,223 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
         await agentModeVM.mcpDiscardSessionTarget(target)
     }
 
+    func testDiscardCreatedTargetReleasesSessionWorktreeOwnershipBeforeStateRemoval() async throws {
+        let fixture = try makeGitFixture()
+        let window = try await makeWindow(root: fixture.repo)
+        let agentModeVM = window.agentModeViewModel
+        let target = try await agentModeVM.mcpResolveOrCreateSessionTarget(
+            tabID: nil,
+            sessionID: nil,
+            createIfNeeded: true,
+            sessionName: "discard ownership"
+        )
+        let sessionID = try XCTUnwrap(target.sessionID)
+        let physicalRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rpce-discard-ownership-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: physicalRoot, withIntermediateDirectories: true)
+        try Data("seed".utf8).write(to: physicalRoot.appendingPathComponent("Seed.swift"))
+        defer { try? FileManager.default.removeItem(at: physicalRoot) }
+        let store = window.promptManager.workspaceFileContextStore
+        let preparation = try await store.prepareSessionWorktreeOwnership(
+            ownerID: sessionID,
+            bindingFingerprint: "discard-owned-root",
+            physicalRootPaths: [physicalRoot.path]
+        )
+        _ = try await store.commitSessionWorktreeOwnership(preparation)
+        let before = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
+        XCTAssertEqual(before.installedOwnerCount, 1)
+
+        await agentModeVM.mcpDiscardSessionTarget(target)
+        await agentModeVM.mcpDiscardSessionTarget(target)
+
+        let after = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
+        XCTAssertEqual(after.installedOwnerCount, 0)
+        XCTAssertEqual(after.provisionalOwnerCount, 0)
+        XCTAssertEqual(after.rootClaimCount, 0)
+        XCTAssertEqual(after.pathReservationCount, 0)
+        XCTAssertNil(agentModeVM.session(for: target.tabID, createIfNeeded: false))
+
+        let provisionalTarget = try await agentModeVM.mcpResolveOrCreateSessionTarget(
+            tabID: nil,
+            sessionID: nil,
+            createIfNeeded: true,
+            sessionName: "discard provisional ownership"
+        )
+        let provisionalSessionID = try XCTUnwrap(provisionalTarget.sessionID)
+        let gate = AgentRunWorktreeStartAsyncGate()
+        await store.setRootLoadWillStartHandler { _ in
+            await gate.markStartedAndWaitForRelease()
+        }
+        defer {
+            Task { await store.setRootLoadWillStartHandler(nil) }
+        }
+        let provisionalPreparation = Task {
+            try await store.prepareSessionWorktreeOwnership(
+                ownerID: provisionalSessionID,
+                bindingFingerprint: "discard-provisional-root",
+                physicalRootPaths: [physicalRoot.path]
+            )
+        }
+        await gate.waitUntilStarted()
+        let provisionalBefore = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
+        XCTAssertEqual(provisionalBefore.provisionalOwnerCount, 1)
+        await agentModeVM.mcpDiscardSessionTarget(provisionalTarget)
+        await gate.release()
+        do {
+            _ = try await provisionalPreparation.value
+            XCTFail("Discarded provisional ownership must not publish a late root.")
+        } catch let error as WorkspaceSessionWorktreeOwnershipError {
+            XCTAssertEqual(error, .staleUpdate)
+        }
+        let provisionalAfter = await store.sessionWorktreeOwnershipDebugSnapshotForTesting()
+        XCTAssertEqual(provisionalAfter.provisionalOwnerCount, 0)
+        XCTAssertEqual(provisionalAfter.pathReservationCount, 0)
+        XCTAssertNil(agentModeVM.session(for: provisionalTarget.tabID, createIfNeeded: false))
+    }
+
+    #if DEBUG
+        func testRecoverableStartAbortBeforeTransitionPreventsLateBindingCommit() async throws {
+            let fixture = try makeGitFixture()
+            let nestedRoot = fixture.repo.appendingPathComponent("Nested", isDirectory: true)
+            try FileManager.default.createDirectory(at: nestedRoot, withIntermediateDirectories: true)
+            try Data("nested".utf8).write(to: nestedRoot.appendingPathComponent("Nested.swift"))
+            try runGit(["add", "."], cwd: fixture.repo)
+            try runGit(["commit", "-m", "add nested logical root"], cwd: fixture.repo)
+            let window = try await makeWindow(root: nestedRoot)
+            let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
+            let contextID = try XCTUnwrap(workspace.activeComposeTabID)
+            let visibleRoots = await window.promptManager.workspaceFileContextStore.rootRefs(
+                scope: .visibleWorkspace
+            )
+            let logicalRoot = try XCTUnwrap(visibleRoots.first)
+            let layout = try XCTUnwrap(GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: fixture.repo))
+            let repository = GitWorktreeIdentity.repositoryIdentity(
+                commonGitDir: layout.commonDir,
+                mainWorktreeRoot: layout.knownMainWorktreeRoot
+            )
+            let scope = DebugWorktreeStartupBenchmarkScope(
+                windowID: window.windowID,
+                workspaceID: workspace.id,
+                contextID: contextID,
+                rootID: logicalRoot.id
+            )
+            let branch = "feature/recovery-abort-\(fixture.suffix)"
+            let expected = DebugWorktreeStartupBenchmarkExpectedStart(
+                rootIdentity: DebugWorktreeStartupBenchmarkRootIdentity(
+                    scope: scope,
+                    standardizedLogicalRootPath: logicalRoot.standardizedFullPath,
+                    repositoryID: repository.repositoryID,
+                    repositoryKey: GitWorkspaceAuthorityRepositoryKey(layout: layout)
+                ),
+                requestedBranch: branch,
+                requestedBaseRef: nil
+            )
+            WorktreeStartupBenchmarkDiagnostics.setGateEnabled(false)
+            WorktreeStartupBenchmarkDiagnostics.setGateEnabled(true)
+            defer { WorktreeStartupBenchmarkDiagnostics.setGateEnabled(false) }
+            let diagnostics = WorktreeStartupBenchmarkDiagnostics.shared
+            let control = try diagnostics.setFlags(
+                scope: scope,
+                observe: false,
+                serve: false,
+                forceFullCrawl: true,
+                expiresSeconds: 120
+            )
+            let arm = try diagnostics.arm(
+                expectedStart: expected,
+                controlID: control.controlID,
+                scenario: "clean_same_tree",
+                invocation: 1,
+                ordinal: 1,
+                warmup: false,
+                expiresSeconds: 120
+            )
+            let agentModeVM = window.agentModeViewModel
+            let target = try await agentModeVM.mcpResolveOrCreateSessionTarget(
+                tabID: nil,
+                sessionID: nil,
+                createIfNeeded: true,
+                sessionName: nil
+            )
+            let sessionID = try XCTUnwrap(target.sessionID)
+            try diagnostics.registerRecoverableStartTarget(
+                correlationID: arm.correlationID,
+                agentSessionID: sessionID,
+                targetTabID: target.tabID,
+                targetOrigin: target.origin
+            )
+            let startup = WorktreeStartupContext(
+                agentSessionID: sessionID,
+                correlationID: arm.correlationID,
+                flags: control.route.flags,
+                servingControl: control.route.servingControl
+            )
+            let coordinator = AgentMCPStartWorktreeCoordinator(
+                operationName: "agent_run.start",
+                vcsService: .shared,
+                gitTargetResolver: .init(),
+                transitionObserver: { _, _, _, _ in
+                    _ = try diagnostics.requestRecoverableStartAbort(
+                        scope: scope,
+                        correlationID: arm.correlationID,
+                        controlID: control.controlID
+                    )
+                }
+            )
+            let request = try coordinator.parseRequest(args: [
+                "worktree_create": .bool(true),
+                "worktree_branch": .string(branch)
+            ])
+
+            do {
+                try await WorktreeStartupBenchmarkDiagnostics.$currentPendingStart.withValue(
+                    DebugWorktreeStartupBenchmarkPendingStart(
+                        token: arm.token,
+                        startAttemptID: UUID()
+                    )
+                ) {
+                    try await coordinator.prepare(
+                        request: request,
+                        target: target,
+                        targetWindow: window,
+                        startupContext: startup
+                    )
+                }
+                XCTFail("Abort requested before transition must prevent the binding commit.")
+            } catch {
+                XCTAssertTrue(agentModeVM.worktreeBindings(forAgentSessionID: sessionID).isEmpty)
+            }
+            let recovery = try diagnostics.recoverableStartSnapshot(
+                scope: scope,
+                correlationID: arm.correlationID,
+                controlID: control.controlID
+            )
+            XCTAssertTrue(recovery.abortRequested)
+            XCTAssertEqual(recovery.phase, .bindingConstructed)
+            XCTAssertThrowsError(
+                try diagnostics.beginRecoverableProviderDispatch(correlationID: arm.correlationID)
+            ) { error in
+                XCTAssertEqual(error as? DebugWorktreeStartupBenchmarkError, .startAborted)
+            }
+            XCTAssertNotNil(recovery.worktreeID)
+            XCTAssertNotNil(recovery.bindingID)
+            XCTAssertEqual(recovery.ownedPhysicalPathDigests.count, 1)
+            XCTAssertNotEqual(recovery.worktreePathDigest, recovery.ownedPhysicalPathDigests.first)
+            let descriptors = try await VCSService.shared.listGitWorktrees(at: fixture.repo)
+            let created = try XCTUnwrap(descriptors.first(where: { !$0.isMain }))
+            let expectedOwnedPath = StandardizedPath.absolute(
+                URL(fileURLWithPath: created.path)
+                    .appendingPathComponent("Nested", isDirectory: true).path
+            )
+            let expectedOwnedDigest = SHA256.hash(data: Data(expectedOwnedPath.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            XCTAssertEqual(recovery.ownedPhysicalPathDigests, [expectedOwnedDigest])
+            XCTAssertTrue(agentModeVM.worktreeBindings(forAgentSessionID: sessionID).isEmpty)
+            await agentModeVM.mcpDiscardSessionTarget(target)
+        }
+    #endif
+
     func testCoordinatorPostCreateFailureRecordsOneTerminalReceiptDecision() async throws {
         let fixture = try makeGitFixture()
         let window = try await makeWindow(root: fixture.repo)
@@ -3814,4 +4032,32 @@ private final class WorktreeStartFakeCodexController: CodexSessionControllerTurn
     func cancelCurrentTurn() async {}
     func shutdown() async {}
     func respondToServerRequest(id: CodexAppServerRequestID, result: [String: Any]) async {}
+}
+
+private actor AgentRunWorktreeStartAsyncGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markStartedAndWaitForRelease() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
 }

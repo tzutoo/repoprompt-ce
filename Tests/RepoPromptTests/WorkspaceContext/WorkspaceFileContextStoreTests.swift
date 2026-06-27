@@ -1,5 +1,6 @@
 import Combine
 import CoreServices
+import CryptoKit
 @testable import RepoPrompt
 import XCTest
 
@@ -1502,6 +1503,61 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             XCTAssertEqual(ownershipAfterSuspendedOwnerResumes.pathReservationCount, 0)
         }
 
+        func testSessionSpecificDrainSnapshotIsOwnerScopedAndFailsClosedForSharedRoot() async throws {
+            let root = try makeTemporaryRoot(name: "SessionSpecificDrainSnapshot")
+            try write("seed", to: root.appendingPathComponent("Seed.swift"))
+            let store = WorkspaceFileContextStore()
+            let ownerA = UUID()
+            let ownerB = UUID()
+            let path = StandardizedPath.absolute(root.path)
+            let digest = SHA256.hash(data: Data(path.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+
+            let preparedA = try await store.prepareSessionWorktreeOwnership(
+                ownerID: ownerA,
+                bindingFingerprint: "owner-a",
+                physicalRootPaths: [path]
+            )
+            _ = try await store.commitSessionWorktreeOwnership(preparedA)
+            let preparedB = try await store.prepareSessionWorktreeOwnership(
+                ownerID: ownerB,
+                bindingFingerprint: "owner-b",
+                physicalRootPaths: [path]
+            )
+            _ = try await store.commitSessionWorktreeOwnership(preparedB)
+
+            let live = try await store.sessionWorktreeOwnershipDrainSnapshotForTesting(
+                ownerID: ownerA,
+                expectedPhysicalPathDigests: [digest],
+                requestedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            XCTAssertFalse(live.isDrained)
+            XCTAssertEqual(live.installedTokenCount, 1)
+            XCTAssertEqual(live.matchingLiveRootCount, 1)
+            XCTAssertEqual(live.matchingWatcherAttachmentCount, 1)
+
+            await store.releaseSessionWorktreeOwnership(ownerID: ownerA)
+            let shared = try await store.sessionWorktreeOwnershipDrainSnapshotForTesting(
+                ownerID: ownerA,
+                expectedPhysicalPathDigests: [digest],
+                requestedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            XCTAssertFalse(shared.isDrained, "Another owner must keep physical deletion fail-closed.")
+            XCTAssertEqual(shared.installedTokenCount, 0)
+            XCTAssertEqual(shared.matchingLiveRootCount, 1)
+
+            await store.releaseSessionWorktreeOwnership(ownerID: ownerB)
+            let drained = try await store.sessionWorktreeOwnershipDrainSnapshotForTesting(
+                ownerID: ownerA,
+                expectedPhysicalPathDigests: [digest],
+                requestedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            XCTAssertTrue(drained.isDrained)
+            XCTAssertEqual(drained.expectedPhysicalPathDigests, [digest])
+            XCTAssertEqual(drained.outstandingPublicationCount, 0)
+        }
+
         func testSessionWorktreeOwnershipReleaseDuringRootLoadUnloadsLateRoot() async throws {
             let root = try makeTemporaryRoot(name: "SessionWorktreeOwnershipReleaseDuringLoad")
             try write("seed", to: root.appendingPathComponent("Seed.swift"))
@@ -1528,6 +1584,38 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             XCTAssertEqual(ownershipDuringLoad.rootClaimCount, 0)
             XCTAssertEqual(ownershipDuringLoad.pathReservationCount, 1)
             await store.releaseSessionWorktreeOwnership(ownerID: ownerID)
+            let standardizedPath = StandardizedPath.absolute(root.path)
+            let digest = SHA256.hash(data: Data(standardizedPath.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            let drainEnteredLoadFlightWait = expectation(
+                description: "drain enters the reserved load-flight wait"
+            )
+            await store.setSessionWorktreeDrainDidEnterLoadFlightWaitHandler {
+                drainEnteredLoadFlightWait.fulfill()
+            }
+            defer {
+                Task { await store.setSessionWorktreeDrainDidEnterLoadFlightWaitHandler(nil) }
+            }
+            let drainCompleted = AsyncSignal()
+            let drainTask = Task {
+                let snapshot = try await store.sessionWorktreeOwnershipDrainSnapshotForTesting(
+                    ownerID: ownerID,
+                    expectedPhysicalPathDigests: [digest],
+                    requestedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
+                await drainCompleted.mark()
+                return snapshot
+            }
+            await fulfillment(of: [drainEnteredLoadFlightWait], timeout: 1)
+            let activeDrainWaiters =
+                await store.sessionWorktreeDrainLoadFlightWaiterCountForTesting()
+            XCTAssertEqual(activeDrainWaiters, 1)
+            let drainFinishedBeforeLoadRelease = await drainCompleted.isMarked()
+            XCTAssertFalse(
+                drainFinishedBeforeLoadRelease,
+                "The drain must be suspended on the reserved load flight."
+            )
             await loadGate.release()
 
             do {
@@ -1536,6 +1624,12 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             } catch let error as WorkspaceSessionWorktreeOwnershipError {
                 XCTAssertEqual(error, .staleUpdate)
             }
+            let drained = try await drainTask.value
+            XCTAssertTrue(drained.isDrained)
+            XCTAssertEqual(drained.reservedLoadFlightCount, 0)
+            let remainingDrainWaiters =
+                await store.sessionWorktreeDrainLoadFlightWaiterCountForTesting()
+            XCTAssertEqual(remainingDrainWaiters, 0)
 
             await store.setRootLoadWillStartHandler(nil)
             let lateRootUnloaded = await waitForAsyncCondition {

@@ -1080,3 +1080,103 @@ All values are retained N=`5`; p95 is nearest-rank and population variance is in
 - Projected route statistics therefore do not exist; the required four typed `diffSeedServing` observations were never sampled. The conditional actual `rpce-cli-debug agent_run` smoke was **not run**, because there was no valid projected cohort.
 - Both forced diagnostic artifacts report `cleanup_complete=true`. For the corrected run, all six sessions terminalized `completed`, all six owned worktrees and branches were proven absent, route/diagnostics/workspace scope were restored, and the memory sampler stopped. The exact owned marker hash matched before removal and the marker is absent. Cleanup proof SHA-256 is `3ab134859e9e5e2248e3d720694adaa66d37109fa315bf5a7d5900a6b51afb83`.
 - Derived rollup: `/tmp/rpce-worktree-startup/current-stable-20260627T003347Z/derived-invalid-summary.json`, SHA-256 `d3ae6efeecb770c25489bd58ba2d2ce12b19239a851c659e462fcc56d6543a75`. Full artifact hash manifest: `/tmp/rpce-worktree-startup/current-stable-20260627T003347Z/artifact-hashes.txt`, SHA-256 `cf3d540c47d3bd57fe02c3c436f1d814dcd6dc6cb79c1bbba63340560ed9c24a`.
+
+## 2026-06-27 checkpoint `07993cd8` stable-tree measurement — INVALID: resource receipts and projected acquisition
+
+- Decision: **invalid diagnostic; no accepted performance row and baseline unchanged**. Source stayed stable, but no primary sample had a valid resource receipt, and projected stopped after the excluded warmup when retained ordinal 2 timed out during `agent_run start`.
+- Frozen source: `07993cd8e42732073c781a9a66f85ce64825ad1a`. The documented manifest covered 1,225 build/harness files, had content digest `5367c7e542b48c64fab24adaf7136cecd004859860e2363029a95627650da85b`, and was byte-identical before relaunch, after relaunch, before/after forced-full, before projected, after recovery, and at final cleanup. Manifest-file SHA-256 was always `184187e0d95887da84ad20cfc7e51739c3923f6a9e8fc88a4fa112f365a02ff8`; relevant Git status was empty.
+- Authorized coordinated package/relaunch passed: ticket `c7a50e7d-8651-4914-b4d4-63bbac8102d7`, app PID `84779`, daemon log `/Users/pvncher/Library/Application Support/RepoPrompt CE/Conductor/6eb29133d54d75306f7c1d83cf6ce787643dd42843b1af4ff800cdd8d9846ccb/jobs/c7a50e7d-8651-4914-b4d4-63bbac8102d7.log`. Packaged app/CLI SHA-256: `c4a06952aca3845aa11a8ad7e3c04952e168dbdfbaaffd1d3e654a17821f955f` / `e546e347b59dc6375759b143b6aa58e31de25754e3ceb0bc22475d95e9c5e4b5`.
+- Dedicated scope: window `1`, workspace `RPCE Search Bench Main 20260618` / `163E658F-4313-4894-B003-595287E59AE9`, fresh control context `B7C4E67F-64E1-4896-8199-887DB14BAC11`, root `34A73261-4D1B-48BD-A379-C2605E148348`, sole real root `/Users/pvncher/Documents/Git/repoprompt-ce-release`. Plan `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/plan.json`, embedded SHA-256 `b8d3312af1898e191284587bd56425c1f176f081c47a4ee3d1dad44833762aee`.
+- Harness schema/scope preflight passed at `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/artifacts/20260627T012825Z-preflight-7a16811d`; summary SHA-256 `d94f3a3b8e09ded397b4f9abe1bb2668e789efdd53fc474acd1406d3d219b3ca`. Commands used explicit `/usr/local/bin/rpce-cli-debug`; no shell substitution was used.
+- Route contracts were typed and route-specific: forced-full required exactly `{"fullCrawl":1}`; projected required the configured four typed events, exactly `{"diffSeedServing":4}`. Any other route count or any fallback was rejecting.
+
+### Raw forced-full retained statistics (unaccepted)
+
+All values are retained N=`5`; p95 is nearest-rank and population variance is in µs².
+
+| metric | median µs | p95 µs | population variance µs² | population CV |
+|---|---:|---:|---:|---:|
+| materialize to root ready | 455,341 | 663,323 | 9,118,799,139.36 | 19.9652% |
+| materialize to first search | 1,276,592 | 1,443,915 | 8,380,179,178.64 | 7.1216% |
+| materialize to first read | 1,204,561 | 1,387,704 | 9,604,655,680.64 | 8.0771% |
+| interactive readiness | 1,276,592 | 1,443,915 | 8,380,179,178.64 | 7.1216% |
+| first search | 507,170 | 551,429 | 496,449,036.40 | 4.3542% |
+| first read | 360,177 | 375,053 | 1,096,445,247.36 | 9.6484% |
+| first codemap | 1,270,911 | 1,575,477 | 18,353,798,508.00 | 10.0006% |
+| warm codemap | 173,590 | 216,008 | 458,065,547.44 | 11.4208% |
+| passive tree | 2,058,987 | 2,238,971 | 7,535,245,074.80 | 4.1553% |
+| selection | 21,308,785 | 21,750,296 | 75,084,241,188.40 | 1.2825% |
+
+- Forced-full completed the required one warmup plus five retained attempts. Every ordinal had exact `{"fullCrawl":1}` / `{}`; aggregate `{"fullCrawl":6}` / `{}`. All five retained follow-on timing gates were accepted, but accepted primary N=`0`.
+- Its resource receipt was rejected as `inconsistent_resident_peak_delta` and `inconsistent_resident_retained_delta`: baseline/peak/final were `408.8/465.7/465.7 MB`, while reported peak/retained deltas were `57.0/57.0 MB` rather than the exact arithmetic `56.9/56.9 MB`.
+- Artifact: `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/artifacts/20260627T012936Z-warm-forced-full-w1-9d240387`. `summary`/`samples`/`resources`/`cleanup` SHA-256: `7b49d03649f83ccc4ce83263b1dd2eac667edc74dbe83fadf7d405b9c7bbd688` / `05cd14421afe1188a5f2d856c8feef6043bec2bf35b48cf8ae9e8cf37e190854` / `57028da4b6153379bdb9784952524a57a3bc68301c1b14e9b1cc1c3006892b75` / `7cac6fa9c56f068068d1287354ce39f72904ae956d1685afcfc3a1657da1e42b`.
+
+### Projected, conditional smoke, and cleanup disposition
+
+- Projected preparation reached terminal `admitted` in `3,096,425 µs`: two authority captures, prefix misses/hits/admissions/scans `1/1/1/1`, 2,664 candidates, 431 directories, eight pruned directories, five control records, and no fallback.
+- Only the excluded warmup completed. It had exact `{"diffSeedServing":4}` / `{}`; its raw metrics in the table order above were `2,955,798 / 3,597,724 / 3,526,218 / 3,597,724 / 397,412 / 255,272 / 5,511,965 / 163,414 / 9,536,063 / 15,283,783 µs`. Retained N=`0`, so median/p95/variance are unavailable.
+- The warmup receipt was rejected as `inconsistent_physical_footprint_peak_delta` and `inconsistent_physical_footprint_retained_delta`: baseline/peak/final were `201.1/217.5/198.7 MB`, while reported deltas were `16.3/-2.5 MB` rather than exact arithmetic `16.4/-2.4 MB`. Retained ordinal 2 then timed out after 180 seconds in `agent_run start`; the cohort stopped with one of six attempts.
+- Projected artifact: `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/artifacts/20260627T013247Z-warm-projected-w1-767ed8c5`. `summary`/`samples`/`resources`/`cleanup` SHA-256: `e29034749b1610f7541f69982db3590b5f053edd62007727c647b8dc92531e05` / `3fdfa18a118163a5ae5c7267b47737d0fa2349c8b747b37d13d9e6d816efedc9` / `d0acc3d6359330295d60ed6fa1e3147fc804c3079b68a22fd0d90027d3b61d93` / `138d6e1873d6a8da847ddd6eff39114aefd1d6d0281e58739746d2ee29d75436`.
+- The conditional actual `rpce-cli-debug agent_run` functional smoke was **not run**: projected was neither resource-valid nor a complete `1 + 5` cohort, so raw transcript evidence could not be accepted.
+- The first ownership-checked cleanup retry timed out after 300 seconds in `manage_worktree list`. Recovery used authorized coordinated relaunch ticket `d145eff7-f147-402a-b494-c7c2ed8155e8`, PID `81968`, log `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/conductor-recovery-relaunch.log`. The relaunch changed the live root ID to `93337AEA-82EE-4213-A7EE-6D2CE37744F2`, so a rerun under the frozen plan would not be comparable.
+- The timed-out ordinal left one clean managed worktree on the exact frozen HEAD. Exact prefix/path/HEAD/branch/clean proof was captured before removing the worktree and its merged benchmark branch; proof SHA-256 before/after: `3724e41e85e1c6edae91019a5aaa00c87134c195aa8565ce0f21eebc5865a4f9` / `f1ebf0020a4a1f4a646530634174d3f41f1d9c336cc0aa4d2a2a7de6503bf128`.
+- Final cleanup proof: zero matching owned worktrees/branches, zero running Agent sessions, memory sampler `running=false`, control tab closed, exact owner marker removed, and the frozen source manifest still identical. Worktree/session/memory/tab proof SHA-256: `ad304fe18b44251be0034a94cb41a61c1f33eab21b1259d3eb64b027c995033b` / `164bf4abf9ee4b2e3ff2a6c0a67e382faaece5a06e962df969519ed4e7ac9f6c` / `7bb37f39be372188a78945a05a8d55fdae1f0214a5613708e28c05c69ea3a705` / `fc5edc1c08c43abc706bf34e90d35f4d40ba6a87916285fba71e393967b14db7`.
+- Derived rollup: `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/derived-invalid-summary.json`, SHA-256 `f99480ed65c25f40d5a83a79cfd79be3a251a346f607388e70d8399c8a35947e`. Full 273-file artifact hash manifest: `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/artifact-hashes.txt`, SHA-256 `3c95d0de173d67cba64376dd9558c579271ac62aae67fd5903e2d7133c739f03`.
+
+## Measurement-integrity remediation after checkpoint `07993cd8`
+
+- Historical checkpoint rows remain **invalid as originally recorded**; no prior row or raw value was rewritten.
+- Forced-full completed `1 + 5` with exact `{"fullCrawl":1}` and empty fallback per ordinal; raw retained readiness p95 was **1,443.915 ms**. Accepted N was zero because independently quantized 0.1 MiB resource fields were compared with sub-quantization tolerance.
+- Projected did **not** establish a cohort: only the excluded warmup completed before retained ordinal 2 timed out during `agent_run start`.
+- The timeout exposed physical-before-logical cleanup, missing pre-response identity recovery, and status-inclusive recovery inventory. Iteration 1 is limited to quantization-aware validation, bounded recoverable-start identity/abort, release-on-discard, logical-release-before-physical-removal cleanup, bounded session drain proof, and one strict transcript/direct-probe inference gate.
+- No production performance scheduling change is included or accepted. Production iteration 2 remains blocked until a same-build forced-full/projected pair passes measurement-integrity gates.
+
+### Frozen remediation provenance
+
+| field | value |
+|---|---|
+| remediation commit | `<PENDING: no commit requested>` |
+| source manifest SHA-256 | `<PENDING>` |
+| app SHA-256 | `<PENDING>` |
+| CLI SHA-256 | `<PENDING>` |
+| plan SHA-256 | `<PENDING>` |
+| host / OS | `<PENDING>` |
+| thermal / sleep evidence | `<PENDING>` |
+| workspace / window / context / root | `<PENDING>` |
+
+### Serial campaign gate
+
+Primary gate: valid projected p95 must improve at least 30% versus same-build forced-full. Secondary gates allow no more than 10% regression in loaded-main search/read, warm `get_code_structure`, passive tree, selection/auto-codemap, correctness, or retained memory.
+
+| iteration | single attributed change | forced-full p95 ms | projected p95 ms | delta | route/resource/cleanup valid | secondary gates | disposition |
+|---:|---|---:|---:|---:|---|---|---|
+| 0 | Historical `07993cd8`; pre-remediation evidence only | 1443.915 raw | not established | N/A | no | N/A | invalid historical diagnostic |
+| 1 | Measurement-integrity remediation only | `<PENDING>` | `<PENDING>` | `<PENDING>` | `<PENDING>` | `<PENDING>` | measurement trust gate |
+| 2 | Reserved; one production change only after iteration 1 passes | — | — | — | — | — | blocked |
+| 3 | Reserved | — | — | — | — | — | blocked |
+| 4 | Reserved | — | — | — | — | — | blocked |
+| 5 | Reserved | — | — | — | — | — | blocked |
+
+Variance rule: each series is one excluded warmup plus five retained ordinals. Valid slow samples remain retained. CV above 50% triggers one separately reported predeclared `1 + 5` confirmation invocation; series are never pooled or used to replace ordinals.
+
+## 2026-06-27 current-source measurement-integrity validation — INVALID: independent review block
+
+- Decision: **invalid diagnostic; no fresh performance row and no eligibility decision**. Independent review found blocking cleanup/recovery/inference validation defects in the current slice. Per operator direction, no forced-full cohort, projected cohort, live-inference gate, or raw gate probe was started.
+- Offline harness self-test completed successfully. Output: `/tmp/rpce-measurement-integrity-self-test.txt`, SHA-256 `affb8d0e5f7df7d6a0a0bc33b2b5da56d586c5657d551bb69d7f3ef973c92316`.
+- Immutable checkpoint diagnostic revalidation passed the quantization-aware validator without rewriting the artifact: exact retained readiness values `1443.915 / 1276.592 / 1158.174 / 1262.821 / 1285.615 ms`, `resource_evidence_valid=true`, `cleanup_complete=true`. Output: `/tmp/rpce-worktree-startup/checkpoint-07993cd8-stable/forced-full-resource-validator-revalidation-20260627-current.json`, SHA-256 `3f35818ebcfbeac834dad7906f1867550fc33e584fc38489d01bd43a7216065c`. This is diagnostic proof only; historical checkpoint disposition remains invalid.
+- Current packaged identity: HEAD `07993cd8e42732073c781a9a66f85ce64825ad1a`; 1,225-file current-content manifest `46387250c9a2db79444e200d4552b3bd7afc2a4d5b24ef7c174cd4fb5eea4301`; app/CLI SHA-256 `2ff9d7d0348b15c4b320d40e6e4d19c5852fdc14e302608e232cd25730a7d98b` / `edbb1bbecb9f865fd754aff102cd89dea1ba3edac9a87000829e839212ab9b6a`. The source-manifest files were byte-identical before relaunch, after relaunch, and after safe preflight checks (file SHA-256 `994c1789e1caad3f5d437f039b59ccb69171a7611447ade50d73c06f8c20ee50`). Coordinated relaunch ticket: `f0c40786-a520-4318-b05e-7c0febd36db3`.
+- Dedicated workspace presence and warm direct search/read were proven in window `1`, workspace `RPCE Search Bench Main 20260618` / `163E658F-4313-4894-B003-595287E59AE9`. The benchmark scope preflight did not complete: discovery requests rejected with `invalid_params` / `scope_mismatch`; no marker, immutable plan, or live cohort artifact was created.
+- Cleanup: temporary context `5F213224-B338-45FC-9C33-F5D1FCC6202C` was logically released before closure; it created no physical worktree. The close receipt succeeded and post-close inventory proved the context absent. The benchmark diagnostics gate was already `true` and was not changed.
+- Diagnostic summary: `/tmp/rpce-worktree-startup/current-source-stable-20260627T024803Z/invalid-diagnostic-summary.json`, SHA-256 `cb5257b0a7348bfff04a79a78ba869832817ac9d2053cb7b60152745d18b8ffd`. Full safe-check artifact root: `/tmp/rpce-worktree-startup/current-source-stable-20260627T024803Z`.
+- Final optimization eligibility: **no**. There are no fresh retained observations, so no candidate can satisfy the `>=1 s` or `>=30% of p95` attribution threshold in at least four retained observations.
+
+## 2026-06-27 final current-source live validation — INVALID: preflight admission block and independent review stop
+
+- Decision: **invalid diagnostic; no retained observation and baseline unchanged**. The operator stopped expensive cohorts and inference after independent review found three source defects. Before that stop, the live scope/preflight prerequisite had already failed closed because the packaged app rejected the documented DEBUG diagnostic tool.
+- Coordinated rebuild/relaunch succeeded: ticket `fde0f210-7aad-4a38-bdef-61de0556a786`, PID `3107`, packaging/lifecycle elapsed `19 s`. CLI identity was `rpce-cli-debug (repoprompt-mcp) 1.0.21`.
+- Harness self-test completed successfully in `0.34 s`. Dedicated scope discovery succeeded for window `1`, workspace `RPCE Search Bench Main 20260618` / `163E658F-4313-4894-B003-595287E59AE9`, with the sole root `/Users/pvncher/Documents/Git/repoprompt-ce-release`; direct `file_search` found `WorkspaceRootSeedPlanner` in the configured tracked file.
+- Exact blocking probe: `/usr/local/bin/rpce-cli-debug --raw-json -w 1 -c worktree_startup_benchmark -j '{"op":"mcp_read_search_runtime_snapshot","window_id":1,"recent_publication_limit":0,"root_limit":256}'`. It failed in `0.11 s` with `tool_execution_admission_unclassified`: `No static admission classification exists for tool 'worktree_startup_benchmark'.` No marker or immutable plan was created, so the harness `preflight` subcommand could not be completed safely.
+- Per the stop rule, no forced-full start, projected start, Agent Mode provider inference, bound codemap/tree/selection probe, inherited child, or secondary-root churn was started.
+- Cleanup: temporary context `6F083A71-8F5E-462A-B184-36084F6E7D6E` was logically closed with an `ok` receipt and was absent from the post-close inventory. This validation created zero Agent sessions, zero worktrees/branches, and zero secondary roots, so no physical cleanup was required. Status-free `manage_worktree list`, running-session inventory, sole-root inventory, and `git status`/`git diff --files` were preserved raw.
+- Raw artifact root: `/tmp/rpce-worktree-startup/final-live-20260627T031648Z`. Diagnostic summary: `invalid-diagnostic-summary.json`, SHA-256 `60d1055e9a599c84910bb80f8f1127146ddbf4a64b3c127bd1169473f27cecd0`. Hash manifest: `artifact-hashes.txt`, SHA-256 `b86bdab7f376b6f6b9395ee0968794c0ae24417835fbd471b39a55caeddd3030`.
+- Final optimization eligibility: **no**. The preflight block and independent review stop produced no valid performance evidence.

@@ -6487,6 +6487,10 @@ final class AgentModeViewModel: ObservableObject {
             break
         }
         if let sessionID = target.sessionID {
+            // Release logical worktree ownership before tearing down session/tab state. This is
+            // intentionally idempotent: a concurrent transition or repeated discard observes the
+            // generation invalidation and cannot republish stale ownership.
+            await releaseSessionWorktreeOwnership(sessionID: sessionID)
             mcpRemoveAgentRunOracleReviewContexts(sessionID: sessionID)
             await mcpDeactivateControlContext(
                 sessionID: sessionID,
