@@ -199,7 +199,7 @@ final class GitLoadedRootAuthorityEvidenceTests: XCTestCase {
                 cacheMode: .automatic
             ) { try await gate.collect() }
         }
-        try await waitUntil { await authority.snapshotForTesting().pendingPrefixControlAdmissionCount == 1 }
+        await gate.waitUntilCollectionStarts()
         let second = Task {
             try await authority.prefixControlEvidence(
                 in: fixture.layout,
@@ -268,12 +268,24 @@ final class GitLoadedRootAuthorityEvidenceTests: XCTestCase {
             XCTAssertEqual(reason, .monitorCoverageUnavailable)
         }
 
-        let fullObservation = try await authority.retainMetadataObservation(for: fixture.layout)
-        switch await authority.beginCollection(scopeKey: scope) {
-        case .success:
-            break
-        case let .failure(reason):
-            XCTFail("Validated full metadata coverage must restore collection: \(reason)")
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        var fullObservation: GitWorkspaceMetadataMonitor.RetainToken?
+        var lastFailure: String?
+        while clock.now < deadline, fullObservation == nil {
+            let candidate = try await authority.retainMetadataObservation(for: fixture.layout)
+            switch await authority.beginCollection(scopeKey: scope) {
+            case .success:
+                fullObservation = candidate
+            case let .failure(reason):
+                lastFailure = String(describing: reason)
+                await authority.releaseMetadataObservation(candidate)
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
+        guard let fullObservation else {
+            XCTFail("Validated full metadata coverage must restore collection: \(lastFailure ?? "<none>")")
+            return
         }
         await authority.releaseMetadataObservation(fullObservation)
     }
@@ -989,10 +1001,11 @@ final class GitLoadedRootAuthorityEvidenceTests: XCTestCase {
         line: UInt = #line,
         _ predicate: @escaping () async -> Bool
     ) async throws {
-        for _ in 0 ..< 1000 {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
             if await predicate() { return }
-            await Task.yield()
-        }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        } while Date() < deadline
         XCTFail("Timed out waiting for deterministic cache state", file: file, line: line)
     }
 

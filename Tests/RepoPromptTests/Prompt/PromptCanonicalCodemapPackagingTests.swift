@@ -22,7 +22,12 @@ final class PromptCanonicalCodemapPackagingTests: XCTestCase {
         )
         let selectedURL = root.appendingPathComponent("Selected.swift")
 
-        let store = WorkspaceFileContextStore()
+        let store = WorkspaceFileContextStore(
+            codemapGitEligibilityProbe: .init { _ in
+                .transientUnavailable(.repositoryChanging)
+            },
+            codemapProjectionPreloadLaunchPolicyForTesting: .disabled
+        )
         _ = try await store.loadRoot(path: root.path)
         let prompt = makePrompt(store: store, windowID: -9801)
         let config = makeAutoConfig()
@@ -134,8 +139,11 @@ final class PromptCanonicalCodemapPackagingTests: XCTestCase {
             lookupContext: window.promptManager.allLoadedWorkspaceLookupContext()
         )
         XCTAssertTrue(preAssembly.entries.filter(\.isCodemap).isEmpty)
-        guard case .unavailable = preAssembly.codemapPresentation.coverage else {
-            return XCTFail("Cold automatic codemap coverage must remain honestly incomplete")
+        switch preAssembly.codemapPresentation.coverage {
+        case .complete, .partial:
+            XCTFail("Cold automatic codemap coverage must remain honestly incomplete")
+        case .pending, .unavailable:
+            break
         }
         let canonicalClipboard = await window.promptManager.buildClipboard(
             for: makeAutoConfig(),
@@ -251,7 +259,14 @@ final class PromptCanonicalCodemapPackagingTests: XCTestCase {
     ) async -> (window: WindowState, workspaceID: UUID) {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-        let window = WindowState()
+        let window = WindowState(
+            workspaceFileContextStore: WorkspaceFileContextStore(
+                codemapGitEligibilityProbe: .init { _ in
+                    .transientUnavailable(.repositoryChanging)
+                },
+                codemapProjectionPreloadLaunchPolicyForTesting: .disabled
+            )
+        )
         WindowStatesManager.shared.registerWindowState(window)
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 

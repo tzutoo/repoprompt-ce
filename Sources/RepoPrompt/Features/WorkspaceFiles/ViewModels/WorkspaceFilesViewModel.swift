@@ -11168,9 +11168,8 @@ extension WorkspaceFilesViewModel {
     @MainActor
     private func rejectAutomaticCodemapPublicationForRetry() {
         resetAutoCodemapFiles([])
-        if autoCodemapReadinessRetryAvailable {
-            autoCodemapReadinessRetryPending = true
-        }
+        autoCodemapReadinessRetryAvailable = true
+        autoCodemapReadinessRetryPending = true
     }
 
     /// UI/test compatibility snapshot of the current checkbox/slice/codemap mirror.

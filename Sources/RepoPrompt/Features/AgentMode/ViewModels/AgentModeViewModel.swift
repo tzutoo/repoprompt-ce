@@ -5260,12 +5260,19 @@ final class AgentModeViewModel: ObservableObject {
         target: MCPSessionTarget
     ) throws -> [AgentSessionWorktreeBinding] {
         guard let sourceSession = sessions[sourceTabID],
-              sourceSession.activeAgentSessionID == expectedParentSessionID,
-              sourceSession.mcpControlContext?.sessionID == expectedParentSessionID
+              sourceSession.activeAgentSessionID == expectedParentSessionID
         else {
             throw MCPError.invalidParams(
                 "agent_run.start could not validate the routed source Agent session for worktree inheritance."
             )
+        }
+        let expectedBindings = sourceSession.worktreeBindings
+        if !expectedBindings.isEmpty {
+            guard sourceSession.mcpControlContext?.sessionID == expectedParentSessionID else {
+                throw MCPError.invalidParams(
+                    "agent_run.start could not validate the routed source Agent session for worktree inheritance."
+                )
+            }
         }
         guard sourceSession.hasLoadedPersistedState else {
             throw MCPError.invalidParams(
@@ -5282,7 +5289,6 @@ final class AgentModeViewModel: ObservableObject {
             )
         }
 
-        let expectedBindings = sourceSession.worktreeBindings
         if targetSession.worktreeBindings.isEmpty {
             _ = commitWorktreeBindings(expectedBindings, to: targetSession)
         } else if targetSession.worktreeBindings != expectedBindings {

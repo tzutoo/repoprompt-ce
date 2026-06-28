@@ -249,10 +249,10 @@ final class MCPReadFileAutoSelectionCoordinatorTests: XCTestCase {
         let firstGate = CoordinatorAsyncGate()
         let recorder = CoordinatorRecorder()
         let coordinator = makeCoordinator(recorder: recorder) { _, batch in
-            if await recorder.canonicalBatches().isEmpty {
+            let invocation = await recorder.recordCanonicalAndCount(batch)
+            if invocation == 1 {
                 await firstGate.markStartedAndWaitForRelease()
             }
-            await recorder.recordCanonical(batch)
             return .unchanged
         }
         let key = contextKey()
@@ -266,7 +266,9 @@ final class MCPReadFileAutoSelectionCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.enqueue(intent: .slices(entries: [
             WorkspaceSelectionSliceInput(path: "/tmp/B.swift", ranges: [LineRange(start: 4, end: 6), LineRange(start: 6, end: 8)])
         ]), for: key))
-        XCTAssertEqual(coordinator.debugSnapshot().pendingCanonicalBatchCount, 1)
+        let blockedSnapshot = coordinator.debugSnapshot()
+        XCTAssertEqual(blockedSnapshot.pendingCanonicalBatchCount, 1)
+        XCTAssertEqual(blockedSnapshot.canonicalWorkerCount, 1)
 
         await firstGate.release()
         await coordinator.drain(.canonicalSelection, for: key)

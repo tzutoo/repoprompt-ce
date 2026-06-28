@@ -333,12 +333,22 @@ class WindowState: ObservableObject {
             )
         }
 
+        convenience init(workspaceFileContextStore: WorkspaceFileContextStore) {
+            self.init(
+                contextBuilderProviderFactory: nil,
+                loadStoredAPISettingsDataOnInit: true,
+                codexModelPollingService: .shared,
+                workspaceFileContextStore: workspaceFileContextStore
+            )
+        }
+
     #endif
 
     private init(
         contextBuilderProviderFactory: ContextBuilderAgentViewModel.ProviderFactory?,
         loadStoredAPISettingsDataOnInit: Bool,
-        codexModelPollingService: CodexModelPollingService
+        codexModelPollingService: CodexModelPollingService,
+        workspaceFileContextStore injectedWorkspaceFileContextStore: WorkspaceFileContextStore? = nil
     ) {
         // Assign a unique window ID
         WindowState.windowCounter += 1
@@ -358,6 +368,7 @@ class WindowState: ObservableObject {
             deferredInitialAgentSystemWorkspaceRefresh: deferredInitialAgentSystemWorkspaceRefresh,
             sharedMCPService: Self.sharedMCPService,
             contextBuilderProviderFactory: contextBuilderProviderFactory,
+            workspaceFileContextStore: injectedWorkspaceFileContextStore,
             loadStoredAPISettingsDataOnInit: loadStoredAPISettingsDataOnInit,
             codexModelPollingService: codexModelPollingService
         )
@@ -1322,6 +1333,7 @@ class WindowState: ObservableObject {
             return
         }
 
+        await contextBuilderAgentViewModel.cancelAllActiveRuns()
         await workspaceManager.cancelActiveSessions()
         await agentModeViewModel.prepareForWindowClose()
         WorkspaceApprovalManager.shared.cancelPending(forWindowID: windowID)

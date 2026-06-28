@@ -89,7 +89,8 @@ final class WorkspaceCodemapLocalGitClassificationTests: XCTestCase {
             codemapGitEligibilityProbe: .init { _ in
                 await preflightCount.increment()
                 return .transientUnavailable(.repositoryChanging)
-            }
+            },
+            codemapProjectionPreloadLaunchPolicyForTesting: .disabled
         )
         let loaded = try await store.loadRoot(path: root.path)
         defer { Task { await store.unloadRoot(id: loaded.id) } }

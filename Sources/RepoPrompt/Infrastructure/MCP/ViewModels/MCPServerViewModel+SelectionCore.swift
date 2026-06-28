@@ -158,6 +158,15 @@ extension MCPServerViewModel {
                 bindingProjection: projection
             )
             let labels = await lookupContext.logicalRootDisplayNamesByRootID(store: store)
+            if format == .full,
+               let metadata = projection?.projectedLogicalRootMetadata(forPhysicalPath: file.standardizedFullPath)
+            {
+                let rootName = labels[file.rootID]
+                    ?? URL(fileURLWithPath: metadata.rootPath).lastPathComponent
+                return metadata.pathWithinRoot.isEmpty
+                    ? rootName
+                    : "\(rootName)/\(metadata.pathWithinRoot)"
+            }
             return lookupContext.logicalDisplayPath(
                 for: file,
                 roots: roots,

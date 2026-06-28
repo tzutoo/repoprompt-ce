@@ -544,8 +544,12 @@ final class CodeMapArtifactStoreTests: XCTestCase {
             try? FileManager.default.removeItem(at: productionRootA)
             try? FileManager.default.removeItem(at: productionRootB)
         }
-        let productionA = try CodeMapArtifactStore(rootURL: productionRootA)
-        let productionB = try CodeMapArtifactStore(rootURL: productionRootB)
+        let productionAdmission = CodeMapArtifactLeaseAdmission(
+            maximumCount: CodeMapArtifactStorePolicy.default.maximumActiveLeaseCount,
+            maximumBytes: CodeMapArtifactStorePolicy.default.maximumActiveLeaseBytes
+        )
+        let productionA = try CodeMapArtifactStore(rootURL: productionRootA, leaseAdmission: productionAdmission)
+        let productionB = try CodeMapArtifactStore(rootURL: productionRootB, leaseAdmission: productionAdmission)
         let productionKeyA = try makeKey("process-wide-production-admission-a")
         let productionKeyB = try makeKey("process-wide-production-admission-b")
         _ = try await productionA.insert(key: productionKeyA, deterministicOutcome: .readyNoSymbols)

@@ -895,7 +895,12 @@ final class PersistentAgentModeMCPReadFileConnectionTests: XCTestCase {
             let work = MCPToolWorkCountDiagnostics.debugSnapshots().git
             XCTAssertEqual(work.count, 1)
             XCTAssertEqual(work.first?.operation, MCPWindowToolName.getCodeStructure)
-            XCTAssertEqual(work.first?.commandCount, 0, work.first?.commands.joined(separator: "\n") ?? "")
+            let gitCommands = work.first?.commands ?? []
+            XCTAssertEqual(work.first?.commandCount, 3, gitCommands.joined(separator: "\n"))
+            XCTAssertTrue(
+                gitCommands.contains { $0.contains("rev-parse --show-toplevel") },
+                gitCommands.joined(separator: "\n")
+            )
             XCTAssertEqual(work.first?.outcome, "success")
         }
 

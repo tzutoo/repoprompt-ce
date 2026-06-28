@@ -276,7 +276,7 @@ final class AgentContextExportResolverTests: XCTestCase {
                 "App.swift": "struct WorktreeAgentExport { func worktreeExportCodemapSymbol() { let physicalBodySentinel = true } }\n"
             ]
         )
-        let store = WorkspaceFileContextStore()
+        let store = try makeIsolatedCodemapStore(name: #function)
         _ = try await store.loadRoot(path: logicalRoot.path)
         let source = makeSource(
             logicalRoot: logicalRoot,
@@ -388,7 +388,7 @@ final class AgentContextExportResolverTests: XCTestCase {
             named: "agent-export-revoked-worktree",
             files: ["Sources/Target.swift": "struct RevokedTarget { func retainedUntilPublication() {} }\n"]
         )
-        let store = WorkspaceFileContextStore()
+        let store = try makeIsolatedCodemapStore(name: #function)
         _ = try await store.loadRoot(path: logicalRoot.path)
         let source = makeSource(
             logicalRoot: logicalRoot,
@@ -1091,6 +1091,39 @@ final class AgentContextExportResolverTests: XCTestCase {
             gitInclusion: gitInclusion,
             storedPromptIds: []
         )
+    }
+
+    private func makeIsolatedCodemapStore(name: String) throws -> WorkspaceFileContextStore {
+        let runtimeRoot = try makeTemporaryRoot(name: "\(name)-CodemapRuntime")
+        guard chmod(runtimeRoot.path, 0o700) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let resolvedPath = try runtimeRoot.path.withCString { pointer -> String in
+            guard let value = realpath(pointer, nil) else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            defer { free(value) }
+            return String(cString: value)
+        }
+        let registry = WorkspaceCodemapBindingIntegrationRegistry()
+        let runtime = try CodeMapArtifactRuntime(
+            rootURL: URL(fileURLWithPath: resolvedPath, isDirectory: true),
+            bindingIntegrationRegistry: registry,
+            bindingEngineFactory: { runtime in
+                WorkspaceCodemapBindingEngine(
+                    runtime: runtime,
+                    capabilityService: WorkspaceCodemapGitCapabilityService(
+                        namespaceSalt: Data(
+                            repeating: 0x41,
+                            count: GitBlobRepositoryNamespace.saltByteCount
+                        )
+                    ),
+                    sourceReader: registry.makeValidatedSourceReaderClient(),
+                    catalogClient: registry.makeBindingCatalogClient()
+                )
+            }
+        )
+        return WorkspaceFileContextStore(codemapRuntimeProvider: { runtime })
     }
 
     private func makeTemporaryRoot(name: String) throws -> URL {

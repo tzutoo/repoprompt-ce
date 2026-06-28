@@ -298,6 +298,7 @@ final class DurableArtifactStoreTests: XCTestCase {
             release: leaderRelease,
             result: leaderResult
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(leader, release: leaderRelease) }
         try DurableArtifactSubprocess.waitForSignal(leaderReady)
 
         let contenderReady = root.appendingPathComponent(".publish-contender-ready")
@@ -312,6 +313,7 @@ final class DurableArtifactStoreTests: XCTestCase {
             release: contenderRelease,
             result: contenderResult
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(contender, release: contenderRelease) }
         try DurableArtifactSubprocess.waitForSignal(contenderReady)
         try DurableArtifactSubprocess.signal(leaderRelease)
         try DurableArtifactSubprocess.wait(leader)

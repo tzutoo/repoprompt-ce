@@ -1508,6 +1508,19 @@ actor WorkspaceFileContextStore {
             }
         }
 
+        func resetScopedIngressBarrierDiagnosticsForTesting(rootID: UUID) {
+            scopedIngressBarrierLaunchCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierJoinCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierSuccessorCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierCoalescedSuccessorCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierCompletionCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierNoopCountsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierTotalWaitMillisecondsByRootID.removeValue(forKey: rootID)
+            scopedIngressBarrierMaxWaitMillisecondsByRootID.removeValue(forKey: rootID)
+            lastCompletedScopedIngressBarrierByRootID.removeValue(forKey: rootID)
+            completedScopedIngressBarrierCutsByRootID.removeValue(forKey: rootID)
+        }
+
         func fileSystemServiceForTesting(rootID: UUID) -> FileSystemService? {
             rootStatesByID[rootID]?.service
         }
@@ -3972,13 +3985,24 @@ actor WorkspaceFileContextStore {
                         route: .fullCrawl
                     )
                 }
-                let root = try await loadRoot(
-                    path: path,
-                    kind: .sessionWorktree,
-                    respectRepoIgnore: true,
-                    respectCursorignore: true,
-                    sessionWorktreeReservationToken: token
-                )
+                var isDirectory = ObjCBool(false)
+                guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                      isDirectory.boolValue
+                else {
+                    throw WorkspaceSessionWorktreeOwnershipError.unavailableRoot(path)
+                }
+                let root: WorkspaceRootRecord
+                do {
+                    root = try await loadRoot(
+                        path: path,
+                        kind: .sessionWorktree,
+                        respectRepoIgnore: true,
+                        respectCursorignore: true,
+                        sessionWorktreeReservationToken: token
+                    )
+                } catch is IgnoreRulePolicyResolutionError {
+                    throw WorkspaceSessionWorktreeOwnershipError.unavailableRoot(path)
+                }
                 try Task.checkCancellation()
                 guard latestSessionWorktreeOwnershipGenerationByOwnerID[ownerID] == generation,
                       let state = rootStatesByID[root.id],
@@ -5693,7 +5717,7 @@ actor WorkspaceFileContextStore {
     func admitReusableSnapshotForLoadedRoot(
         rootID: UUID,
         expectedStandardizedPath: String,
-        prefixControlEvidenceCacheMode: GitPrefixControlEvidenceCacheMode = .automatic
+        prefixControlEvidenceCacheMode: GitPrefixControlEvidenceCacheMode = .bypassReadAndAdmission
     ) async throws -> WorkspaceRootReusableSnapshotCoordinator.ObservationResult {
         guard !Task.isCancelled else {
             return .failed(.init(stage: .loadedRootValidation, cause: .cancelled))
@@ -12390,13 +12414,22 @@ actor WorkspaceFileContextStore {
     private func resolveCodemapEligibility(
         authority: CodemapRootAuthority
     ) async -> CodemapEligibilityResolution {
+        var skipLocalClassification = false
         if let completed = codemapCompletedEligibilityByRootEpoch[authority.rootEpoch],
            completed.authority == authority,
            codemapPreflightAuthorityIsCurrent(authority)
         {
-            return completed.result
+            if case let .terminal(.nonGit, proof?) = completed.result {
+                if codemapLocalGitClassificationProbe.validate(proof) {
+                    return completed.result
+                }
+                codemapCompletedEligibilityByRootEpoch.removeValue(forKey: authority.rootEpoch)
+                terminalNonGitCodemapCacheByEpoch.removeValue(forKey: authority.rootEpoch)
+                skipLocalClassification = true
+            } else {
+                return completed.result
+            }
         }
-        var skipLocalClassification = false
         if let cached = terminalNonGitCodemapCacheByEpoch[authority.rootEpoch] {
             guard cached.standardizedRootPath == authority.standardizedRootPath,
                   codemapPreflightAuthorityIsCurrent(authority)
@@ -13201,7 +13234,23 @@ actor WorkspaceFileContextStore {
             codemapSessionsByRootEpoch[rootEpoch]?.setupDisposition,
             codemapUnavailableIsStable(reason)
         {
-            return .init(result: .unavailable(reason), ownership: .notAcquired)
+            var shouldReturnStableUnavailable = true
+            if case .gitTerminal(.nonGit) = reason,
+               let cached = terminalNonGitCodemapCacheByEpoch[rootEpoch]
+            {
+                if cached.standardizedRootPath == authority.standardizedRootPath,
+                   codemapLocalGitClassificationProbe.validate(cached.proof)
+                {
+                    shouldReturnStableUnavailable = true
+                } else {
+                    codemapCompletedEligibilityByRootEpoch.removeValue(forKey: rootEpoch)
+                    codemapSessionsByRootEpoch.removeValue(forKey: rootEpoch)
+                    shouldReturnStableUnavailable = false
+                }
+            }
+            if shouldReturnStableUnavailable {
+                return .init(result: .unavailable(reason), ownership: .notAcquired)
+            }
         }
 
         if codemapSessionsByRootEpoch[rootEpoch] == nil {
@@ -16979,8 +17028,10 @@ actor WorkspaceFileContextStore {
         _ reason: WorkspaceCodemapArtifactDemandUnavailableReason
     ) -> Bool {
         switch reason {
-        case .rootNotLoaded, .fileNotCataloged, .unsupportedFileType, .gitTerminal:
+        case .rootNotLoaded, .fileNotCataloged, .unsupportedFileType:
             true
+        case let .gitTerminal(reason):
+            reason != .releasedRootEpoch
         case let .demandUnavailable(reason):
             reason != .transient
         case .gitTransient, .busy, .rejected, .routeConflict, .registrationFailed,
@@ -18886,6 +18937,13 @@ actor WorkspaceFileContextStore {
                 requiresFullResync: requiresFullResync
             )
         }
+        #if DEBUG
+            if let recorder = Self.activePublicationInvalidationRecorder,
+               recorder.topologyInvalidationCount == 0
+            {
+                recorder.codemapInvalidationRequestCount += token?.standardizedRelativePaths.count ?? 0
+            }
+        #endif
         didCommitPathMutation = true
     }
 

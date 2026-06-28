@@ -551,6 +551,8 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
             }
         }
 
+        var sourceSelectionForArtifactCommit: StoredSelection?
+
         func preparePublishedArtifacts(
             _ publishedSets: [GitDiffPublishedArtifactSet],
             publishedOutcomes: [MCPContextBuilderGitPublishedOutcome] = []
@@ -626,7 +628,8 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 do {
                     let commit = try await dependencies.commitPrimaryGitDiffArtifactsToCurrentTab(
                         MCPWindowToolName.git,
-                        readyCandidates
+                        readyCandidates,
+                        sourceSelectionForArtifactCommit
                     )
                     autoSelectedAliases = commit.autoSelectedAliases
                 } catch is CancellationError {
@@ -1023,13 +1026,18 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 let inlineMode = inlineObj?["mode"]?.stringValue?.lowercased() ?? "brief"
                 let inlineMaxLines = max(1, inlineObj?["max_lines"]?.intValue ?? 120)
 
-                // Resolve selected paths using current exec context (bound tab or active tab fallback)
-                // For scope .all, no selection is needed
+                // Resolve selected paths using the established selection resolver, then retain
+                // the same source paths (logicalized through this request's lookup context) for
+                // artifact auto-selection.
                 let allSelectedAbsolutePaths: [String]
                 if scope == .selected {
                     let selectedFiles = try await dependencies.selectedRecordsForCurrentTabContext()
                     allSelectedAbsolutePaths = selectedFiles.map(\.standardizedFullPath)
+                    sourceSelectionForArtifactCommit = lookupContext.logicalizeSelection(
+                        StoredSelection(selectedPaths: allSelectedAbsolutePaths)
+                    )
                 } else {
+                    sourceSelectionForArtifactCommit = nil
                     allSelectedAbsolutePaths = []
                 }
 

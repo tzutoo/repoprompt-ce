@@ -204,14 +204,31 @@ enum DurableArtifactSubprocess {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning {
             if Date() >= deadline {
-                process.terminate()
-                process.waitUntilExit()
+                releaseAndTerminateIfRunning(process)
                 XCTFail("Subprocess timed out", file: file, line: line)
                 throw Failure.processTimeout
             }
             usleep(10000)
         }
         XCTAssertEqual(process.terminationStatus, expectedStatus, file: file, line: line)
+    }
+
+    static func releaseAndTerminateIfRunning(
+        _ process: Process,
+        release: URL? = nil,
+        timeout: TimeInterval = 2
+    ) {
+        try? signal(release)
+        guard process.isRunning else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        process.terminate()
+        while process.isRunning, Date() < deadline {
+            usleep(10000)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
+        process.waitUntilExit()
     }
 
     enum Failure: Error {

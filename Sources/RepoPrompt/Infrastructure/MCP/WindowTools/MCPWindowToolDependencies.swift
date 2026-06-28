@@ -130,7 +130,8 @@ struct MCPWindowToolDependencies {
     typealias DebugLog = @Sendable (_ message: String) -> Void
     typealias CommitPrimaryGitDiffArtifactsToCurrentTab = @MainActor @Sendable (
         _ toolName: String,
-        _ candidates: [GitDiffPublishedArtifact]
+        _ candidates: [GitDiffPublishedArtifact],
+        _ sourceSelection: StoredSelection?
     ) async throws -> MCPServerViewModel.PrimaryGitArtifactCommitResult
     typealias ReplaceAdvertisedGitArtifactsForCurrentTab = @MainActor @Sendable (
         _ toolName: String,

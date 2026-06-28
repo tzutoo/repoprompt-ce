@@ -1714,6 +1714,7 @@ final class StoreBackedWorkspaceSearchTests: XCTestCase {
             let targetRecord = try await store.loadRoot(path: targetRoot.path)
             let blockedRecord = try await store.loadRoot(path: blockedRoot.path)
             try await store.startWatchingRoot(id: blockedRecord.id)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: blockedRecord.id)
             let sinkGate = AsyncGate()
             await store.setWatcherSinkWillApplyHandler { observedRootID in
                 guard observedRootID == blockedRecord.id else { return }

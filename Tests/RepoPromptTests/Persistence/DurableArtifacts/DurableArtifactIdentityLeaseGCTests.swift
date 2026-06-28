@@ -253,6 +253,11 @@ final class DurableArtifactIdentityLeaseGCTests: XCTestCase {
                 result
             ))
         }
+        defer {
+            for worker in workers {
+                DurableArtifactSubprocess.releaseAndTerminateIfRunning(worker.0, release: release)
+            }
+        }
         for worker in workers {
             try DurableArtifactSubprocess.waitForSignal(worker.1)
         }
@@ -307,6 +312,7 @@ final class DurableArtifactIdentityLeaseGCTests: XCTestCase {
             release: release,
             parameter: id.digest.hex
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(reader, release: release) }
         try DurableArtifactSubprocess.waitForSignal(ready)
         let blocked = try store.garbageCollect(
             protecting: [],
@@ -363,6 +369,7 @@ final class DurableArtifactIdentityLeaseGCTests: XCTestCase {
             release: release,
             parameter: id.digest.hex
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(reader, release: release) }
         try DurableArtifactSubprocess.waitForSignal(ready)
 
         let lock = store.rootURL

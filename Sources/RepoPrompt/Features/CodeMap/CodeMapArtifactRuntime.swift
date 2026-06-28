@@ -19,6 +19,10 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
         artifactStorePolicy: CodeMapArtifactStorePolicy = .default,
         artifactStoreClock: CodeMapArtifactStoreClock = .system,
         artifactStoreRemovalHooks: CodeMapSecureFileRemovalHooks? = nil,
+        artifactStoreLeaseAdmission: CodeMapArtifactLeaseAdmission = CodeMapArtifactLeaseAdmission(
+            maximumCount: CodeMapArtifactStorePolicy.default.maximumActiveLeaseCount,
+            maximumBytes: CodeMapArtifactStorePolicy.default.maximumActiveLeaseBytes
+        ),
         locatorStorePolicy: GitBlobCodeMapLocatorStorePolicy = .default,
         locatorStoreHooks: GitBlobCodeMapLocatorStoreHooks = .none,
         manifestStorePolicy: CodeMapRootManifestStorePolicy = .default,
@@ -36,7 +40,8 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
             rootURL: rootURL,
             policy: artifactStorePolicy,
             clock: artifactStoreClock,
-            removalHooks: artifactStoreRemovalHooks
+            removalHooks: artifactStoreRemovalHooks,
+            leaseAdmission: artifactStoreLeaseAdmission
         )
         let locatorStore = try GitBlobCodeMapLocatorStore(
             rootURL: rootURL,
@@ -111,6 +116,7 @@ final class CodeMapArtifactRuntime: @unchecked Sendable {
             let registry = bindingIntegrationRegistryFactory()
             let runtime = try CodeMapArtifactRuntime(
                 rootURL: rootURL,
+                artifactStoreLeaseAdmission: .processWide,
                 bindingIntegrationRegistry: registry,
                 bindingEngineFactory: { runtime in
                     let namespaceSalt = try namespaceSaltProvider(rootURL, identity)

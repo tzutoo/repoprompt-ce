@@ -682,7 +682,7 @@ final class GitWorktreeCreationReceiptTests: XCTestCase {
 
     func testLoadedRootAdmissionRaceRevokesProvisionalAliasAndCoverage() async throws {
         let fixture = try ReceiptFixture()
-        defer { fixture.cleanup() }
+        addTeardownBlock { fixture.cleanup() }
         let defaults = UserDefaults.standard
         let previousObserve = defaults.object(forKey: WorktreeStartupFeatureFlags.observeDefaultsKey)
         let previousServe = defaults.object(forKey: WorktreeStartupFeatureFlags.serveDefaultsKey)
@@ -703,7 +703,13 @@ final class GitWorktreeCreationReceiptTests: XCTestCase {
 
         let store = WorkspaceFileContextStore()
         let logicalRecord = try await store.loadRoot(path: fixture.root.path)
-        try await store.startWatchingRoot(id: logicalRecord.id)
+        let attachedSyntheticIngress = try await store.attachPublisherIngressWithoutStartingWatcherForTesting(
+            rootID: logicalRecord.id
+        )
+        XCTAssertTrue(
+            attachedSyntheticIngress,
+            "The test injects a synthetic watcher watermark and should not race the real macOS watcher."
+        )
         let authority = GitWorkspaceStateAuthority.shared
         let coordinator = WorkspaceRootReusableSnapshotCoordinator.shared
         let baselineCache = await authority.snapshotForTesting()
@@ -1083,18 +1089,25 @@ final class GitWorktreeCreationReceiptTests: XCTestCase {
         let replacementCoverage = await monitor.snapshotForTesting()
         XCTAssertEqual(replacementCoverage.sourceCount, discoveryCoverage.sourceCount + 1)
 
-        let watermark = monitor.acceptedWatermark(for: GitWorkspaceAuthorityRepositoryKey(layout: layout))
-        let exactReplacementIsCurrent = await authority.metadataObservationIsCurrent(
-            replacement,
-            for: layout,
-            additionalAuthorityPaths: [externalB],
-            expectedAcceptedWatermark: watermark
-        )
+        let repositoryKey = GitWorkspaceAuthorityRepositoryKey(layout: layout)
+        var replacementWatermark = monitor.acceptedWatermark(for: repositoryKey)
+        var exactReplacementIsCurrent = false
+        for _ in 0 ..< 20 {
+            replacementWatermark = monitor.acceptedWatermark(for: repositoryKey)
+            exactReplacementIsCurrent = await authority.metadataObservationIsCurrent(
+                replacement,
+                for: layout,
+                additionalAuthorityPaths: [externalB],
+                expectedAcceptedWatermark: replacementWatermark
+            )
+            if exactReplacementIsCurrent { break }
+            await Task.yield()
+        }
         let mismatchedReplacementIsCurrent = await authority.metadataObservationIsCurrent(
             replacement,
             for: layout,
             additionalAuthorityPaths: [externalA],
-            expectedAcceptedWatermark: watermark
+            expectedAcceptedWatermark: replacementWatermark
         )
         XCTAssertTrue(exactReplacementIsCurrent)
         XCTAssertFalse(mismatchedReplacementIsCurrent)

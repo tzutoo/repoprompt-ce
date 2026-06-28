@@ -314,7 +314,7 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
             ]
         )
         addTeardownBlock { repositoryFixture.cleanup() }
-        let store = WorkspaceFileContextStore()
+        let store = WorkspaceFileContextStore(codemapProjectionPreloadLaunchPolicyForTesting: .disabled)
         _ = try await store.loadRoot(path: logicalRoot.path)
         let materializedProjection = await WorkspaceRootBindingProjectionMaterializer(store: store).materialize(
             sessionID: UUID(),
@@ -326,6 +326,15 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
         let physicalRootID = try XCTUnwrap(boundRoots.first {
             $0.standardizedFullPath == worktreeRoot.standardizedFileURL.path
         }?.id)
+        let appLookup = await store.lookupPath(
+            worktreeRoot.appendingPathComponent("Sources/App.swift").path,
+            rootScope: lookupContext.rootScope
+        )
+        let appFile = try XCTUnwrap(appLookup?.file)
+        let ready = try await readyCodemapDemand(store: store, fileID: appFile.id)
+        addTeardownBlock {
+            _ = await store.cancelCodemapArtifactDemand(ready.ticket)
+        }
         let request = PromptContextPreAssemblyRequest(
             cfg: makeConfig(gitInclusion: .none, codeMapUsage: .selected),
             selection: StoredSelection(
@@ -1051,6 +1060,30 @@ final class PromptContextPreAssemblyServiceTests: XCTestCase {
             gitInclusion: gitInclusion,
             storedPromptIds: []
         )
+    }
+
+    private func readyCodemapDemand(
+        store: WorkspaceFileContextStore,
+        fileID: UUID,
+        timeout: Duration = .seconds(20)
+    ) async throws -> WorkspaceCodemapArtifactDemandReady {
+        var result = await store.requestCodemapArtifact(forFileID: fileID)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            switch result {
+            case let .ready(ready):
+                return ready
+            case let .pending(ticket):
+                try await Task.sleep(for: .milliseconds(25))
+                result = await store.codemapArtifactDemandStatus(ticket)
+            case let .unavailable(reason):
+                XCTFail("Expected ready codemap demand, got \(reason)")
+                throw NSError(domain: "PromptContextPreAssemblyServiceTests", code: 1)
+            }
+        }
+        XCTFail("Timed out waiting for ready codemap demand")
+        throw NSError(domain: "PromptContextPreAssemblyServiceTests", code: 1)
     }
 
     private func makeScopedRequest(

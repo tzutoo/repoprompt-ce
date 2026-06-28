@@ -1521,6 +1521,8 @@ final class PersistentMCPDistinctConnectionConcurrencyTests: XCTestCase {
                     runID: nil
                 )
             }
+            await contextB.window.tearDown()
+            await contextA.window.tearDown()
             await contextA.window.mcpServer.shutdownListener()
             ServiceRegistry.unregister(contextB.catalogService)
             ServiceRegistry.unregister(contextA.catalogService)

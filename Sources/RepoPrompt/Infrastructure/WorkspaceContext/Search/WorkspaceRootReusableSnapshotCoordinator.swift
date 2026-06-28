@@ -154,7 +154,7 @@ actor WorkspaceRootReusableSnapshotCoordinator {
     func observeStreamedAuthoritativeFullLoad(
         rootURL: URL,
         catalogPolicyIdentity: WorkspaceRootCatalogPolicyIdentity = .canonicalDefaults,
-        prefixControlEvidenceCacheMode: GitPrefixControlEvidenceCacheMode = .automatic,
+        prefixControlEvidenceCacheMode: GitPrefixControlEvidenceCacheMode = .bypassReadAndAdmission,
         catalogBatchEvidenceProvider: @escaping CatalogBatchEvidenceProvider,
         currentnessValidator: @escaping CurrentnessValidator = { .current }
     ) async -> ObservationResult {
@@ -557,6 +557,8 @@ actor WorkspaceRootReusableSnapshotCoordinator {
                 }
             } else if let collectionError = error as? GitTargetEvidenceCollectionError {
                 Self.observationCause(for: collectionError)
+            } else if let prefixError = error as? GitPrefixControlEvidenceCacheError {
+                Self.observationCause(for: prefixError)
             } else if Self.isAuthorityEvidenceIOError(error) {
                 .authorityEvidenceIOFailure
             } else {
@@ -651,6 +653,19 @@ actor WorkspaceRootReusableSnapshotCoordinator {
             .authorityEvidenceIOFailure
         case .artifact, .authorityChanged:
             .authorityEvidenceCorrupt
+        }
+    }
+
+    private nonisolated static func observationCause(
+        for error: GitPrefixControlEvidenceCacheError
+    ) -> ObservationFailureCause {
+        switch error {
+        case .invalidatedDuringCollection, .rootIdentityChanged:
+            .staleCurrentness
+        case .corruptFooter:
+            .authorityEvidenceCorrupt
+        case .resourceAdmission:
+            .authorityEvidenceResourceUnavailable
         }
     }
 

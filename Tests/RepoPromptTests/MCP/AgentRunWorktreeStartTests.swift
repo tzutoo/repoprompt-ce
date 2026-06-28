@@ -940,6 +940,54 @@ final class AgentRunWorktreeStartTests: AgentRunWorktreeStartGitSeedTestCase {
         XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: optedOutChild), root.path)
     }
 
+    func testAgentRunStartTreatsRoutedParentWithoutWorktreeBindingAsNoopInheritance() async throws {
+        let root = try makeTemporaryDirectory(named: "empty-routed-root")
+        let window = try await makeWindow(root: root)
+        let viewModel = window.agentModeViewModel
+        let sourceTabID = try XCTUnwrap(window.workspaceManager.activeWorkspace?.activeComposeTabID)
+        let parentID = UUID()
+        let source = viewModel.session(for: sourceTabID)
+        source.testInstallPersistentSessionBinding(sessionID: parentID)
+        source.hasLoadedPersistedState = true
+        source.mcpControlContext = nil
+        XCTAssertTrue(source.worktreeBindings.isEmpty)
+
+        let service = makeAgentRunStartService(window: window, sourceTabID: sourceTabID)
+        let value = try await service.execute(args: [
+            "op": .string("start"),
+            "message": .string("inherit empty routed source"),
+            "detach": .bool(true),
+            "timeout": .int(0)
+        ])
+
+        let object = try XCTUnwrap(value.objectValue)
+        let sessionObject = try XCTUnwrap(object["session"]?.objectValue)
+        let childSessionID = try XCTUnwrap(
+            try UUID(uuidString: XCTUnwrap(object["session_id"]?.stringValue))
+        )
+        let childTabID = try XCTUnwrap(
+            try UUID(uuidString: XCTUnwrap(sessionObject["context_id"]?.stringValue))
+        )
+        XCTAssertEqual(sessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
+        XCTAssertNil(object["worktree"])
+        XCTAssertNil(object["worktree_bindings"])
+
+        let child = viewModel.session(for: childTabID)
+        XCTAssertEqual(child.activeAgentSessionID, childSessionID)
+        XCTAssertEqual(child.parentSessionID, parentID)
+        XCTAssertTrue(child.worktreeBindings.isEmpty)
+        XCTAssertEqual(try viewModel.effectiveWorkspacePath(for: child), root.path)
+
+        let pollValue = try await service.execute(args: [
+            "op": .string("poll"),
+            "session_id": .string(childSessionID.uuidString)
+        ])
+        let pollObject = try XCTUnwrap(pollValue.objectValue)
+        let pollSessionObject = try XCTUnwrap(pollObject["session"]?.objectValue)
+        XCTAssertEqual(pollSessionObject["parent_session_id"]?.stringValue, parentID.uuidString)
+        XCTAssertNil(pollObject["worktree_bindings"])
+    }
+
     func testAgentRunAndExploreStartPreserveInheritanceOptOutAndTopLevelBehavior() async throws {
         let root = try makeTemporaryDirectory(named: "root")
         let worktree = try makeTemporaryDirectory(named: "worktree")

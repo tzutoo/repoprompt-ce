@@ -76,12 +76,15 @@ final class DurableArtifactCrashAndCatalogTests: XCTestCase {
         let store = try DurableArtifactTestSupport.makeStore(at: root)
         let first = try DurableArtifactTestSupport.publish(store, identity: "catalog-a", records: ["a"])
         let second = try DurableArtifactTestSupport.publish(store, identity: "catalog-b", records: ["b"])
-        guard case let .published(initial) = try store.compareAndSwapCatalog(
-            family: DurableArtifactTestSupport.family,
-            expectedRevision: nil,
-            target: first,
-            admittedByteUpperBound: 4096
-        ) else { return XCTFail("Expected initial catalog") }
+        XCTAssertNotEqual(first, second)
+        guard case let .published(initial) = try catalogCASWithBusyRetry({
+            try store.compareAndSwapCatalog(
+                family: DurableArtifactTestSupport.family,
+                expectedRevision: nil,
+                target: first,
+                admittedByteUpperBound: 4096
+            )
+        }) else { return XCTFail("Expected initial catalog") }
         XCTAssertEqual(
             try store.compareAndSwapCatalog(
                 family: DurableArtifactTestSupport.family,
@@ -91,12 +94,17 @@ final class DurableArtifactCrashAndCatalogTests: XCTestCase {
             ),
             .conflict(currentRevision: initial.revision)
         )
-        guard case let .published(replaced) = try store.compareAndSwapCatalog(
-            family: DurableArtifactTestSupport.family,
-            expectedRevision: initial.revision,
-            target: second,
-            admittedByteUpperBound: 4096
-        ) else { return XCTFail("Expected replacement catalog") }
+        let replacement = try catalogCASWithBusyRetry {
+            try store.compareAndSwapCatalog(
+                family: DurableArtifactTestSupport.family,
+                expectedRevision: initial.revision,
+                target: second,
+                admittedByteUpperBound: 4096
+            )
+        }
+        guard case let .published(replaced) = replacement else {
+            return XCTFail("Expected replacement catalog, got \(replacement)")
+        }
         XCTAssertEqual(replaced.predecessorRevision, initial.revision)
         XCTAssertEqual(try store.loadCatalog(for: DurableArtifactTestSupport.family), .available(replaced))
     }
@@ -187,6 +195,7 @@ final class DurableArtifactCrashAndCatalogTests: XCTestCase {
             result: leaderResult,
             parameter: "\(initial.revision.hex)|\(second.digest.hex)"
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(leader, release: leaderRelease) }
         try DurableArtifactSubprocess.waitForSignal(leaderReady)
 
         let contenderReady = root.appendingPathComponent(".cas-contender-ready")
@@ -202,6 +211,7 @@ final class DurableArtifactCrashAndCatalogTests: XCTestCase {
             result: contenderResult,
             parameter: "\(initial.revision.hex)|\(third.digest.hex)"
         )
+        defer { DurableArtifactSubprocess.releaseAndTerminateIfRunning(contender, release: contenderRelease) }
         try DurableArtifactSubprocess.waitForSignal(contenderReady)
         try DurableArtifactSubprocess.signal(leaderRelease)
         try DurableArtifactSubprocess.wait(leader)
@@ -367,6 +377,18 @@ final class DurableArtifactCrashAndCatalogTests: XCTestCase {
                 DurableArtifactTestSupport.expectation(id: id)
             ) else { return XCTFail("\(mutation) should quarantine") }
         }
+    }
+
+    private func catalogCASWithBusyRetry(
+        _ operation: () throws -> DurableArtifactCatalogCASResult
+    ) throws -> DurableArtifactCatalogCASResult {
+        let deadline = Date().addingTimeInterval(1)
+        var result = try operation()
+        while result == .busy, Date() < deadline {
+            usleep(10000)
+            result = try operation()
+        }
+        return result
     }
 
     private func crashPoint(_ value: String) throws -> DurableArtifactCrashPoint {

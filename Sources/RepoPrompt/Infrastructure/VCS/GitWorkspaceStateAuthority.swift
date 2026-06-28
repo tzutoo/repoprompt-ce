@@ -1275,6 +1275,9 @@ actor GitWorkspaceStateAuthority {
         }
         if let previous {
             await metadataMonitor.release(previous.observationToken)
+            if previous.snapshotIdentity != snapshot.identity {
+                removeUnaliasedReusableSnapshot(previous.snapshotIdentity)
+            }
         }
         return ReusableSnapshotAdmissionReceipt(
             id: prepared.id,

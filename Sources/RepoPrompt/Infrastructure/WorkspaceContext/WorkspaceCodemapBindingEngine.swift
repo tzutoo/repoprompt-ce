@@ -6024,7 +6024,7 @@ actor WorkspaceCodemapBindingEngine {
             incrementCounter(\.overlayReadyPublications)
             emit(.overlayReady, rootEpoch: request.rootEpoch, artifact: completion.artifactKey)
             if let repositoryRelativePath, let gitMode, let association = resolved.association {
-                await persistCleanCompletion(
+                await persistCleanCompletionAfterOverlayPublication(
                     rootEpoch: request.rootEpoch,
                     pipelineIdentity: request.pipelineIdentity,
                     identity: request.demand.identity,
@@ -6050,7 +6050,7 @@ actor WorkspaceCodemapBindingEngine {
             incrementCounter(\.overlayUnavailablePublications)
             emit(.overlayUnavailable, rootEpoch: request.rootEpoch, artifact: completion.artifactKey)
             if let repositoryRelativePath, let gitMode, let association = resolved.association {
-                await persistCleanCompletion(
+                await persistCleanCompletionAfterOverlayPublication(
                     rootEpoch: request.rootEpoch,
                     pipelineIdentity: request.pipelineIdentity,
                     identity: request.demand.identity,
@@ -6239,6 +6239,28 @@ actor WorkspaceCodemapBindingEngine {
             performedBuild: resolution.buildProvenance != .notNeeded,
             locatorFastPath: false,
             casFastPath: resolution.buildProvenance == .notNeeded
+        )
+    }
+
+    private func persistCleanCompletionAfterOverlayPublication(
+        rootEpoch: WorkspaceCodemapRootEpoch,
+        pipelineIdentity: CodeMapPipelineIdentity,
+        identity: WorkspaceCodemapArtifactBindingIdentity,
+        repositoryRelativePath: String,
+        gitMode: CodeMapRootManifestGitMode,
+        association: VerifiedGitBlobCodeMapLocatorAssociation,
+        bindingGeneration: UInt64,
+        pathGeneration: UInt64
+    ) async {
+        await persistCleanCompletion(
+            rootEpoch: rootEpoch,
+            pipelineIdentity: pipelineIdentity,
+            identity: identity,
+            repositoryRelativePath: repositoryRelativePath,
+            gitMode: gitMode,
+            association: association,
+            bindingGeneration: bindingGeneration,
+            pathGeneration: pathGeneration
         )
     }
 

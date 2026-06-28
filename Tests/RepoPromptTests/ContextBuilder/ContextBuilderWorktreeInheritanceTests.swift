@@ -1063,15 +1063,33 @@ import XCTest
                     _ = try gitFixture.runGit(["config", "commit.gpgSign", "false"], at: fixture.contextA.rootURL)
                     _ = try gitFixture.runGit(["add", "."], at: fixture.contextA.rootURL)
                     _ = try gitFixture.runGit(["commit", "-m", "Initial commit"], at: fixture.contextA.rootURL)
+                    await store.replayObservedFileSystemDeltas(
+                        rootID: fixture.contextA.rootID,
+                        deltas: [.folderAdded(".git")]
+                    )
+                    let relativePath = "Sources/\(fixture.contextA.fileURL.lastPathComponent)"
+                    let warmedCodemap = try await waitForCodemapDemandReady(
+                        in: store,
+                        rootID: fixture.contextA.rootID,
+                        relativePath: relativePath
+                    )
+                    _ = await store.cancelCodemapArtifactDemand(warmedCodemap.ticket)
                     let canonicalSentinel = "CanonicalNonAgentContextBuilderType"
                     try write(
                         "struct \(canonicalSentinel) { func canonicalMethod() {} }\n",
                         to: fixture.contextA.fileURL
                     )
-                    let relativePath = "Sources/\(fixture.contextA.fileURL.lastPathComponent)"
+                    let modifiedDate = try await store.fileModificationDate(
+                        rootID: fixture.contextA.rootID,
+                        relativePath: relativePath
+                    )
                     await store.replayObservedFileSystemDeltas(
                         rootID: fixture.contextA.rootID,
-                        deltas: [.fileModified(relativePath, Date())]
+                        deltas: [.fileModified(relativePath, modifiedDate)]
+                    )
+                    _ = await store.awaitAppliedIngressForExplicitRequest(
+                        userPath: fixture.contextA.fileURL.path,
+                        fallbackScope: .visibleWorkspace
                     )
                     try await waitForCodemap(
                         in: store,
@@ -1291,6 +1309,89 @@ import XCTest
             }
         }
 
+        private func codemapWarmupUnavailableIsRetryable(
+            _ reason: WorkspaceCodemapArtifactDemandUnavailableReason
+        ) -> Bool {
+            switch reason {
+            case .gitTerminal(.releasedRootEpoch), .gitTransient, .busy,
+                 .staleCurrentness, .demandUnavailable(.transient):
+                true
+            case .rootNotLoaded, .fileNotCataloged, .unsupportedFileType,
+                 .gitTerminal, .demandUnavailable, .rejected, .routeConflict,
+                 .registrationFailed, .runtimeFailure, .cancelled:
+                false
+            }
+        }
+
+        private func codemapWarmupRetryDelay(
+            for reason: WorkspaceCodemapArtifactDemandUnavailableReason
+        ) -> Duration {
+            if case let .busy(milliseconds) = reason, let milliseconds {
+                return .milliseconds(max(25, min(milliseconds, 250)))
+            }
+            return .milliseconds(25)
+        }
+
+        private func waitForCodemapDemandReady(
+            in store: WorkspaceFileContextStore,
+            rootID: UUID,
+            relativePath: String,
+            timeout: Duration = .seconds(20)
+        ) async throws -> WorkspaceCodemapArtifactDemandReady {
+            func failure(_ message: String) -> NSError {
+                NSError(
+                    domain: "ContextBuilderWorktreeInheritanceTests",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            }
+
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            var lastReason: WorkspaceCodemapArtifactDemandUnavailableReason?
+
+            requestLoop: while clock.now < deadline {
+                guard let file = await store.file(rootID: rootID, relativePath: relativePath) else {
+                    try await Task.sleep(for: .milliseconds(25))
+                    continue
+                }
+                let initial = await store.requestCodemapArtifact(forFileID: file.id)
+                switch initial {
+                case let .ready(ready):
+                    return ready
+                case let .unavailable(reason):
+                    lastReason = reason
+                    guard codemapWarmupUnavailableIsRetryable(reason) else {
+                        throw failure("Codemap warmup unavailable for \(relativePath): \(reason)")
+                    }
+                    try await Task.sleep(for: codemapWarmupRetryDelay(for: reason))
+                    continue
+                case let .pending(ticket):
+                    while clock.now < deadline {
+                        switch await store.codemapArtifactDemandStatus(ticket) {
+                        case let .ready(ready):
+                            return ready
+                        case .pending:
+                            try await Task.sleep(for: .milliseconds(25))
+                        case let .unavailable(reason):
+                            lastReason = reason
+                            guard codemapWarmupUnavailableIsRetryable(reason) else {
+                                throw failure("Codemap warmup settled unavailable for \(relativePath): \(reason)")
+                            }
+                            try await Task.sleep(for: codemapWarmupRetryDelay(for: reason))
+                            continue requestLoop
+                        }
+                    }
+                }
+            }
+            if let lastReason {
+                XCTFail("Timed out waiting for codemap warmup in \(relativePath); last reason: \(lastReason)")
+                throw failure("Timed out waiting for codemap warmup in \(relativePath); last reason: \(lastReason)")
+            }
+            XCTFail("Timed out waiting for codemap warmup in \(relativePath)")
+            throw failure("Timed out waiting for codemap warmup in \(relativePath)")
+        }
+
         private func waitForCodemap(
             in store: WorkspaceFileContextStore,
             rootID: UUID,
@@ -1298,6 +1399,30 @@ import XCTest
             containing expectedText: String,
             timeout: Duration = .seconds(6)
         ) async throws {
+            func failure(_ message: String) -> NSError {
+                NSError(
+                    domain: "ContextBuilderWorktreeInheritanceTests",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            }
+
+            func validateReady(_ ready: WorkspaceCodemapArtifactDemandReady, phase: String) throws -> Bool {
+                let outcome = try ready.handle.outcome()
+                guard case .ready = outcome else {
+                    throw failure("Codemap \(phase) outcome was \(outcome) for \(relativePath)")
+                }
+                guard let rendered = try ready.handle.renderedCodemap(displayPath: relativePath) else {
+                    throw failure("Codemap \(phase) had no rendered output for \(relativePath)")
+                }
+                guard rendered.text.contains(expectedText) else {
+                    throw failure(
+                        "Codemap \(phase) did not contain \(expectedText) for \(relativePath); rendered=\(rendered.text)"
+                    )
+                }
+                return true
+            }
+
             let fileRecord = await store.file(rootID: rootID, relativePath: relativePath)
             let file = try XCTUnwrap(fileRecord)
             let initial = await store.requestCodemapArtifact(forFileID: file.id)
@@ -1306,13 +1431,10 @@ import XCTest
             case let .pending(value):
                 ticket = value
             case let .ready(ready):
-                guard case .ready = try ready.handle.outcome(),
-                      let rendered = try ready.handle.renderedCodemap(displayPath: relativePath),
-                      rendered.text.contains(expectedText)
-                else { throw NSError(domain: "ContextBuilderWorktreeInheritanceTests", code: 1) }
+                _ = try validateReady(ready, phase: "initial")
                 return
-            case .unavailable:
-                throw NSError(domain: "ContextBuilderWorktreeInheritanceTests", code: 1)
+            case let .unavailable(reason):
+                throw failure("Codemap initial unavailable for \(relativePath): \(reason)")
             }
 
             let clock = ContinuousClock()
@@ -1320,19 +1442,16 @@ import XCTest
             while clock.now < deadline {
                 switch await store.codemapArtifactDemandStatus(ticket) {
                 case let .ready(ready):
-                    guard case .ready = try ready.handle.outcome(),
-                          let rendered = try ready.handle.renderedCodemap(displayPath: relativePath),
-                          rendered.text.contains(expectedText)
-                    else { throw NSError(domain: "ContextBuilderWorktreeInheritanceTests", code: 1) }
+                    _ = try validateReady(ready, phase: "settled")
                     return
                 case .pending:
                     try await Task.sleep(for: .milliseconds(25))
-                case .unavailable:
-                    throw NSError(domain: "ContextBuilderWorktreeInheritanceTests", code: 1)
+                case let .unavailable(reason):
+                    throw failure("Codemap settled unavailable for \(relativePath): \(reason)")
                 }
             }
             XCTFail("Timed out waiting for codemap containing \(expectedText)")
-            throw NSError(domain: "ContextBuilderWorktreeInheritanceTests", code: 1)
+            throw failure("Timed out waiting for codemap containing \(expectedText) in \(relativePath)")
         }
 
         private func activateWorkspace(_ context: PersistentMCPTestContext) async throws {

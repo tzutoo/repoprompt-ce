@@ -52,7 +52,7 @@ final class WorkspaceRootTargetSeedPlanManifestTests: XCTestCase {
         XCTAssertEqual(lease.footer.recordCount, 3)
         XCTAssertEqual(lease.footer.ordinaryDirectoryCount, 2)
         XCTAssertEqual(lease.footer.overlayFileCount, 1)
-        XCTAssertEqual(WorkspaceRootSeedCompatibilityKey.currentInventorySchemaVersion, 4)
+        XCTAssertEqual(WorkspaceRootSeedCompatibilityKey.currentInventorySchemaVersion, 5)
         XCTAssertEqual(lease.header.schemaVersion, WorkspaceRootTargetSeedPlanManifestHeader.currentSchemaVersion)
     }
 

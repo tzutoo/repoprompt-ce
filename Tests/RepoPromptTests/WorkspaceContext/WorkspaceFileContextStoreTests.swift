@@ -2306,6 +2306,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             // introducing nondeterministic macOS FSEvents into this sequence-gap contract.
             let attached = try await store.attachPublisherIngressWithoutStartingWatcherForTesting(rootID: rootID)
             XCTAssertTrue(attached)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: rootID)
 
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
@@ -2837,11 +2838,24 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             XCTAssertTrue(completedAfterFinish)
         }
 
+        private func resetScopedIngressBarrierAfterSeededLoad(
+            _ store: WorkspaceFileContextStore,
+            rootID: UUID,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async {
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: rootID)
+            let seededAuthorityIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: rootID)
+            XCTAssertTrue(seededAuthorityIsCurrent, file: file, line: line)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: rootID)
+        }
+
         func testScopedAppliedIngressConcurrentSameRootRequestsJoinOneFlight() async throws {
             let root = try makeTemporaryRoot(name: "ScopedIngressSingleFlight")
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == rootID else { return }
@@ -2880,6 +2894,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == rootID else { return }
@@ -2931,6 +2946,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == rootID else { return }
@@ -2982,6 +2998,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let record = try await store.loadRoot(path: root.path)
             try await store.startWatchingRoot(id: record.id)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == rootID else { return }
@@ -3059,6 +3076,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let record = try await store.loadRoot(path: root.path)
             try await store.startWatchingRoot(id: record.id)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let baselineIngress = await store.appliedIngressSnapshotForTesting(rootID: rootID)
             let sinkGate = AsyncGate()
             let publisherWaitStarted = AsyncSignal()
@@ -3184,6 +3202,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             try write("seed", to: fileURL)
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: record.id)
+            let seededAuthorityIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: record.id)
+            XCTAssertTrue(seededAuthorityIsCurrent)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: record.id)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == record.id else { return }
@@ -3208,7 +3230,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
                 await completed.mark()
                 return wasCancelled
             }
-            await flushGate.waitUntilStarted()
+            let flushStarted = await waitForAsyncCondition {
+                await flushGate.startCount() == 1
+            }
+            XCTAssertTrue(flushStarted)
             request.cancel()
             let cancelledPromptly = await waitForAsyncCondition {
                 await completed.isMarked()
@@ -3226,6 +3251,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             try write("needle", to: root.appendingPathComponent("Seed.swift"))
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: record.id)
+            let seededAuthorityIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: record.id)
+            XCTAssertTrue(seededAuthorityIsCurrent)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: record.id)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == record.id else { return }
@@ -3251,7 +3280,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
                 await completed.mark()
                 return wasCancelled
             }
-            await flushGate.waitUntilStarted()
+            let flushStarted = await waitForAsyncCondition {
+                await flushGate.startCount() == 1
+            }
+            XCTAssertTrue(flushStarted)
             request.cancel()
             let cancelledPromptly = await waitForAsyncCondition {
                 await completed.isMarked()
@@ -3273,6 +3305,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let record = try await store.loadRoot(path: root.path)
             try await store.startWatchingRoot(id: record.id)
             let rootID = record.id
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: rootID)
             let baselineWatcherWatermark = try await store.acceptedWatcherWatermarkForTesting(rootID: rootID)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
@@ -3384,6 +3417,8 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let store = WorkspaceFileContextStore()
             let recordA = try await store.loadRoot(path: rootA.path)
             let recordB = try await store.loadRoot(path: rootB.path)
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: recordA.id)
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: recordB.id)
             let gateA = AsyncGate()
             let gateB = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
@@ -3417,6 +3452,9 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             for index in 0 ..< 9 {
                 let root = try makeTemporaryRoot(name: "ScopedIngressFanOut\(index)")
                 try await records.append(store.loadRoot(path: root.path))
+            }
+            for record in records {
+                await resetScopedIngressBarrierAfterSeededLoad(store, rootID: record.id)
             }
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { _ in
@@ -3452,6 +3490,14 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let store = WorkspaceFileContextStore()
             let recordA = try await store.loadRoot(path: rootA.path)
             let recordB = try await store.loadRoot(path: rootB.path)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: recordA.id)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: recordB.id)
+            let seededAuthorityAIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: recordA.id)
+            let seededAuthorityBIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: recordB.id)
+            XCTAssertTrue(seededAuthorityAIsCurrent)
+            XCTAssertTrue(seededAuthorityBIsCurrent)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: recordA.id)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: recordB.id)
 
             let samples = await store.awaitAppliedIngressForExplicitRequest(
                 userPath: fileA.path,
@@ -3488,6 +3534,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             try write("seed", to: seedURL)
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: record.id)
+            let seededAuthorityIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: record.id)
+            XCTAssertTrue(seededAuthorityIsCurrent)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: record.id)
             // Keep the callback cut deterministic; real FSEvents can race these exact barrier counters.
             let attached = try await store.attachPublisherIngressWithoutStartingWatcherForTesting(rootID: record.id)
             XCTAssertTrue(attached)
@@ -3547,6 +3597,7 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let clock = LockedWorkspaceDiagnosticsClock(nowNanoseconds: 3_000_000_000)
             let store = WorkspaceFileContextStore(debugNowNanoseconds: { clock.now() })
             let record = try await store.loadRoot(path: root.path)
+            await resetScopedIngressBarrierAfterSeededLoad(store, rootID: record.id)
             let flushGate = AsyncGate()
             await store.setScopedIngressBarrierWillFlushHandler { observedRootID in
                 guard observedRootID == record.id else { return }
@@ -3556,7 +3607,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let barrierTask = Task {
                 await store.awaitAppliedIngress(rootScope: .visibleWorkspace)
             }
-            await flushGate.waitUntilStarted()
+            let flushStarted = await waitForAsyncCondition {
+                await flushGate.startCount() == 1
+            }
+            XCTAssertTrue(flushStarted)
             clock.advance(milliseconds: 325)
 
             let activeRoots = await store.readSearchRootDiagnosticsSnapshot()
@@ -3595,6 +3649,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let store = WorkspaceFileContextStore()
             let record = try await store.loadRoot(path: root.path)
             try await store.startWatchingRoot(id: record.id)
+            await store.waitForPublishedSeededAuthorityReconciliationForTesting(rootID: record.id)
+            let seededAuthorityIsCurrent = await store.publishedSeededAuthorityIsCurrentForTesting(rootID: record.id)
+            XCTAssertTrue(seededAuthorityIsCurrent)
+            await store.resetScopedIngressBarrierDiagnosticsForTesting(rootID: record.id)
             var service: FileSystemService? = await store.fileSystemServiceForTesting(rootID: record.id)
             let weakService = WeakObjectBox(service)
             let cancellationGate = CancellationAwareGate()
@@ -3606,7 +3664,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
             let activeBarrier = Task {
                 await store.awaitAppliedIngress(rootScope: .visibleWorkspace)
             }
-            await cancellationGate.waitUntilStarted()
+            let flushStarted = await waitForAsyncCondition {
+                await cancellationGate.isStarted()
+            }
+            XCTAssertTrue(flushStarted)
 
             try write("pending", to: addedURL)
             let acceptedPayload = try await store.acceptWatcherPayloadForTesting(
@@ -7626,6 +7687,10 @@ final class WorkspaceFileContextStoreTests: XCTestCase {
                 await withCheckedContinuation { continuation in
                     startWaiters.append(continuation)
                 }
+            }
+
+            func isStarted() -> Bool {
+                started
             }
 
             private func cancel(_ waiterID: UUID) {

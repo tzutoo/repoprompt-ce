@@ -1249,13 +1249,14 @@ final class MCPServerViewModel: ObservableObject {
         logDebug: { message in
             mcpServerViewModelDebugLog(message)
         },
-        commitPrimaryGitDiffArtifactsToCurrentTab: { [weak self] toolName, candidates in
+        commitPrimaryGitDiffArtifactsToCurrentTab: { [weak self] toolName, candidates, sourceSelection in
             guard let self else {
                 throw MCPError.internalError("Window deallocated while committing Git artifacts")
             }
             return try await commitPrimaryGitArtifactsToCurrentTab(
                 toolName: toolName,
-                candidates: candidates
+                candidates: candidates,
+                sourceSelection: sourceSelection
             )
         },
         replaceAdvertisedGitArtifactsForCurrentTab: { [weak self] toolName, artifacts in

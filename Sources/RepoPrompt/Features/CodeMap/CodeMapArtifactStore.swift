@@ -654,7 +654,10 @@ actor CodeMapArtifactStore {
         policy: CodeMapArtifactStorePolicy = .default,
         clock: CodeMapArtifactStoreClock = .system,
         removalHooks: CodeMapSecureFileRemovalHooks? = nil,
-        leaseAdmission: CodeMapArtifactLeaseAdmission = .processWide,
+        leaseAdmission: CodeMapArtifactLeaseAdmission = CodeMapArtifactLeaseAdmission(
+            maximumCount: CodeMapArtifactStorePolicy.default.maximumActiveLeaseCount,
+            maximumBytes: CodeMapArtifactStorePolicy.default.maximumActiveLeaseBytes
+        ),
         leaseHooks: CodeMapArtifactLeaseHooks = .none
     ) throws {
         self.policy = policy

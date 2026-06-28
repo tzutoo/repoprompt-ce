@@ -109,7 +109,7 @@ import XCTest
                     .baseSnapshotUnavailable(.init(
                         reason: .failed,
                         stage: .loadedRootValidation,
-                        cause: "stale_currentness"
+                        cause: "loaded_root_owner_stale"
                     ))
                 )
             }
@@ -139,7 +139,7 @@ import XCTest
                     .baseSnapshotUnavailable(.init(
                         reason: .failed,
                         stage: .loadedRootValidation,
-                        cause: "stale_currentness"
+                        cause: "loaded_root_owner_stale"
                     ))
                 )
             }

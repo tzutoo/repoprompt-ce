@@ -11,6 +11,7 @@ struct WorkspaceCodemapPresentationRequestPolicy: Equatable {
     let maximumTotalWait: Duration
     let maximumStructureSeedCountPerRoot: Int
     let maximumCandidateDemandCount: Int
+    let maximumStructurePublicationAttempts: Int
 
     init(
         maximumReadinessRounds: Int = 4096,
@@ -18,7 +19,8 @@ struct WorkspaceCodemapPresentationRequestPolicy: Equatable {
         maximumBackoffMilliseconds: Int = 250,
         maximumTotalWait: Duration = .milliseconds(workspaceCodemapProductionDemandWaitMilliseconds),
         maximumStructureSeedCountPerRoot: Int = 8192,
-        maximumCandidateDemandCount: Int = 1024
+        maximumCandidateDemandCount: Int = 1024,
+        maximumStructurePublicationAttempts: Int = 4
     ) {
         precondition(maximumReadinessRounds > 0)
         precondition(initialBackoffMilliseconds > 0)
@@ -26,12 +28,14 @@ struct WorkspaceCodemapPresentationRequestPolicy: Equatable {
         precondition(maximumTotalWait >= .zero)
         precondition(maximumStructureSeedCountPerRoot > 0)
         precondition(maximumCandidateDemandCount > 0)
+        precondition(maximumStructurePublicationAttempts > 0)
         self.maximumReadinessRounds = maximumReadinessRounds
         self.initialBackoffMilliseconds = initialBackoffMilliseconds
         self.maximumBackoffMilliseconds = maximumBackoffMilliseconds
         self.maximumTotalWait = maximumTotalWait
         self.maximumStructureSeedCountPerRoot = maximumStructureSeedCountPerRoot
         self.maximumCandidateDemandCount = maximumCandidateDemandCount
+        self.maximumStructurePublicationAttempts = maximumStructurePublicationAttempts
     }
 }
 
@@ -214,6 +218,15 @@ struct WorkspaceCodemapPresentationCoordinator {
                     lastStaleReason = reason
                     await release(ownership)
                     if attempt == 0, clock.now < deadline { continue }
+                    let value = try await operation(incompletePublication(reason: reason))
+                    try Task.checkCancellation()
+                    return value
+                }
+                if let reason = lastStaleReason,
+                   result.publicationReceipt == nil,
+                   result.orderedEntries.isEmpty
+                {
+                    await release(ownership)
                     let value = try await operation(incompletePublication(reason: reason))
                     try Task.checkCancellation()
                     return value
@@ -1295,7 +1308,7 @@ extension WorkspaceCodemapPresentationCoordinator {
         let deadline = clock.now.advanced(by: policy.maximumTotalWait)
         var lastStaleReason: WorkspaceCodemapStructurePublicationStaleReason?
 
-        for attemptIndex in 0 ... 1 {
+        for attemptIndex in 0 ..< policy.maximumStructurePublicationAttempts {
             try Task.checkCancellation()
             structureAttemptDidBegin(attemptIndex)
             let ownership = WorkspaceCodemapOperationPresentationOwnership()
@@ -1314,7 +1327,11 @@ extension WorkspaceCodemapPresentationCoordinator {
                 if let staleReason = attempt.staleReason {
                     lastStaleReason = staleReason
                     await release(ownership)
-                    if attemptIndex == 0, clock.now < deadline { continue }
+                    if attemptIndex + 1 < policy.maximumStructurePublicationAttempts,
+                       clock.now < deadline
+                    {
+                        continue
+                    }
                     return .stale(staleReason, requestedSeedCount: seedFileIDs.count)
                 }
                 guard let receipt = attempt.receipt else {
@@ -1335,7 +1352,11 @@ extension WorkspaceCodemapPresentationCoordinator {
                 case let .stale(reason):
                     lastStaleReason = reason
                     await release(ownership)
-                    if attemptIndex == 0, clock.now < deadline { continue }
+                    if attemptIndex + 1 < policy.maximumStructurePublicationAttempts,
+                       clock.now < deadline
+                    {
+                        continue
+                    }
                     return .stale(reason, requestedSeedCount: seedFileIDs.count)
                 }
             } catch {

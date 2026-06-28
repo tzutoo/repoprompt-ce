@@ -3606,11 +3606,11 @@ actor GitService {
                     "tree object formats differ"
                 )
             }
-            var arguments = Self.targetEvidenceGitArguments([
+            var arguments = [
                 "diff-tree", "-r", "--raw", "-z", "--no-commit-id",
                 "--find-renames", "--find-copies", "--no-ext-diff",
                 baseTreeOID.lowercaseHex, targetTreeOID.lowercaseHex
-            ])
+            ]
             appendLiteralPrefix(prefix, to: &arguments)
             let sealed = try await runSealedTargetEvidenceCommand(
                 arguments,
@@ -3627,7 +3627,7 @@ actor GitService {
                 attemptID: attemptID,
                 sealedAuthority: sealed.authority,
                 commandOutputDigest: sealed.commandOutputDigest,
-                arguments: arguments,
+                arguments: sealed.commandArguments,
                 commandFormat: "git-diff-tree-raw-z-v2",
                 baseObjectID: baseTreeOID,
                 suppliedCreationCutProvenanceBytes: suppliedCreationCutProvenanceBytes,
@@ -3669,9 +3669,9 @@ actor GitService {
         priority: GitProcessAdmissionPriority = .rootBootstrap
     ) async throws -> GitTargetIndexEvidenceLease {
         do {
-            var arguments = Self.targetEvidenceGitArguments([
+            var arguments = [
                 "ls-files", "--stage", "-v", "-z"
-            ])
+            ]
             appendLiteralPrefix(prefix, to: &arguments)
             let sealed = try await runSealedTargetEvidenceCommand(
                 arguments,
@@ -3688,7 +3688,7 @@ actor GitService {
                 attemptID: attemptID,
                 sealedAuthority: sealed.authority,
                 commandOutputDigest: sealed.commandOutputDigest,
-                arguments: arguments,
+                arguments: sealed.commandArguments,
                 commandFormat: "git-ls-files-stage-v-z-v2",
                 baseObjectID: nil,
                 suppliedCreationCutProvenanceBytes: suppliedCreationCutProvenanceBytes,
@@ -3732,10 +3732,10 @@ actor GitService {
         priority: GitProcessAdmissionPriority = .rootBootstrap
     ) async throws -> GitTargetStatusEvidenceLease {
         do {
-            var arguments = Self.targetEvidenceGitArguments([
+            var arguments = [
                 "status", "--porcelain=v2", "-z",
                 includeUntracked ? "--untracked-files=all" : "--untracked-files=no"
-            ])
+            ]
             if includeIgnored { arguments.append("--ignored=matching") }
             appendLiteralPrefix(prefix, to: &arguments)
             let sealed = try await runSealedTargetEvidenceCommand(
@@ -3753,7 +3753,7 @@ actor GitService {
                 attemptID: attemptID,
                 sealedAuthority: sealed.authority,
                 commandOutputDigest: sealed.commandOutputDigest,
-                arguments: arguments,
+                arguments: sealed.commandArguments,
                 commandFormat: "git-status-porcelain-v2-z-v2",
                 baseObjectID: nil,
                 suppliedCreationCutProvenanceBytes: suppliedCreationCutProvenanceBytes,
@@ -3797,6 +3797,7 @@ actor GitService {
         let rawOutput: GitRawOutputSpoolLease
         let authority: GitTargetEvidenceSealedAuthority
         let commandOutputDigest: Data
+        let commandArguments: [String]
     }
 
     private func runSealedTargetEvidenceCommand(
@@ -3837,8 +3838,9 @@ actor GitService {
             }
         #endif
 
+        let commandArguments = Self.targetEvidenceGitArguments(arguments)
         let rawOutput = try await runSpoolingAuthorityGit(
-            arguments,
+            commandArguments,
             layout: layout,
             environment: environment,
             resourcePolicy: resourcePolicy,
@@ -3864,7 +3866,8 @@ actor GitService {
         return GitTargetEvidenceSealedCommand(
             rawOutput: rawOutput,
             authority: before,
-            commandOutputDigest: commandOutputDigest
+            commandOutputDigest: commandOutputDigest,
+            commandArguments: commandArguments
         )
     }
 
@@ -4122,11 +4125,15 @@ actor GitService {
     private nonisolated static func targetEvidenceGitArguments(
         _ arguments: [String]
     ) -> [String] {
-        [
+        let safetyArguments = [
             "-c", "core.fsmonitor=false",
             "-c", "core.hooksPath=/dev/null",
             "-c", "core.untrackedCache=false"
-        ] + arguments
+        ]
+        if Array(arguments.prefix(safetyArguments.count)) == safetyArguments {
+            return arguments
+        }
+        return safetyArguments + arguments
     }
 
     private nonisolated static func targetEvidenceEnvironmentIdentity(
@@ -4750,7 +4757,7 @@ actor GitService {
         priority: GitProcessAdmissionPriority
     ) async throws -> Data {
         try await runBoundedAuthorityGit(
-            ["ls-files", "--stage", "-z"],
+            Self.targetEvidenceGitArguments(["ls-files", "--stage", "-z"]),
             layout: layout,
             limits: GitWorktreeInitializationLimits(
                 maximumRecordCount: .max,

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MCP
 @testable import RepoPrompt
@@ -53,9 +54,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/App.swift": "protocol AppProtocol { func run() }\nstruct WorktreeApp: AppProtocol { func run() {} }\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: logical)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let logicalRoot = try await WorkspaceRootLoadTestSupport.loadRootMatchingCurrentFileSystemSettings(
             in: window,
@@ -176,7 +176,6 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
         let fileURL = root.appendingPathComponent("Sources/App.swift")
         try write("struct PlainFile {}\n", to: fileURL)
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         _ = try await fileRecord(at: fileURL, store: store, rootScope: .visibleWorkspace)
 
@@ -256,7 +255,6 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
         let fileURL = root.appendingPathComponent("Sources/App.swift")
         try write("struct PlainFile {}\n", to: fileURL)
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let tabID = try XCTUnwrap(workspace.activeComposeTabID)
         let connectionID = UUID()
@@ -430,9 +428,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 }.joined(separator: "\n")
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let file = try await fileRecord(
             at: root.appendingPathComponent("Sources/Large.swift"),
@@ -474,10 +471,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/Three.swift": "struct Three {}\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
-        let store = window.workspaceFileContextStore
         let workspace = try XCTUnwrap(window.workspaceManager.activeWorkspace)
         let tabID = try XCTUnwrap(workspace.activeComposeTabID)
         let connectionID = UUID()
@@ -528,9 +523,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/Three.swift": "struct Three {}\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let rootRefs = await store.rootRefs(scope: .visibleWorkspace)
         let loadedRoot = try XCTUnwrap(rootRefs.first)
@@ -595,9 +589,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "CurrentParent/SelectedFolder/Only.swift": "struct Only {}\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let rootRefs = await store.rootRefs(scope: .visibleWorkspace)
         let loadedRoot = try XCTUnwrap(rootRefs.first)
@@ -630,9 +623,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
             named: "repository",
             files: ["Sources/Shared.swift": "struct Shared {}\n"]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let roots = await store.rootRefs(scope: .visibleWorkspace)
         let outerRoot = try XCTUnwrap(roots.first { $0.standardizedFullPath == root.standardizedFileURL.path })
@@ -680,9 +672,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/Two.swift": "struct Two {}\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let roots = await store.rootRefs(scope: .visibleWorkspace)
         let loadedRoot = try XCTUnwrap(roots.first)
@@ -719,9 +710,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/Alpha.swift": "struct Alpha { func alpha() {} }\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let roots = await store.rootRefs(scope: .visibleWorkspace)
         let loadedRoot = try XCTUnwrap(roots.first)
@@ -769,9 +759,8 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
                 "Sources/Target.swift": "struct Target { func targetMethod() {} }\n"
             ]
         )
-        defer { repositories.cleanup() }
+        addTeardownBlock { repositories.cleanup() }
         let window = try await makeWindow(root: root)
-        defer { WindowStatesManager.shared.unregisterWindowState(window) }
         let store = window.workspaceFileContextStore
         let roots = await store.rootRefs(scope: .visibleWorkspace)
         let loadedRoot = try XCTUnwrap(roots.first)
@@ -784,12 +773,16 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
         })
         let sourceTicket = try await readyTicket(store: store, fileID: source.id)
         let targetTicket = try await readyTicket(store: store, fileID: target.id)
-        defer {
-            Task {
-                _ = await store.cancelCodemapArtifactDemand(sourceTicket)
-                _ = await store.cancelCodemapArtifactDemand(targetTicket)
-            }
+        addTeardownBlock {
+            _ = await store.cancelCodemapArtifactDemand(sourceTicket)
+            _ = await store.cancelCodemapArtifactDemand(targetTicket)
         }
+        let graphClock = ContinuousClock()
+        let graphReady = await store.waitForCodemapGraphPublication(
+            rootEpoch: sourceTicket.rootEpoch,
+            deadline: graphClock.now.advanced(by: .seconds(8))
+        )
+        XCTAssertTrue(graphReady, "Timed out waiting for root-local codemap graph publication")
 
         let forward = try await window.mcpServer.buildCodeStructureDTO(
             fromRecords: [source],
@@ -1222,10 +1215,19 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
     }
 
     private func makeWindow(root: URL) async throws -> WindowState {
+        let codemapFixture = try MCPCodeStructureCodemapRuntimeFixture(name: "MCPCodeStructureWorktreeTests")
+        addTeardownBlock {
+            await codemapFixture.shutdown()
+        }
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-        let window = WindowState()
+        let window = WindowState(workspaceFileContextStore: codemapFixture.makeStore())
         WindowStatesManager.shared.registerWindowState(window)
+        addTeardownBlock { @MainActor in
+            window.beginClose()
+            await window.tearDown()
+            WindowStatesManager.shared.unregisterWindowState(window)
+        }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
 
         let workspace = window.workspaceManager.createWorkspace(
@@ -1399,5 +1401,105 @@ private actor CodeStructureContentReadCounter {
 
     func increment() {
         value += 1
+    }
+}
+
+private final class MCPCodeStructureCodemapRuntimeFixture: @unchecked Sendable {
+    private let sandbox: URL
+    private let provider: CodeMapArtifactRuntimeProvider
+
+    init(name: String) throws {
+        let sandbox = try Self.makeSecureDirectory(name: name)
+        do {
+            let artifactRoot = try Self.makeSecureDirectory(in: sandbox, named: "artifacts")
+            let registry = WorkspaceCodemapBindingIntegrationRegistry()
+            self.sandbox = sandbox
+            provider = CodeMapArtifactRuntimeProvider {
+                try CodeMapArtifactRuntime(
+                    rootURL: artifactRoot,
+                    bindingIntegrationRegistry: registry,
+                    bindingEngineFactory: { runtime in
+                        WorkspaceCodemapBindingEngine(
+                            runtime: runtime,
+                            capabilityService: WorkspaceCodemapGitCapabilityService(
+                                namespaceSalt: Data(
+                                    repeating: 0x4D,
+                                    count: GitBlobRepositoryNamespace.saltByteCount
+                                )
+                            ),
+                            sourceReader: registry.makeValidatedSourceReaderClient(),
+                            catalogClient: registry.makeBindingCatalogClient()
+                        )
+                    }
+                )
+            }
+            _ = try provider.runtime()
+        } catch {
+            try? FileManager.default.removeItem(at: sandbox)
+            throw error
+        }
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    func makeStore() -> WorkspaceFileContextStore {
+        let provider = provider
+        return WorkspaceFileContextStore(
+            enableCatalogShardShadowValidation: false,
+            codemapRuntimeProvider: {
+                try provider.runtime()
+            },
+            codemapProjectionPreloadLaunchPolicyForTesting: .disabled
+        )
+    }
+
+    func shutdown() async {
+        if let runtime = try? provider.runtime(),
+           let engine = try? runtime.bindingEngine()
+        {
+            await engine.shutdown()
+        }
+        try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    private static func makeSecureDirectory(name: String) throws -> URL {
+        let sanitized = name.replacingOccurrences(of: "/", with: "-")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "\(sanitized)-codemap-runtime-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        return try createSecureDirectory(directory, withIntermediateDirectories: true)
+    }
+
+    private static func makeSecureDirectory(in parent: URL, named name: String) throws -> URL {
+        try createSecureDirectory(
+            parent.appendingPathComponent(name, isDirectory: true),
+            withIntermediateDirectories: false
+        )
+    }
+
+    private static func createSecureDirectory(
+        _ directory: URL,
+        withIntermediateDirectories: Bool
+    ) throws -> URL {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: withIntermediateDirectories,
+            attributes: [.posixPermissions: 0o700]
+        )
+        guard chmod(directory.path, 0o700) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let resolvedPath = try directory.path.withCString { pointer -> String in
+            guard let resolved = realpath(pointer, nil) else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        return URL(fileURLWithPath: resolvedPath, isDirectory: true)
     }
 }
