@@ -55,9 +55,15 @@ extension MCPServerViewModel {
 
     /// Returns selection-aware workspace records for the resolved tab context snapshot.
     @MainActor
-    func selectedRecordsForCurrentTabContext() async throws -> [WorkspaceFileRecord] {
+    func selectedRecordsForCurrentTabContext(
+        metadataOverride: RequestMetadata? = nil,
+        lookupContextOverride: WorkspaceLookupContext? = nil
+    ) async throws -> [WorkspaceFileRecord] {
         do {
-            let collections = try await selectionCollectionsForCurrentTabContext()
+            let collections = try await selectionCollectionsForCurrentTabContext(
+                metadataOverride: metadataOverride,
+                lookupContextOverride: lookupContextOverride
+            )
             return collections.selected.map(\.entry.file)
         } catch let error as StabilizedSelectionReadSnapshotError {
             throw MCPError.invalidParams(error.localizedDescription)
@@ -76,9 +82,17 @@ extension MCPServerViewModel {
     }
 
     @MainActor
-    func selectionCollections(for context: TabContextSnapshot, codeMapUsageOverride: CodeMapUsage? = nil) async -> SelectionReplyAssembler.SelectionCollections {
+    func selectionCollections(
+        for context: TabContextSnapshot,
+        codeMapUsageOverride: CodeMapUsage? = nil,
+        lookupContextOverride: WorkspaceLookupContext? = nil
+    ) async -> SelectionReplyAssembler.SelectionCollections {
         let requestedUsage = codeMapUsageOverride ?? promptVM.codeMapUsage
-        let lookupContext = await lookupContext(for: context)
+        let lookupContext: WorkspaceLookupContext = if let lookupContextOverride {
+            lookupContextOverride
+        } else {
+            await self.lookupContext(for: context)
+        }
         let source = StoredSelectionSource(
             stored: lookupContext.physicalizeSelection(context.selection),
             codeMapUsage: effectiveMCPCodeMapUsage(requestedUsage)
@@ -106,8 +120,15 @@ extension MCPServerViewModel {
     }
 
     @MainActor
-    func selectionCollectionsForCurrentTabContext() async throws -> SelectionReplyAssembler.SelectionCollections {
-        let metadata = await captureRequestMetadata()
+    func selectionCollectionsForCurrentTabContext(
+        metadataOverride: RequestMetadata? = nil,
+        lookupContextOverride: WorkspaceLookupContext? = nil
+    ) async throws -> SelectionReplyAssembler.SelectionCollections {
+        let metadata: RequestMetadata = if let metadataOverride {
+            metadataOverride
+        } else {
+            await captureRequestMetadata()
+        }
         let resolved = try resolveTabContextSnapshot(
             from: metadata,
             toolName: "selection",
@@ -115,7 +136,39 @@ extension MCPServerViewModel {
             startMirroring: false
         )
         let stabilized = try stabilizedSelectionReadSnapshot(resolved)
-        return await selectionCollections(for: stabilized.snapshot)
+        return await selectionCollections(
+            for: stabilized.snapshot,
+            lookupContextOverride: lookupContextOverride
+        )
+    }
+
+    @MainActor
+    func physicalSelectionForCurrentTabContext(
+        metadataOverride: RequestMetadata? = nil,
+        lookupContextOverride: WorkspaceLookupContext? = nil
+    ) async throws -> StoredSelection {
+        do {
+            let metadata: RequestMetadata = if let metadataOverride {
+                metadataOverride
+            } else {
+                await captureRequestMetadata()
+            }
+            let resolved = try resolveTabContextSnapshot(
+                from: metadata,
+                toolName: "selection",
+                policy: .allowLegacyImplicitRouting,
+                startMirroring: false
+            )
+            let stabilized = try stabilizedSelectionReadSnapshot(resolved)
+            let lookupContext: WorkspaceLookupContext = if let lookupContextOverride {
+                lookupContextOverride
+            } else {
+                await self.lookupContext(for: stabilized.snapshot)
+            }
+            return lookupContext.physicalizeSelection(stabilized.snapshot.selection)
+        } catch let error as StabilizedSelectionReadSnapshotError {
+            throw MCPError.invalidParams(error.localizedDescription)
+        }
     }
 
     struct PathFormatter {

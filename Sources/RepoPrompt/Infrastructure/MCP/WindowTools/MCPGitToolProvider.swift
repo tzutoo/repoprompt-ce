@@ -218,6 +218,21 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
         return parts.joined(separator: " ")
     }
 
+    private static func selectedGitDiffPaths(from selection: StoredSelection) -> [String] {
+        var seen = Set<String>()
+        var paths: [String] = []
+        func append(_ rawPath: String) {
+            let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("/") else { return }
+            let standardized = StandardizedPath.absolute((trimmed as NSString).expandingTildeInPath)
+            guard seen.insert(standardized).inserted else { return }
+            paths.append(standardized)
+        }
+        selection.selectedPaths.forEach(append)
+        selection.slices.keys.forEach(append)
+        return paths
+    }
+
     nonisolated static func makeStatusDTO(
         _ status: VCSRepositoryStatus
     ) -> ToolResultDTOs.GitToolReplyDTO.StatusDTO {
@@ -1026,16 +1041,18 @@ final class MCPGitToolProvider: MCPWindowToolProviding {
                 let inlineMode = inlineObj?["mode"]?.stringValue?.lowercased() ?? "brief"
                 let inlineMaxLines = max(1, inlineObj?["max_lines"]?.intValue ?? 120)
 
-                // Resolve selected paths using the established selection resolver, then retain
-                // the same source paths (logicalized through this request's lookup context) for
-                // artifact auto-selection.
+                // Derive selected diff pathspecs directly from the stabilized tab selection
+                // using the same worktree-aware lookup context used for repo_root translation.
+                // This avoids a race with store-backed worktree record availability while still
+                // letting GitDiffEngine fail closed when paths are not under the target repo.
                 let allSelectedAbsolutePaths: [String]
                 if scope == .selected {
-                    let selectedFiles = try await dependencies.selectedRecordsForCurrentTabContext()
-                    allSelectedAbsolutePaths = selectedFiles.map(\.standardizedFullPath)
-                    sourceSelectionForArtifactCommit = lookupContext.logicalizeSelection(
-                        StoredSelection(selectedPaths: allSelectedAbsolutePaths)
+                    let physicalSelection = try await dependencies.physicalSelectionForCurrentTabContext(
+                        metadata,
+                        lookupContext
                     )
+                    allSelectedAbsolutePaths = Self.selectedGitDiffPaths(from: physicalSelection)
+                    sourceSelectionForArtifactCommit = lookupContext.logicalizeSelection(physicalSelection)
                 } else {
                     sourceSelectionForArtifactCommit = nil
                     allSelectedAbsolutePaths = []

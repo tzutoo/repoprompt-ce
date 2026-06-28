@@ -115,7 +115,14 @@ struct MCPWindowToolDependencies {
         _ toolName: String,
         _ mutation: (inout MCPServerViewModel.TabScopedContext) -> Void
     ) async throws -> Void
-    typealias SelectedRecordsForCurrentTabContext = @MainActor @Sendable () async throws -> [WorkspaceFileRecord]
+    typealias SelectedRecordsForCurrentTabContext = @MainActor @Sendable (
+        _ metadata: MCPServerViewModel.RequestMetadata,
+        _ lookupContextOverride: WorkspaceLookupContext?
+    ) async throws -> [WorkspaceFileRecord]
+    typealias PhysicalSelectionForCurrentTabContext = @MainActor @Sendable (
+        _ metadata: MCPServerViewModel.RequestMetadata,
+        _ lookupContextOverride: WorkspaceLookupContext?
+    ) async throws -> StoredSelection
     typealias ResolveSelectedFilesForCodeStructure = @MainActor @Sendable (
         _ metadata: MCPServerViewModel.RequestMetadata,
         _ lookupContext: WorkspaceLookupContext,
@@ -323,6 +330,7 @@ struct MCPWindowToolDependencies {
     let resolveTabContextSnapshot: ResolveTabContextSnapshot
     let updateCurrentTabContext: UpdateCurrentTabContext
     let selectedRecordsForCurrentTabContext: SelectedRecordsForCurrentTabContext
+    let physicalSelectionForCurrentTabContext: PhysicalSelectionForCurrentTabContext
     let resolveSelectedFilesForCodeStructure: ResolveSelectedFilesForCodeStructure
     let boundTabID: BoundTabID
     let mapFileManagerErrorToMCP: MapFileManagerErrorToMCP

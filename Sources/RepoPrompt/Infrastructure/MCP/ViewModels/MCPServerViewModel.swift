@@ -1220,9 +1220,19 @@ final class MCPServerViewModel: ObservableObject {
             guard let self else { throw MCPError.internalError("Window deallocated while updating tab context") }
             try await updateCurrentTabContext(toolName: toolName, mutation: mutation)
         },
-        selectedRecordsForCurrentTabContext: { [weak self] in
+        selectedRecordsForCurrentTabContext: { [weak self] metadata, lookupContextOverride in
             guard let self else { throw MCPError.internalError("Window deallocated while resolving selected files") }
-            return try await selectedRecordsForCurrentTabContext()
+            return try await selectedRecordsForCurrentTabContext(
+                metadataOverride: metadata,
+                lookupContextOverride: lookupContextOverride
+            )
+        },
+        physicalSelectionForCurrentTabContext: { [weak self] metadata, lookupContextOverride in
+            guard let self else { throw MCPError.internalError("Window deallocated while resolving selected files") }
+            return try await physicalSelectionForCurrentTabContext(
+                metadataOverride: metadata,
+                lookupContextOverride: lookupContextOverride
+            )
         },
         resolveSelectedFilesForCodeStructure: { [weak self] metadata, lookupContext, maximumSeedCount in
             guard let self else { throw MCPError.internalError("Window deallocated while resolving selected code structure files") }
