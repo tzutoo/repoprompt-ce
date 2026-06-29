@@ -490,7 +490,8 @@ extension MCPServerViewModel {
             resolvedContext: resolvedPromptContext,
             lookupContext: lookupContext,
             activeTabCompatibility: useActivePublishedSnapshot,
-            allowActivePublishedSnapshotRefresh: codemapPresentationOverride == nil
+            allowActivePublishedSnapshotRefresh: codemapPresentationOverride == nil,
+            allowVirtualTokenRefresh: codemapPresentationOverride == nil
         )
         let artifactRootMetadata: [String: PathFormatter.RootMetadata] = Dictionary(
             uniqueKeysWithValues: artifactAuthorization.displayAliasesByAbsolutePath.compactMap { path, alias in

@@ -187,6 +187,9 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         window.agentModeViewModel.test_setCurrentTabIDOverride(tabID)
 
         var countsBeforeSummary: WorkspaceFileContextStore.CodemapPresentationOperationCounts?
+        #if DEBUG
+            let refreshStartsBeforeHandoff = window.mcpServer.virtualTokenRefreshStartCountForTesting()
+        #endif
         let block = await window.agentModeViewModel.buildCurrentTabHandoffFileContentsBlock(
             tokenCap: 0,
             overTokenCapSummaryWillBegin: {
@@ -201,6 +204,12 @@ final class AgentProviderContextBuilderTests: XCTestCase {
         XCTAssertGreaterThan(beforeSummary.artifactDemandRequests, 0)
         XCTAssertEqual(afterSummary.artifactDemandRequests - beforeSummary.artifactDemandRequests, 0)
         XCTAssertEqual(afterSummary.presentationFreezeRequests - beforeSummary.presentationFreezeRequests, 0)
+        #if DEBUG
+            XCTAssertEqual(
+                window.mcpServer.virtualTokenRefreshStartCountForTesting() - refreshStartsBeforeHandoff,
+                0
+            )
+        #endif
     }
 
     private func makePresentation(
