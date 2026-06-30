@@ -166,7 +166,53 @@ final class MCPCodeStructureWorktreeTests: XCTestCase {
         XCTAssertEqual(markerAfterTree?.revision, markerBeforeTree.revision)
         XCTAssertEqual(markerAfterTree?.changes, markerBeforeTree.changes)
         let storeWorkAfterTree = await store.codemapPresentationOperationCountsForTesting()
-        XCTAssertEqual(storeWorkAfterTree, storeWorkBeforeTree)
+        // Ready codemap demand publication owns graph publication asynchronously. This
+        // passive tree render must not request fresh structure/demand/candidate work, but
+        // awaiting the snapshot/logical-root presentation may give an already-scheduled
+        // graph worker one chance to drain.
+        XCTAssertEqual(
+            storeWorkAfterTree.structureSeedAdmissionRequests,
+            storeWorkBeforeTree.structureSeedAdmissionRequests
+        )
+        XCTAssertEqual(
+            storeWorkAfterTree.selectedMetadataResolutionRequests,
+            storeWorkBeforeTree.selectedMetadataResolutionRequests
+        )
+        XCTAssertEqual(
+            storeWorkAfterTree.presentationCandidateRequests,
+            storeWorkBeforeTree.presentationCandidateRequests
+        )
+        XCTAssertEqual(storeWorkAfterTree.artifactDemandRequests, storeWorkBeforeTree.artifactDemandRequests)
+        XCTAssertEqual(
+            storeWorkAfterTree.presentationFreezeRequests,
+            storeWorkBeforeTree.presentationFreezeRequests
+        )
+        XCTAssertEqual(storeWorkAfterTree.setupTasksCreated, storeWorkBeforeTree.setupTasksCreated)
+        XCTAssertEqual(storeWorkAfterTree.demandTasksCreated, storeWorkBeforeTree.demandTasksCreated)
+        XCTAssertEqual(storeWorkAfterTree.targetedReadyFreezes, storeWorkBeforeTree.targetedReadyFreezes)
+        XCTAssertEqual(storeWorkAfterTree.graphBatchSignals, storeWorkBeforeTree.graphBatchSignals)
+        XCTAssertEqual(
+            storeWorkAfterTree.projectionRecoveryObserversStarted,
+            storeWorkBeforeTree.projectionRecoveryObserversStarted
+        )
+        XCTAssertEqual(
+            storeWorkAfterTree.projectionRecoveryObserverRearms,
+            storeWorkBeforeTree.projectionRecoveryObserverRearms
+        )
+        let graphDrainDeltas = [
+            storeWorkAfterTree.fullRootGraphFreezes - storeWorkBeforeTree.fullRootGraphFreezes,
+            storeWorkAfterTree.graphBatchFlushes - storeWorkBeforeTree.graphBatchFlushes,
+            storeWorkAfterTree.graphWorkerStarts - storeWorkBeforeTree.graphWorkerStarts
+        ]
+        XCTAssertTrue(
+            graphDrainDeltas.allSatisfy { 0 ... 1 ~= $0 },
+            "Unexpected graph-worker drain deltas: \(graphDrainDeltas)"
+        )
+        XCTAssertEqual(
+            Set(graphDrainDeltas).count,
+            1,
+            "Graph-worker drain counters should advance together: \(graphDrainDeltas)"
+        )
         let engineWorkAfterTree = await store.codemapBindingEngineAccountingForTesting(
             rootID: physicalRoot.id
         )

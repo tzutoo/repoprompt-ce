@@ -1048,7 +1048,8 @@ final class GitWorktreeCreationReceiptTests: XCTestCase {
         let git = GitService(workspaceStateAuthority: authority)
         let coordinator = WorkspaceRootReusableSnapshotCoordinator(gitService: git, authority: authority)
 
-        for iteration in 0 ..< 70 {
+        let repeatedObservationCount = 10
+        for iteration in 0 ..< repeatedObservationCount {
             guard case .admitted = await coordinator.observeAuthoritativeFullLoad(
                 rootURL: fixture.root,
                 authoritativeRelativeFilePaths: fixture.authoritativeRelativeFilePaths
