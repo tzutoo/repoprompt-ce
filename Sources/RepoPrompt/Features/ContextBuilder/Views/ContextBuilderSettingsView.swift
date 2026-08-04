@@ -113,7 +113,7 @@ struct ContextBuilderSettingsView: View {
                             get: { Double(contextBuilderVM.tokenBudget) },
                             set: { contextBuilderVM.tokenBudget = Int($0) }
                         ),
-                        in: 10000 ... 200_000,
+                        in: 10000 ... 1_000_000,
                         step: 5000
                     )
                     Text("Target prompt size. Use ~160k for ChatGPT/web exports by default, or lower for a more token-efficient prompt.")
@@ -228,7 +228,7 @@ struct ContextBuilderSettingsView: View {
                                 get: { Double(contextBuilderVM.planTokenBudget) },
                                 set: { contextBuilderVM.planTokenBudget = Int($0) }
                             ),
-                            in: 40000 ... 200_000,
+                            in: 40000 ... 1_000_000,
                             step: 5000
                         )
 

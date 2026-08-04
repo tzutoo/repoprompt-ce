@@ -660,7 +660,7 @@ public class AIQueriesService {
         } else {
             try await AIProviderFactory.createProvider(for: .deepseek, keyManager: keyManager) as! DeepSeekProvider
         }
-        return try await withTimeout(seconds: 30) { try await provider.testAPIKey(model: .deepseekChat) }
+        return try await withTimeout(seconds: 30) { try await provider.testAPIKey(model: .deepseekV4Flash) }
     }
 
     /// Test Fireworks API key

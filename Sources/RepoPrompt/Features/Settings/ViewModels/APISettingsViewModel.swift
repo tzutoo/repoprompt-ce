@@ -1935,7 +1935,7 @@ public class APISettingsViewModel: ObservableObject {
             case .deepseek:
                 deepSeekApiKey = trimmedKey
                 isDeepSeekKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.deepseekChat, reason: "api_settings.validate_key.default_seed.deepseek")
+                seedPreferredComposeModelIfMissing(AIModel.deepseekV4Flash, reason: "api_settings.validate_key.default_seed.deepseek")
             case .fireworks:
                 fireworksApiKey = trimmedKey
                 isFireworksKeyValid = true
@@ -3799,7 +3799,7 @@ public class APISettingsViewModel: ObservableObject {
             let provider = CustomOpenAIProvider(
                 baseURL: "https://api.deepseek.com/v1",
                 apiKey: deepSeekApiKey,
-                defaultModel: "deepseek-chat",
+                defaultModel: "deepseek-v4-flash",
                 defaultTemperature: 0.7
             )
             let models = try await provider.getAvailableModels()

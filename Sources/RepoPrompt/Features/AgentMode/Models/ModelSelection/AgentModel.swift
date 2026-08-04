@@ -102,6 +102,9 @@ enum AgentModel: String, CaseIterable, Codable {
     case kimiCode = "kimi-code"
     case customClaudeCompatible = "custom-claude-compatible"
 
+    /// DeepSeek V4 Flash (0731): 1M context / 384K max output, served through Codex
+    case deepseekV4Flash = "deepseek-v4-flash"
+
     // Cursor models
     case cursorAuto = "auto"
     case cursorComposer2 = "composer-2"
@@ -169,6 +172,7 @@ enum AgentModel: String, CaseIterable, Codable {
         case .glm5: "GLM 5.1"
         case .kimiCode: "Kimi Code"
         case .customClaudeCompatible: "CC Custom"
+        case .deepseekV4Flash: "DeepSeek V4 Flash"
         case .cursorAuto: "Auto"
         case .cursorComposer2: "Composer 2"
         case .defaultModel: "Default"
@@ -235,6 +239,7 @@ enum AgentModel: String, CaseIterable, Codable {
         case .glm5: "GLM 5.1 tier via Z.ai. Strongest legacy GLM tier, good for complex tasks."
         case .kimiCode: "Kimi Code backend. RepoPrompt does not pass a model flag."
         case .customClaudeCompatible: "Custom Claude-compatible backend. RepoPrompt does not pass a model flag when configured for no-model behavior."
+        case .deepseekV4Flash: "DeepSeek V4 Flash (0731) via Codex. 1M token context and 384K max output; fast, economical agent work."
         case .cursorAuto: "Let Cursor choose the best model automatically. Built-in fallback for Cursor ACP runs when dynamic model metadata is unavailable."
         case .cursorComposer2: "Cursor's Composer 2 model. Available when Cursor exposes it through ACP model metadata."
         case .defaultModel: "Use the agent's default model. Good starting point when unsure."
@@ -279,7 +284,8 @@ enum AgentModel: String, CaseIterable, Codable {
                 .gpt5Low,
                 .gpt5Medium,
                 .gpt5High,
-                .gpt5XHigh
+                .gpt5XHigh,
+                .deepseekV4Flash
             ]
         case .claudeCode:
             // Family priority matches the Claude Code picker catalog:
@@ -579,7 +585,7 @@ enum AgentModel: String, CaseIterable, Codable {
     /// Returns `nil` for models where the context window is unknown or unverified.
     var contextWindowTokens: Int? {
         switch self {
-        case .claudeFable5, .claudeSonnet5, .claudeOpus5, .claudeOpus1m, .glm52_1m:
+        case .claudeFable5, .claudeSonnet5, .claudeOpus5, .claudeOpus1m, .glm52_1m, .deepseekV4Flash:
             1_000_000
         case .claudeSonnet, .claudeOpus, .claudeHaiku,
              .claudeSonnet46, .claudeSonnet45,

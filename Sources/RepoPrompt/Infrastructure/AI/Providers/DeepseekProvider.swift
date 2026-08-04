@@ -19,7 +19,12 @@ final class DeepSeekProvider: OpenAIProvider {
         )
     }
 
-    override func testAPIKey(model: AIModel = .deepseekChat) async throws -> Bool {
+    /// Override to provide model-specific max tokens
+    override func providerSpecificMaxTokens(for model: AIModel) -> Int? {
+        model.maxTokens
+    }
+
+    override func testAPIKey(model: AIModel = .deepseekV4Flash) async throws -> Bool {
         let testMessage = AIMessage(systemPrompt: "You are a helpful assistant.", userMessage: "Say hello")
         do {
             let stream = try await streamMessage(testMessage, model: model)

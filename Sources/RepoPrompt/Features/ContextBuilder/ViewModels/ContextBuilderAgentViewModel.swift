@@ -1363,8 +1363,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         allowClarifyingQuestionsForMCP = workspaceSettings?.discoveryAllowClarifyingQuestionsForMCP ?? false
         // Question timeout: workspace setting only
         questionTimeoutSeconds = workspaceSettings?.discoveryQuestionTimeoutSeconds ?? ContextBuilderDefaults.questionTimeoutSeconds
-        // Plan token budget: workspace setting only, defaults to 120k
-        planTokenBudget = workspaceSettings?.discoveryPlanTokenBudget ?? 120_000
+        // Plan token budget: workspace setting only, defaults to ContextBuilderDefaults.planTokenBudget
+        planTokenBudget = workspaceSettings?.discoveryPlanTokenBudget ?? ContextBuilderDefaults.planTokenBudget
 
         // Apply agent/model from the effective Agent Models profile when a configured provider is currently available.
         if let normalizedAgentSelection {

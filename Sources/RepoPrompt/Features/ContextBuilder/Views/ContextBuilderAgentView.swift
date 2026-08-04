@@ -1460,7 +1460,7 @@ private struct ContextBuilderSettingsPopover: View {
                         SettingsBudgetSliderRow(
                             label: "Target size",
                             value: $tokenBudget,
-                            range: 10000 ... 200_000,
+                            range: 10000 ... 1_000_000,
                             isDisabled: isDisabled
                         )
 
@@ -1497,7 +1497,7 @@ private struct ContextBuilderSettingsPopover: View {
                                 SettingsBudgetSliderRow(
                                     label: "Target size",
                                     value: $planTokenBudget,
-                                    range: 40000 ... 200_000,
+                                    range: 40000 ... 1_000_000,
                                     isDisabled: isDisabled
                                 )
                             }

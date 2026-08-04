@@ -149,6 +149,7 @@ public enum AIModel: Equatable, Hashable {
     // Deepseek Models
     case deepseekChat
     case deepseekReasoner
+    case deepseekV4Flash
 
     /// Ollama
     case ollama
@@ -375,8 +376,10 @@ public enum AIModel: Equatable, Hashable {
         ModelInfo(model: .openrouterClaude4Opus, rawValue: "anthropic/claude-opus-4.6", actualName: nil, displayName: "oRouter/Claude Opus 4.6", provider: ProviderIndex.openRouter),
 
         // **New DeepSeek Models**
-        ModelInfo(model: .deepseekChat, rawValue: "deepseek-chat", actualName: nil, displayName: "DeepSeek-V3.2-Exp", provider: ProviderIndex.deepseek),
-        ModelInfo(model: .deepseekReasoner, rawValue: "deepseek-reasoner", actualName: nil, displayName: "DeepSeek-V3.2-Exp Thinking", provider: ProviderIndex.deepseek),
+        // Legacy aliases retired by DeepSeek on 2026-07-24 (see v4-flash changelog); hidden from UI.
+        // ModelInfo(model: .deepseekChat, rawValue: "deepseek-chat", actualName: nil, displayName: "DeepSeek-V3.2-Exp", provider: ProviderIndex.deepseek),
+        // ModelInfo(model: .deepseekReasoner, rawValue: "deepseek-reasoner", actualName: nil, displayName: "DeepSeek-V3.2-Exp Thinking", provider: ProviderIndex.deepseek),
+        ModelInfo(model: .deepseekV4Flash, rawValue: "deepseek-v4-flash", actualName: nil, displayName: "DeepSeek V4 Flash", provider: ProviderIndex.deepseek),
 
         // **New Fireworks Models**
         ModelInfo(model: .fireworksDeepseekV3p1Terminus, rawValue: "accounts/fireworks/models/deepseek-v3p1-terminus", actualName: nil, displayName: "DeepSeek V3.1 Terminus", provider: ProviderIndex.fireworks),
@@ -743,6 +746,7 @@ public enum AIModel: Equatable, Hashable {
         .gpt5Low,
         .gpt41,
         .fireworksDeepseekV3p1Terminus,
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gemini3p1ProPreview,
@@ -772,6 +776,7 @@ public enum AIModel: Equatable, Hashable {
         .gpt5Low,
         .gpt41,
         .fireworksDeepseekV3p1Terminus,
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gemini3p1ProPreview,
@@ -799,6 +804,7 @@ public enum AIModel: Equatable, Hashable {
         .claude4Sonnet, .openrouterClaude4Sonnet,
         .gpt5CodexLow,
         .gpt5Low,
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .fireworksDeepseekV3p1Terminus,
         .gemini3p1ProPreview,
@@ -827,6 +833,7 @@ public enum AIModel: Equatable, Hashable {
         // Prioritize fast and affordable models
         .gpt54Mini,
         // Then other cheap/fast models
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .gpt41,
         .deepseekReasoner,
@@ -853,6 +860,7 @@ public enum AIModel: Equatable, Hashable {
         // Then the simple priorities
         .gpt54Mini,
         // fallback: everything else
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .gpt41,
         .claude4Sonnet, .openrouterClaude4Sonnet,
@@ -879,6 +887,7 @@ public enum AIModel: Equatable, Hashable {
         .gpt54Mini,
         .geminiFlashLatest,
         // fallback: everything else
+        .deepseekV4Flash,
         .deepseekChat, .openrouterDeepseekChat,
         .gpt41,
         .zaiGLM52,
@@ -2046,6 +2055,7 @@ public enum AIModel: Equatable, Hashable {
         case gemini3FlashPreview
         case deepseekChat
         case deepseekReasoner
+        case deepseekV4Flash
         case ollama
         case openrouterDeepseekChat
         case openrouterGpt5
@@ -2276,6 +2286,8 @@ public enum AIModel: Equatable, Hashable {
             .staticCase(.deepseekChat)
         case .deepseekReasoner:
             .staticCase(.deepseekReasoner)
+        case .deepseekV4Flash:
+            .staticCase(.deepseekV4Flash)
         case .ollama:
             .staticCase(.ollama)
         case .openrouterDeepseekChat:
@@ -2376,6 +2388,9 @@ public enum AIModel: Equatable, Hashable {
             32768
         case .fireworksQwen3235bA22bInstruct2507:
             32768
+        // DeepSeek V4 Flash (0731): max output 384K (393,216 tokens)
+        case .deepseekV4Flash:
+            393_216
         default:
             nil
         }
@@ -2393,6 +2408,9 @@ public enum AIModel: Equatable, Hashable {
         // DeepSeek R1
         case .deepseekReasoner:
             0.6
+        // DeepSeek V4 Flash (0731): official recommendation temperature 1.0 (0.95 agentic)
+        case .deepseekV4Flash:
+            1.0
         // DeepSeek V3p1 Terminus
         case .fireworksDeepseekV3p1Terminus:
             0.6
