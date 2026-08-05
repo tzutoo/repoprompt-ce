@@ -300,9 +300,9 @@ enum AgentModel: String, CaseIterable, Codable {
                 .claudeHaiku, .claudeHaiku45
             ]
         case .openCode:
-            [.defaultModel]
+            [.defaultModel, .deepseekV4Flash]
         case .cursor:
-            [.cursorAuto, .cursorComposer2]
+            [.cursorAuto, .cursorComposer2, .deepseekV4Flash]
         case .claudeCodeGLM:
             [.claudeHaiku, .claudeSonnet, .claudeOpus]
         case .kimiCode:

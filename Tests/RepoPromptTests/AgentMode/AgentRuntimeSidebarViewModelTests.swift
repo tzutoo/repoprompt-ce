@@ -250,6 +250,40 @@ final class AgentRuntimeSidebarViewModelTests: XCTestCase {
         XCTAssertEqual(store.runtimeVM.snapshot.effectiveContextWindowTokens, 200_000)
     }
 
+    func testOpenCodeDeepSeekV4ModelResolvesOneMillionWindow() {
+        let store = AgentRuntimeMetricsUIStore()
+        // opencode reports provider-prefixed model IDs that do not exact-match
+        // the static AgentModel catalog (e.g. "deepseek-ai/deepseek-v4-flash").
+        store.update(
+            transcriptSnapshot: AgentTranscriptAnalyticsSnapshot(),
+            codexUsage: nil,
+            liveSelectedFileCount: nil,
+            selectedAgent: .openCode,
+            selectedModelRaw: "deepseek-ai/deepseek-v4-flash"
+        )
+        XCTAssertEqual(store.runtimeVM.snapshot.effectiveContextWindowTokens, 1_000_000)
+
+        // Bare deepseek-v4-flash (exact catalog match) also resolves to 1M.
+        store.update(
+            transcriptSnapshot: AgentTranscriptAnalyticsSnapshot(),
+            codexUsage: nil,
+            liveSelectedFileCount: nil,
+            selectedAgent: .openCode,
+            selectedModelRaw: "deepseek-v4-flash"
+        )
+        XCTAssertEqual(store.runtimeVM.snapshot.effectiveContextWindowTokens, 1_000_000)
+
+        // Non-deepseek opencode models keep the agent-specific default.
+        store.update(
+            transcriptSnapshot: AgentTranscriptAnalyticsSnapshot(),
+            codexUsage: nil,
+            liveSelectedFileCount: nil,
+            selectedAgent: .openCode,
+            selectedModelRaw: "anthropic/claude-sonnet-4-6"
+        )
+        XCTAssertEqual(store.runtimeVM.snapshot.effectiveContextWindowTokens, 200_000)
+    }
+
     func testCustomSlotMappingUsesBackendContextWindowFallback() {
         let restore = installTemporaryCustomSlotMapping()
         defer { restore() }

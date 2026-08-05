@@ -14,7 +14,7 @@ enum ContextBuilderDefaults {
     // MARK: - Token Budgets
 
     /// Default token budget for discovery runs (UI slider default)
-    static let discoveryTokenBudget: Int = 800_000
+    static let discoveryTokenBudget: Int = 500_000
 
     /// Default token budget for plan generation
     static let planTokenBudget: Int = 600_000

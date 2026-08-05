@@ -57,6 +57,15 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             if let modelContextWindow = model?.contextWindowTokens {
                 return modelContextWindow
             }
+            // DeepSeek V4 family models ship a 1M-token context window. Dynamic
+            // agent model IDs (opencode "provider/model", ACP variants) may not
+            // exact-match the static catalog, so match on the raw model name as
+            // a fallback before resorting to agent-specific defaults.
+            if let selectedModelRaw,
+               selectedModelRaw.contains("deepseek-v4")
+            {
+                return 1_000_000
+            }
             switch selectedAgent {
             case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: return 200_000
             case .openCode, .cursor: return 200_000

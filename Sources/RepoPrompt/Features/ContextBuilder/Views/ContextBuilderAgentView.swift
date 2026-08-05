@@ -254,8 +254,8 @@ struct ContextBuilderAgentView: View {
             return raw.capitalized
         }()
 
-        // In clarify (or nil) mode, show discovery token budget (160k default).
-        // In plan/question/review, show the larger plan budget (120k default).
+        // In clarify (or nil) mode, show discovery token budget.
+        // In plan/question/review, show the larger plan budget.
         let budget = wantsResponse ? viewModel.planTokenBudget : viewModel.tokenBudget
         let tokenBudgetK = budget / 1000
 
@@ -1452,7 +1452,7 @@ private struct ContextBuilderSettingsPopover: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
 
-                        Text("Sets the target size for your final prompt. Use 160k for ChatGPT exports by default, or lower for a more token-efficient prompt.")
+                        Text("Sets the target size for your final prompt. Use the slider to balance prompt richness against token cost; larger budgets suit models with 1M-token context windows.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

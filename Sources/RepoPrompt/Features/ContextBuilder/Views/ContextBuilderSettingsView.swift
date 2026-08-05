@@ -116,7 +116,7 @@ struct ContextBuilderSettingsView: View {
                         in: 10000 ... 1_000_000,
                         step: 5000
                     )
-                    Text("Target prompt size. Use ~160k for ChatGPT/web exports by default, or lower for a more token-efficient prompt.")
+                    Text("Target prompt size. Use the slider to balance prompt richness against token cost; larger budgets suit models with 1M-token context windows.")
                         .font(fontPreset.captionFont)
                         .foregroundColor(.secondary)
                 }
