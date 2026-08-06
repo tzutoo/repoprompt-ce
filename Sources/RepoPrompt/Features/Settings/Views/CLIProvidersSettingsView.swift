@@ -77,10 +77,8 @@ struct CLIProvidersSettingsView: View {
     @State private var isKimiAdvancedExpanded: Bool = false
 
     private var shouldShowStatusBanner: Bool {
-        viewModel.isClaudeCodeConnected
-            || viewModel.isCodexConnected
-            || viewModel.isOpenCodeConnected
-            || viewModel.isCursorConnected
+        // Recommendation banner intentionally hidden per user preference.
+        false
     }
 
     private var codexStatusText: String? {

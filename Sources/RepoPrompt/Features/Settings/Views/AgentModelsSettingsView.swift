@@ -249,61 +249,8 @@ struct AgentModelsSettingsView: View {
 
     @ViewBuilder
     private var recommendationBanner: some View {
-        if viewModel.hasUnsatisfiedRecommendations {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "lightbulb.fill")
-                        .foregroundColor(.yellow)
-                    Text("Recommended setup available")
-                        .font(.headline)
-                    Spacer(minLength: 8)
-                    Button {
-                        viewModel.applyAllRecommendations()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle")
-                            Text("Apply Recommended Setup")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(viewModel.isApplyingAll)
-                }
-
-                previewLines
-            }
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.yellow.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.yellow.opacity(0.25), lineWidth: 1)
-            )
-        } else {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Agent models are up to date")
-                        .font(.callout).bold()
-                    Text("Oracle, Context Builder, and role defaults match the current recommendations.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.green.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.green.opacity(0.25), lineWidth: 1)
-            )
-        }
+        // Recommendation banner intentionally hidden per user preference.
+        EmptyView()
     }
 
     private var previewLines: some View {

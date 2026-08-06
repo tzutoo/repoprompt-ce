@@ -30,15 +30,15 @@ struct ContentViewToolbarContent: ToolbarContent {
             agentChatTitleItem
         }
 
-        // Recommendation wizard button
-        ToolbarItem(placement: .automatic) {
-            if let wizardVM = recommendationWizardViewModel {
-                RecommendationToolbarButtonView(
-                    viewModel: wizardVM,
-                    showPopover: $showRecommendationsPopover
-                )
-            }
-        }
+        // Recommendation wizard button — intentionally hidden per user preference
+        // ToolbarItem(placement: .automatic) {
+        //     if let wizardVM = recommendationWizardViewModel {
+        //         RecommendationToolbarButtonView(
+        //             viewModel: wizardVM,
+        //             showPopover: $showRecommendationsPopover
+        //         )
+        //     }
+        // }
 
         // TOOLBAR POPOVER FIX: Pass bindings to prevent state loss during toolbar re-evaluation
         ToolbarItem(placement: .automatic) {
