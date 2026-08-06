@@ -118,14 +118,14 @@ struct CLIProvidersSettingsView: View {
                 }
                 .padding(.bottom, 4)
 
-                // Recommendation banner
-                if shouldShowStatusBanner {
-                    RecommendationSetupBanner(
-                        windowID: windowID,
-                        message: "CLI providers connected. Check recommendations to optimize your setup.",
-                        closeAction: closeAction
-                    )
-                }
+                // Recommendation banner — intentionally hidden per user preference.
+                // if shouldShowStatusBanner {
+                //     RecommendationSetupBanner(
+                //         windowID: windowID,
+                //         message: "CLI providers connected. Check recommendations to optimize your setup.",
+                //         closeAction: closeAction
+                //     )
+                // }
 
                 AgentPermissionSecureStorageDegradedBanner(diagnostics: providerPermissionsVM.diagnostics)
 

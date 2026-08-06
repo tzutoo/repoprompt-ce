@@ -339,29 +339,12 @@ struct MCPSettingsView: View {
                             destination: .planningModel(promptVM: promptVM)
                         )
 
-                        if mcpTemporarilyDisablePresets {
-                            HStack(spacing: 6) {
-                                Image(systemName: "info.circle.fill")
-                                    .foregroundColor(.orange)
-                                    .font(.system(size: 12))
-                                Text("Presets hidden by Setup Wizard.")
-                                    .font(fontPreset.captionFont)
-                                    .foregroundColor(.secondary)
-                                Button("Show presets") {
-                                    mcpTemporarilyDisablePresetsBinding.wrappedValue = false
-                                    DispatchQueue.main.async {
-                                        NotificationCenter.default.post(name: .recommendationsDidApply, object: nil)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .font(fontPreset.captionFont)
-                                .foregroundColor(.accentColor)
-                            }
-                        } else {
-                            Text("When no presets exist, the Oracle Model is used.")
-                                .font(fontPreset.captionFont)
-                                .foregroundColor(.secondary)
-                        }
+                        // Setup Wizard preset-hidden notice — intentionally hidden per user preference.
+                        // `mcpTemporarilyDisablePresets` still governs preset visibility above;
+                        // only the orange "Presets hidden by Setup Wizard" banner is removed.
+                        Text("When no presets exist, the Oracle Model is used.")
+                            .font(fontPreset.captionFont)
+                            .foregroundColor(.secondary)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 4) {

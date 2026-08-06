@@ -55,14 +55,14 @@ struct APISettingsView: View {
                     }
                 }
 
-                // Recommendation banner (shows when API keys are configured)
-                if hasAnyValidAPIKey {
-                    RecommendationSetupBanner(
-                        windowID: windowID,
-                        message: "API keys configured. Check recommendations to optimize your setup.",
-                        closeAction: closeAction
-                    )
-                }
+                // Recommendation banner — intentionally hidden per user preference.
+                // if hasAnyValidAPIKey {
+                //     RecommendationSetupBanner(
+                //         windowID: windowID,
+                //         message: "API keys configured. Check recommendations to optimize your setup.",
+                //         closeAction: closeAction
+                //     )
+                // }
 
                 // Anthropic
                 apiKeySection(

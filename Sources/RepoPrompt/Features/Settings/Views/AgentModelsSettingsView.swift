@@ -65,9 +65,7 @@ struct AgentModelsSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 scopeRoutingSection
-                if viewModel.showsRecommendationActions {
-                    recommendationBanner
-                }
+                // recommendationBanner — intentionally hidden per user preference.
                 oracleSection
                 contextBuilderSection
                 roleDefaultsSection
@@ -311,20 +309,21 @@ struct AgentModelsSettingsView: View {
 
                 Spacer(minLength: 0)
 
-                if viewModel.showsRecommendationActions,
-                   let recommendedName = viewModel.recommendedOracleModelName,
-                   !viewModel.isOracleRecommendationSatisfied
-                {
-                    Text("Recommended: \(recommendedName)")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-
-                    Button("Apply") {
-                        viewModel.applyOracleRecommendation()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
+                // Inline recommendation — intentionally hidden per user preference.
+                // if viewModel.showsRecommendationActions,
+                //    let recommendedName = viewModel.recommendedOracleModelName,
+                //    !viewModel.isOracleRecommendationSatisfied
+                // {
+                //     Text("Recommended: \(recommendedName)")
+                //         .font(.caption)
+                //         .foregroundColor(.orange)
+                //
+                //     Button("Apply") {
+                //         viewModel.applyOracleRecommendation()
+                //     }
+                //     .buttonStyle(.bordered)
+                //     .controlSize(.small)
+                // }
             }
 
             HStack(spacing: 6) {
@@ -392,20 +391,21 @@ struct AgentModelsSettingsView: View {
 
                     Spacer(minLength: 0)
 
-                    if viewModel.showsRecommendationActions,
-                       let recommendedCB = viewModel.recommendedContextBuilderDescription,
-                       !viewModel.isContextBuilderRecommendationSatisfied
-                    {
-                        Text("Recommended: \(recommendedCB)")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-
-                        Button("Apply") {
-                            viewModel.applyContextBuilderRecommendation()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
+                    // Inline recommendation — intentionally hidden per user preference.
+                    // if viewModel.showsRecommendationActions,
+                    //    let recommendedCB = viewModel.recommendedContextBuilderDescription,
+                    //    !viewModel.isContextBuilderRecommendationSatisfied
+                    // {
+                    //     Text("Recommended: \(recommendedCB)")
+                    //         .font(.caption)
+                    //         .foregroundColor(.orange)
+                    //
+                    //     Button("Apply") {
+                    //         viewModel.applyContextBuilderRecommendation()
+                    //     }
+                    //     .buttonStyle(.bordered)
+                    //     .controlSize(.small)
+                    // }
                 }
             }
         }

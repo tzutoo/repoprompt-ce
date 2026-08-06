@@ -92,7 +92,7 @@ struct AgentModelsPopoverView: View {
             VStack(alignment: .leading, spacing: 14) {
                 header
 
-                recommendationBanner
+                // recommendationBanner — intentionally hidden per user preference.
 
                 Divider()
 

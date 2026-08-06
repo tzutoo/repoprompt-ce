@@ -48,7 +48,8 @@ struct ChatSettingsView: View {
 
                     Spacer()
 
-                    CheckRecommendationsButton(windowID: windowID, closeAction: closeAction)
+                    // CheckRecommendationsButton — intentionally hidden per user preference.
+                    // CheckRecommendationsButton(windowID: windowID, closeAction: closeAction)
                 }
 
                 Divider()
