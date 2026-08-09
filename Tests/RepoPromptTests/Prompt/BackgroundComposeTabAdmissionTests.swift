@@ -247,6 +247,40 @@ final class BackgroundComposeTabAdmissionTests: XCTestCase {
         XCTAssertTrue(attemptedTabIDs.isEmpty)
     }
 
+    func testPostRemovalClearsOnlyRemovedTabTranscriptRefreshSignature() async throws {
+        let fixture = makeFixture(initialTabCount: 2)
+        let removedTabID = try XCTUnwrap(fixture.prompt.activeComposeTabID)
+        let retainedTabID = try XCTUnwrap(
+            fixture.manager.activeWorkspace?.composeTabs.first(where: { $0.id != removedTabID })?.id
+        )
+        let viewModel = makeAgentModeViewModel(prompt: fixture.prompt, manager: fixture.manager)
+        _ = viewModel.session(for: removedTabID)
+
+        AgentTranscriptDebugInstrumentation.reset()
+        defer { AgentTranscriptDebugInstrumentation.reset() }
+        var attempts: [AgentTranscriptRefreshAttemptMetrics] = []
+        AgentTranscriptDebugInstrumentation.configure(.init(
+            refreshAttemptHandler: { attempts.append($0) }
+        ))
+
+        emitTranscriptRefreshAttempt(tabID: removedTabID, inputSignature: "removed-signature")
+        emitTranscriptRefreshAttempt(tabID: retainedTabID, inputSignature: "retained-signature")
+
+        let didRemoveToken = installDidRemoveListener(prompt: fixture.prompt, viewModel: viewModel)
+        defer { fixture.prompt.removeComposeTabsDidRemoveListener(didRemoveToken) }
+        await fixture.prompt.stashTab(removedTabID)
+
+        attempts.removeAll()
+        emitTranscriptRefreshAttempt(tabID: removedTabID, inputSignature: "removed-signature")
+        emitTranscriptRefreshAttempt(tabID: retainedTabID, inputSignature: "retained-signature")
+
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertNil(attempts[0].previousInputSignature)
+        XCTAssertFalse(attempts[0].isConsecutiveDuplicateInput)
+        XCTAssertEqual(attempts[1].previousInputSignature, "retained-signature")
+        XCTAssertTrue(attempts[1].isConsecutiveDuplicateInput)
+    }
+
     func testRejectedConcurrentAgentAdmissionsPreserveActiveLivePinnedSession() async throws {
         let fixture = makeFixture(initialTabCount: 2)
         let tabID = try XCTUnwrap(fixture.prompt.activeComposeTabID)
@@ -324,6 +358,7 @@ final class BackgroundComposeTabAdmissionTests: XCTestCase {
             fileURLsByWorkspaceID: [:],
             revisionsByWorkspaceID: [:],
             digestsByWorkspaceID: [:],
+            healthByWorkspaceID: [:],
             catalogRevision: 1,
             preferredActiveWorkspaceID: currentWorkspace.id,
             publicationSequence: 1
@@ -506,6 +541,22 @@ final class BackgroundComposeTabAdmissionTests: XCTestCase {
         prompt.addComposeTabsDidRemoveListener { tabIDs, reason, workspaceID in
             await viewModel.handleComposeTabsDidRemove(tabIDs, reason: reason, workspaceID: workspaceID)
         }
+    }
+
+    private func emitTranscriptRefreshAttempt(tabID: UUID, inputSignature: String) {
+        AgentTranscriptDebugInstrumentation.emitRefreshAttempt(
+            tabID: tabID,
+            reason: "test",
+            sourceItemsRevision: 0,
+            itemCount: 0,
+            nextSequenceIndex: 0,
+            runState: "idle",
+            selectedAgent: "test",
+            projectionProtection: "none",
+            pendingMutationSummary: "none",
+            incrementalPath: "test",
+            inputSignature: inputSignature
+        )
     }
 }
 

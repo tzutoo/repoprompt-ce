@@ -739,6 +739,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             _ = runService
         }
 
+        func test_startFollowUpRun(
+            for session: TabSession,
+            initialMessage: String
+        ) async {
+            await startFollowUpRun(for: session, initialMessage: initialMessage)
+        }
+
         var test_isCursorModelPollingActive: Bool {
             cursorModelsSubscriptionTask != nil
         }
@@ -792,13 +799,15 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             for session: TabSession,
             ownership: AgentRunOwnership,
             terminalState: AgentSessionRunState,
-            providerRunID: UUID? = nil
+            providerRunID: UUID? = nil,
+            failureReason: AgentRunMCPSnapshot.FailureReason? = nil
         ) -> AgentRunTerminalPublicationEnvelope? {
             makeTerminalPublicationEnvelope(
                 for: session,
                 ownership: ownership,
                 terminalState: terminalState,
-                providerRunID: providerRunID
+                providerRunID: providerRunID,
+                failureReason: failureReason
             )
         }
 
@@ -925,6 +934,33 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             try await workspaceSwitchProvider.test_drainBackgroundCleanup(
                 timeoutNanoseconds: timeoutNanoseconds
             )
+        }
+
+        func test_prepareWorkspaceSwitchSessionDiscard(
+            _ session: TabSession,
+            reason: String = "Cancelled due to workspace switch"
+        ) -> WorkspaceSwitchSessionDiscardContext {
+            prepareWorkspaceSwitchSessionDiscard(session, reason: reason)
+        }
+
+        func test_finalizeWorkspaceSwitchSessionDiscard(
+            _ context: WorkspaceSwitchSessionDiscardContext
+        ) -> WorkspaceSwitchSessionCleanupTarget {
+            finalizeWorkspaceSwitchSessionDiscard(context)
+        }
+
+        func test_scheduleWorkspaceSwitchBackgroundCleanup(
+            targets: [WorkspaceSwitchSessionCleanupTarget],
+            reason: String = "workspace_switch"
+        ) {
+            workspaceSwitchProvider.scheduleBackgroundCleanup(targets: targets, reason: reason)
+        }
+
+        func test_assembleWorkspaceSwitchCleanupTargets(
+            preparedContexts: [WorkspaceSwitchSessionDiscardContext],
+            reason: String = "Cancelled due to workspace switch"
+        ) -> [WorkspaceSwitchSessionCleanupTarget] {
+            assembleWorkspaceSwitchCleanupTargets(preparedContexts: preparedContexts, reason: reason)
         }
 
         func test_setActiveWorkspaceIDForSessionIndex(_ workspaceID: UUID?) {
@@ -1169,9 +1205,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let session = session(for: tabID, createIfNeeded: false)
         if isActive {
             tabsWithActiveAgentRun.insert(tabID)
-            if session?.activeAgentRunStartedAt == nil {
-                session?.activeAgentRunStartedAt = Date()
-            }
+            applyAgentRunActivity(to: session, isActive: true)
             // A new/resumed run clears any stale "completed in background"
             // badge the user hasn't acknowledged yet. The run-state transition
             // observer also handles this on .running, but some provider paths
@@ -1180,8 +1214,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             acknowledgeSidebarRunAttention(tabID: tabID)
         } else {
             tabsWithActiveAgentRun.remove(tabID)
-            session?.activeAgentRunStartedAt = nil
-            session?.deferredActiveAgentRunTimerRollback = nil
+            applyAgentRunActivity(to: session, isActive: false)
             // Intentionally do NOT clear/mark attention here. Provider paths
             // sometimes call setAgentRunActive(false) before session.runState
             // has been mutated to its terminal/waiting value — detection must
@@ -1190,6 +1223,28 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
         publishActiveAgentRunStartedAt(for: tabID, session: session)
         syncComposerUIState()
+    }
+
+    /// Applies run-activity projection only to the exact supplied session.
+    /// A recycled tab identifier must not let a predecessor update its successor.
+    func setAgentRunActive(_ session: TabSession, isActive: Bool) {
+        let tabID = session.tabID
+        guard sessions[tabID] === session else {
+            applyAgentRunActivity(to: session, isActive: isActive)
+            return
+        }
+        setAgentRunActive(tabID, isActive: isActive)
+    }
+
+    private func applyAgentRunActivity(to session: TabSession?, isActive: Bool) {
+        if isActive {
+            if session?.activeAgentRunStartedAt == nil {
+                session?.activeAgentRunStartedAt = Date()
+            }
+        } else {
+            session?.activeAgentRunStartedAt = nil
+            session?.deferredActiveAgentRunTimerRollback = nil
+        }
     }
 
     private func publishActiveAgentRunStartedAt(for tabID: UUID, session: TabSession?) {
@@ -2150,163 +2205,187 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             childAgentRunWaitDrainTimeoutSeconds: Self.childAgentRunWaitDrainTimeoutSeconds
         )
         let hooks = AgentModeRunService.Hooks(
-            estimateRuntimeTokens: { text in
-                Self.estimateRuntimeTokens(for: text)
-            },
-            addUserInputTokensToActiveNonCodexTurn: { [weak self] tokens, session in
-                self?.addUserInputTokensToActiveNonCodexTurn(tokens, for: session)
-            },
-            startNonCodexTurnAccountingIfNeeded: { [weak self] session, initialMessage in
-                self?.startNonCodexTurnAccountingIfNeeded(for: session, initialMessage: initialMessage)
-            },
-            reserveAttachmentsForTurn: { [weak self] attachments, session in
-                self?.reserveAttachmentsForTurn(attachments, session: session)
-            },
-            markAttachmentsConsumed: { [weak self] session, reservationID in
-                self?.markAttachmentsConsumed(for: session, reservationID: reservationID)
-            },
-            stageConsumedAttachmentFilesForDeferredCleanup: { [weak self] attachments, session in
-                self?.stageConsumedAttachmentFilesForDeferredCleanup(attachments, session: session)
-            },
-            consumeDeferredAttachmentCleanup: { [weak self] session, shouldDeleteFiles in
-                self?.consumeDeferredAttachmentCleanup(for: session, shouldDeleteFiles: shouldDeleteFiles)
-            },
-            finalizeAttachmentsForTurn: { [weak self] session, reservationID, disposition in
-                self?.finalizeAttachmentsForTurn(for: session, reservationID: reservationID, disposition: disposition)
-            },
-            setAgentRunActive: { [weak self] tabID, isActive in
-                self?.setAgentRunActive(tabID, isActive: isActive)
-            },
-            updateBindings: { [weak self] session in
-                guard let self else { return }
-                updateBindingsFromSession(session)
-                handleObservedMCPStateChange(for: session)
-            },
-            requestUIRefresh: { [weak self] tabID, urgent in
-                self?.requestUIRefresh(tabID: tabID, urgent: urgent)
-            },
-            scheduleSave: { [weak self] tabID in
-                self?.scheduleSave(for: tabID)
-            },
-            notifyAgentTurnComplete: { [weak self] session in
-                self?.notifyAgentTurnComplete(for: session)
-            },
-            handleHeadlessStreamResult: { [weak self] result, session, runID, runAttemptID in
-                await self?.handleStreamResult(result, session: session, runID: runID, runAttemptID: runAttemptID)
-            },
-            buildHeadlessAgentMessage: { [weak self] session, initialMessage, runID, attachments in
-                self?.buildHeadlessAgentMessage(
-                    session: session,
-                    initialMessageForRun: initialMessage,
-                    runID: runID,
-                    attachments: attachments
-                )
-                    ?? AgentMessage(systemPrompt: "", userMessage: initialMessage)
-            },
-            finalizeStreamingItems: { [weak self] session in
-                self?.finalizeStreamingItems(in: session)
-            },
-            finalizePendingToolCalls: { [weak self] session, terminalState in
-                _ = self?.finalizePendingToolCalls(
-                    in: session,
-                    terminalState: terminalState,
-                    includeExplicitRepoPromptToolCalls: AgentTranscriptQualityRepair.shouldFinalizeExplicitRepoPromptTools(
-                        context: .liveTerminal(agentKind: session.selectedAgent)
+            usage: .init(
+                estimateRuntimeTokens: { text in
+                    Self.estimateRuntimeTokens(for: text)
+                },
+                addUserInputTokensToActiveNonCodexTurn: { [weak self] tokens, session in
+                    self?.addUserInputTokensToActiveNonCodexTurn(tokens, for: session)
+                },
+                startNonCodexTurnAccountingIfNeeded: { [weak self] session, initialMessage in
+                    self?.startNonCodexTurnAccountingIfNeeded(for: session, initialMessage: initialMessage)
+                },
+                finalizeNonCodexTurnUsage: { [weak self] session, promptTokens, completionTokens, contextUsedTokens in
+                    self?.finalizeNonCodexTurnUsageIfNeeded(
+                        for: session,
+                        promptTokens: promptTokens,
+                        completionTokens: completionTokens,
+                        contextUsedTokens: contextUsedTokens
                     )
-                )
-            },
-            finalizePendingToolCallsWithUpperBound: { [weak self] session, terminalState, maxSequenceIndexExclusive in
-                _ = self?.finalizePendingToolCalls(
-                    in: session,
-                    terminalState: terminalState,
-                    includeExplicitRepoPromptToolCalls: AgentTranscriptQualityRepair.shouldFinalizeExplicitRepoPromptTools(
-                        context: .liveTerminal(agentKind: session.selectedAgent)
-                    ),
-                    maxSequenceIndexExclusive: maxSequenceIndexExclusive
-                )
-            },
-            finalizeNonCodexTurnUsage: { [weak self] session, promptTokens, completionTokens, contextUsedTokens in
-                self?.finalizeNonCodexTurnUsageIfNeeded(
-                    for: session,
-                    promptTokens: promptTokens,
-                    completionTokens: completionTokens,
-                    contextUsedTokens: contextUsedTokens
-                )
-            },
-            cancelPendingQuestion: { [weak self] session in
-                self?.cancelPendingQuestion(for: session)
-            },
-            cancelPendingApproval: { [weak self] session in
-                self?.cancelPendingApproval(for: session)
-            },
-            cancelPendingApplyEditsReview: { [weak self] session, reason in
-                self?.cancelPendingApplyEditsReview(for: session, reason: reason)
-            },
-            cancelPendingWorktreeMergeReview: { [weak self] session, reason in
-                self?.cancelPendingWorktreeMergeReview(for: session, reason: reason)
-            },
-            flushPendingAssistantDelta: { [weak self] session in
-                self?.flushPendingAssistantDelta(session)
-            },
-            clearPendingAssistantDelta: { [weak self] session in
-                self?.clearPendingAssistantDelta(session)
-            },
-            prepareTerminalPublication: { [weak self] session in
-                self?.prepareTerminalPublication(for: session)
-            },
-            makeTerminalPublicationEnvelope: { [weak self] session, ownership, terminalState, providerRunID in
-                self?.makeTerminalPublicationEnvelope(
-                    for: session,
-                    ownership: ownership,
-                    terminalState: terminalState,
-                    providerRunID: providerRunID
-                )
-            },
-            publishTerminalCommit: { [weak self] session, revision, successorKind in
-                guard let self else { return .rejected(reason: "view_model_deallocated") }
-                let result = await publishTerminalCommit(
-                    revision,
-                    successorKind: successorKind,
-                    for: session
-                )
-                if result.isResolved,
-                   let sessionID = session.activeAgentSessionID,
-                   let runID = revision.expectedRunID
-                {
-                    mcpRemoveAgentRunOracleReviewContext(sessionID: sessionID, runID: runID)
                 }
-                return result
-            },
-            startFollowUpRun: { [weak self] tabID, initialMessage in
-                Task { [weak self] in
-                    await self?.startAgentRun(tabID: tabID, initialMessage: initialMessage)
+            ),
+            attachments: .init(
+                reserveAttachmentsForTurn: { [weak self] attachments, session in
+                    self?.reserveAttachmentsForTurn(attachments, session: session)
+                },
+                markAttachmentsConsumed: { [weak self] session, reservationID in
+                    self?.markAttachmentsConsumed(for: session, reservationID: reservationID)
+                },
+                stageConsumedAttachmentFilesForDeferredCleanup: { [weak self] attachments, session in
+                    self?.stageConsumedAttachmentFilesForDeferredCleanup(attachments, session: session)
+                },
+                consumeDeferredAttachmentCleanup: { [weak self] session, shouldDeleteFiles in
+                    self?.consumeDeferredAttachmentCleanup(for: session, shouldDeleteFiles: shouldDeleteFiles)
+                },
+                finalizeAttachmentsForTurn: { [weak self] session, reservationID, disposition in
+                    self?.finalizeAttachmentsForTurn(for: session, reservationID: reservationID, disposition: disposition)
                 }
-            },
-            restoreDraftText: { [weak self] tabID, text, message, strategy in
-                self?.restoreComposerDraft(tabID: tabID, text: text, message: message, strategy: strategy)
-            },
-            augmentUserMessageForProviderSend: { [weak self] text, attachments, taggedFileAttachments, session in
-                guard let self else { return text }
-                return await augmentUserMessageForProviderSend(
-                    text,
-                    attachments: attachments,
-                    taggedFileAttachments: taggedFileAttachments,
-                    agent: session?.selectedAgent,
-                    session: session
-                )
-            },
-            stageResumeRecoveryHandoffIfNeeded: { [weak self] session in
-                await self?.stageResumeRecoveryHandoffIfNeeded(for: session)
-            },
-            prependPendingHandoffIfNeeded: { [weak self] text, session in
-                self?.prependPendingHandoffIfNeeded(text, session: session) ?? text
-            },
-            recordPendingHandoffSendOutcome: { [weak self] session, didSend in
-                self?.recordPendingHandoffSendOutcome(for: session, didSend: didSend)
-            },
-            signalMCPInstructionDelivered: { [weak self] session in
-                await self?.signalMCPInstructionDelivered(for: session)
-            }
+            ),
+            presentation: .init(
+                setAgentRunActive: { [weak self] session, isActive in
+                    self?.setAgentRunActive(session, isActive: isActive)
+                },
+                requestUIRefresh: { [weak self] tabID, urgent in
+                    self?.requestUIRefresh(tabID: tabID, urgent: urgent)
+                },
+                notifyAgentTurnComplete: { [weak self] session in
+                    self?.notifyAgentTurnComplete(for: session)
+                }
+            ),
+            bindingObservation: .init(
+                updateBindings: { [weak self] session in
+                    guard let self else { return }
+                    updateBindingsFromSession(session)
+                    handleObservedMCPStateChange(for: session)
+                }
+            ),
+            queuedWorkRecovery: .init(
+                restoreDraftText: { [weak self] tabID, text, message, strategy in
+                    self?.restoreComposerDraft(tabID: tabID, text: text, message: message, strategy: strategy)
+                }
+            ),
+            persistence: .init(
+                scheduleSave: { [weak self] session in
+                    self?.scheduleSave(for: session)
+                }
+            ),
+            transcript: .init(
+                handleHeadlessStreamResult: { [weak self] result, session, runID, runAttemptID in
+                    await self?.handleStreamResult(result, session: session, runID: runID, runAttemptID: runAttemptID)
+                },
+                finalizeStreamingItems: { [weak self] session in
+                    self?.finalizeStreamingItems(in: session)
+                },
+                finalizePendingToolCalls: { [weak self] session, terminalState in
+                    _ = self?.finalizePendingToolCalls(
+                        in: session,
+                        terminalState: terminalState,
+                        includeExplicitRepoPromptToolCalls: AgentTranscriptQualityRepair.shouldFinalizeExplicitRepoPromptTools(
+                            context: .liveTerminal(agentKind: session.selectedAgent)
+                        )
+                    )
+                },
+                finalizePendingToolCallsWithUpperBound: { [weak self] session, terminalState, maxSequenceIndexExclusive in
+                    _ = self?.finalizePendingToolCalls(
+                        in: session,
+                        terminalState: terminalState,
+                        includeExplicitRepoPromptToolCalls: AgentTranscriptQualityRepair.shouldFinalizeExplicitRepoPromptTools(
+                            context: .liveTerminal(agentKind: session.selectedAgent)
+                        ),
+                        maxSequenceIndexExclusive: maxSequenceIndexExclusive
+                    )
+                },
+                flushPendingAssistantDelta: { [weak self] session in
+                    self?.flushPendingAssistantDelta(session)
+                },
+                clearPendingAssistantDelta: { [weak self] session in
+                    self?.clearPendingAssistantDelta(session)
+                }
+            ),
+            providerInput: .init(
+                buildHeadlessAgentMessage: { [weak self] session, initialMessage, runID, attachments in
+                    self?.buildHeadlessAgentMessage(
+                        session: session,
+                        initialMessageForRun: initialMessage,
+                        runID: runID,
+                        attachments: attachments
+                    )
+                        ?? AgentMessage(systemPrompt: "", userMessage: initialMessage)
+                },
+                augmentUserMessageForProviderSend: { [weak self] text, attachments, taggedFileAttachments, session in
+                    guard let self else { return text }
+                    return await augmentUserMessageForProviderSend(
+                        text,
+                        attachments: attachments,
+                        taggedFileAttachments: taggedFileAttachments,
+                        agent: session?.selectedAgent,
+                        session: session
+                    )
+                },
+                stageResumeRecoveryHandoffIfNeeded: { [weak self] session in
+                    await self?.stageResumeRecoveryHandoffIfNeeded(for: session)
+                },
+                prependPendingHandoffIfNeeded: { [weak self] text, session in
+                    self?.prependPendingHandoffIfNeeded(text, session: session) ?? text
+                },
+                recordPendingHandoffSendOutcome: { [weak self] session, didSend in
+                    self?.recordPendingHandoffSendOutcome(for: session, didSend: didSend)
+                }
+            ),
+            interactions: .init(
+                cancelPendingQuestion: { [weak self] session in
+                    self?.cancelPendingQuestion(for: session)
+                },
+                cancelPendingApproval: { [weak self] session in
+                    self?.cancelPendingApproval(for: session)
+                },
+                cancelPendingApplyEditsReview: { [weak self] session, reason in
+                    self?.cancelPendingApplyEditsReview(for: session, reason: reason)
+                },
+                cancelPendingWorktreeMergeReview: { [weak self] session, reason in
+                    self?.cancelPendingWorktreeMergeReview(for: session, reason: reason)
+                }
+            ),
+            terminalSettlement: .init(
+                prepareTerminalPublication: { [weak self] session in
+                    self?.prepareTerminalPublication(for: session)
+                },
+                makeTerminalPublicationEnvelope: { [weak self] session, ownership, terminalState, providerRunID, failureReason in
+                    self?.makeTerminalPublicationEnvelope(
+                        for: session,
+                        ownership: ownership,
+                        terminalState: terminalState,
+                        providerRunID: providerRunID,
+                        failureReason: failureReason
+                    )
+                },
+                publishTerminalCommit: { [weak self] session, revision, successorKind in
+                    guard let self else { return .rejected(reason: "view_model_deallocated") }
+                    let result = await publishTerminalCommit(
+                        revision,
+                        successorKind: successorKind,
+                        for: session
+                    )
+                    if result.isResolved,
+                       let sessionID = session.activeAgentSessionID,
+                       let runID = revision.expectedRunID
+                    {
+                        mcpRemoveAgentRunOracleReviewContext(sessionID: sessionID, runID: runID)
+                    }
+                    return result
+                }
+            ),
+            continuation: .init(
+                startFollowUpRun: { [weak self] session, initialMessage in
+                    Task { @MainActor [weak self, weak session] in
+                        guard let self, let session else { return }
+                        await startFollowUpRun(for: session, initialMessage: initialMessage)
+                    }
+                },
+                signalMCPInstructionDelivered: { [weak self] session in
+                    await self?.signalMCPInstructionDelivered(for: session)
+                }
+            )
         )
         let toolTrackingHooks = makeToolTrackingHooks()
         // Wire hooks so per-tab Claude handlers get proper viewmodel callbacks.
@@ -2316,6 +2395,26 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             hooks: hooks,
             toolTrackingHooks: toolTrackingHooks
         )
+    }
+
+    private func startFollowUpRun(
+        for session: TabSession,
+        initialMessage: String
+    ) async {
+        guard sessions[session.tabID] === session else {
+            session.mcpFollowUpRunPending = false
+            #if DEBUG
+                AgentModePerfDiagnostics.increment("run.followUp.dropped.staleSession", tabID: session.tabID)
+                AgentModePerfDiagnostics.event(
+                    "run.followUp.dropped",
+                    tabID: session.tabID,
+                    fields: ["reason": "staleSession"]
+                )
+            #endif
+            handleObservedMCPStateChange(for: session)
+            return
+        }
+        await startAgentRun(tabID: session.tabID, initialMessage: initialMessage)
     }
 
     /// Build the generic orchestration hooks that provider tool tracking handlers need.
@@ -4970,7 +5069,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         for session: TabSession,
         ownership: AgentRunOwnership,
         terminalState: AgentSessionRunState,
-        providerRunID: UUID?
+        providerRunID: UUID?,
+        failureReason: AgentRunMCPSnapshot.FailureReason?
     ) -> AgentRunTerminalPublicationEnvelope? {
         guard let epoch = ownership.turnEpoch,
               let context = session.mcpControlContext,
@@ -4980,7 +5080,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
               let snapshot = mcpSnapshot(
                   for: session,
                   canonicalTerminalState: terminalState,
-                  canonicalProviderRunID: providerRunID
+                  canonicalProviderRunID: providerRunID,
+                  canonicalFailureReason: failureReason
               )
         else {
             return nil
@@ -5407,7 +5508,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     func mcpSnapshot(
         for session: TabSession,
         canonicalTerminalState: AgentSessionRunState? = nil,
-        canonicalProviderRunID: UUID? = nil
+        canonicalProviderRunID: UUID? = nil,
+        canonicalFailureReason: AgentRunMCPSnapshot.FailureReason? = nil
     ) -> AgentRunMCPSnapshot? {
         guard let context = session.mcpControlContext else { return nil }
         let interaction = canonicalTerminalState == nil ? mcpPendingInteraction(for: session) : nil
@@ -5518,7 +5620,6 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if let name = ownerValidatedSessionIndex[resolvedSessionID]?.name { return name }
             return "Agent Session"
         }()
-        let failureReason = AgentRunMCPSnapshot.FailureReason.classify(status: status, statusText: resolvedStatusText)
         let providerRunID: UUID? = if canonicalTerminalState != nil {
             canonicalProviderRunID ?? AgentModeProcessRunIdentity.mostRecentTranscriptProcessRunID(for: session)
         } else if status.isTerminal {
@@ -5526,6 +5627,25 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         } else {
             session.runID
         }
+        let failureReason: AgentRunMCPSnapshot.FailureReason? = {
+            if let canonicalFailureReason {
+                return canonicalFailureReason
+            }
+            // Live post-terminal polls reuse the reason stamped by the terminal
+            // commit barrier; the terminal-state and run-identity guards keep a
+            // stale revision from another terminal state/attempt from
+            // contaminating this snapshot. Text classification remains only as
+            // the restored/legacy fallback.
+            if canonicalTerminalState == nil,
+               let revision = session.lastTerminalCommitRevision,
+               let stampedReason = revision.failureReason,
+               revision.terminalState.mcpTerminalSnapshotStatus == status,
+               revision.expectedRunID == providerRunID
+            {
+                return stampedReason
+            }
+            return AgentRunMCPSnapshot.FailureReason.classify(status: status, statusText: resolvedStatusText)
+        }()
         return AgentRunMCPSnapshot(
             sessionID: resolvedSessionID,
             runID: providerRunID,
@@ -8363,7 +8483,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     currentBlockIdentityDigest,
                     currentSemanticDigest
                 ])
-                AgentTranscriptDebugInstrumentation.presentationPublishHandler?(.init(
+                AgentTranscriptDebugInstrumentation.emitPresentationPublish(.init(
                     visibleRowCount: candidateSnapshot.visibleRows.count,
                     workingRowCount: candidateSnapshot.workingRows.count,
                     visibleBlockCount: candidateSnapshot.visibleBlocks.count,
@@ -10319,7 +10439,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let newBlockSemanticDigest = AgentTranscriptDebugInstrumentation.blockSemanticSignature(newBlocks)
                 let previousBlockIdentityDigest = AgentTranscriptDebugInstrumentation.blockIdentitySignature(previousBlocks)
                 let newBlockIdentityDigest = AgentTranscriptDebugInstrumentation.blockIdentitySignature(newBlocks)
-                AgentTranscriptDebugInstrumentation.projectionIdentityHandler?(.init(
+                AgentTranscriptDebugInstrumentation.emitProjectionIdentity(.init(
                     previousRowCount: previousRows.count,
                     newRowCount: newRows.count,
                     previousBlockCount: previousBlocks.count,
@@ -10836,15 +10956,21 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     // MARK: - Workspace Handling
 
+    /// First, prepare phase of workspace-switch discard: bookkeeping and
+    /// cancellation preparation only. Provider/controller ownership is NOT
+    /// captured here — the graceful `cancelAgentRun` loop that follows still
+    /// needs the live session's provider state for interrupt, terminal
+    /// publication, and provider-session capture. Ownership transfer happens in
+    /// `finalizeWorkspaceSwitchSessionDiscard` after all cancellation awaits.
     private func prepareWorkspaceSwitchSessionDiscard(
         _ session: TabSession,
         reason: String
-    ) -> WorkspaceSwitchSessionCleanupTarget {
-        let target = WorkspaceSwitchSessionCleanupTarget(
+    ) -> WorkspaceSwitchSessionDiscardContext {
+        let context = WorkspaceSwitchSessionDiscardContext(
             tabID: session.tabID,
             session: session,
             boundSessionID: boundSessionID(for: session.tabID),
-            runID: session.runID
+            preparedRunID: session.runID
         )
         removePendingUIRefresh(for: session.tabID)
         cancelPersistedLoad(for: session)
@@ -10860,7 +10986,107 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if let runID = session.runID {
             _ = mcpRunToolCanceller(runID, "workspace_switch")
         }
-        return target
+        return context
+    }
+
+    /// Assembles the finalize-phase cleanup targets from the prepared discard
+    /// contexts plus the current authoritative contents of `sessions`. Runs
+    /// inside the no-await ownership-transfer slice. `workspaceSwitchInFlight`
+    /// is not a universal admission fence, so a session may have been inserted
+    /// into `sessions` (new tab) or replaced (same tab, new object) while the
+    /// sequential cancellation loop was suspended; every such session is about
+    /// to be erased by `sessions.removeAll()` and must be finalized too, or its
+    /// provider/controllers/run routing would leak. Late-admitted sessions get
+    /// the synchronous prepare bookkeeping here and skip graceful cancellation
+    /// — context-terminal semantics, equivalent to detached teardown of a run
+    /// that started during the switch. Each session object is finalized exactly
+    /// once (object identity), so nothing is cleaned up twice.
+    ///
+    /// Order matters: the authoritative map contents are finalized FIRST, so
+    /// tabID-keyed coordinator state (Claude/Codex tool trackers, launch
+    /// metadata) is captured into the handle of the object that currently owns
+    /// the tab. Finalizing a stale same-tab predecessor first would hand that
+    /// tab-keyed state to the wrong target. Stale prepared objects — removed or
+    /// replaced during the cancellation awaits — are finalized afterwards; by
+    /// then they hold only their own instance state, which is exactly what
+    /// still needs retiring.
+    private func assembleWorkspaceSwitchCleanupTargets(
+        preparedContexts: [WorkspaceSwitchSessionDiscardContext],
+        reason: String
+    ) -> [WorkspaceSwitchSessionCleanupTarget] {
+        var contextsBySessionIdentity: [ObjectIdentifier: WorkspaceSwitchSessionDiscardContext] = [:]
+        for context in preparedContexts {
+            contextsBySessionIdentity[ObjectIdentifier(context.session)] = context
+        }
+        var targets: [WorkspaceSwitchSessionCleanupTarget] = []
+        var finalizedSessionIdentities = Set<ObjectIdentifier>()
+        // Authoritative map contents first: use the matching prepared context
+        // when the object identity matches; late-admitted or replacement
+        // objects get synchronous prepare bookkeeping here.
+        for session in sessions.values {
+            let identity = ObjectIdentifier(session)
+            let context = contextsBySessionIdentity[identity]
+                ?? prepareWorkspaceSwitchSessionDiscard(session, reason: reason)
+            targets.append(finalizeWorkspaceSwitchSessionDiscard(context))
+            finalizedSessionIdentities.insert(identity)
+        }
+        // Then prepared contexts whose objects were removed or replaced during
+        // the cancellation awaits — their instance handles still need retiring.
+        for context in preparedContexts {
+            let identity = ObjectIdentifier(context.session)
+            guard !finalizedSessionIdentities.contains(identity) else { continue }
+            targets.append(finalizeWorkspaceSwitchSessionDiscard(context))
+            finalizedSessionIdentities.insert(identity)
+        }
+        return targets
+    }
+
+    /// Second, finalize phase of workspace-switch discard: the ownership-transfer
+    /// point. Must run after every cancellation await and in the same
+    /// uninterrupted main-actor slice as `sessions.removeAll()` — no suspension
+    /// may separate finalize from discard, so a successor can never install or
+    /// observe state on a session between ownership transfer and discard.
+    /// Everything the background cleanup task needs is snapshotted here;
+    /// afterwards the discarded session holds no provider, controller, or run
+    /// identity.
+    private func finalizeWorkspaceSwitchSessionDiscard(
+        _ context: WorkspaceSwitchSessionDiscardContext
+    ) -> WorkspaceSwitchSessionCleanupTarget {
+        let session = context.session
+        var runIDs: [UUID] = []
+        if let preparedRunID = context.preparedRunID {
+            runIDs.append(preparedRunID)
+        }
+        if let currentRunID = session.runID, !runIDs.contains(currentRunID) {
+            // A successor run started during the cancellation awaits; its MCP
+            // routing needs cleanup alongside the prepared run's.
+            runIDs.append(currentRunID)
+        }
+        let detachedClaude = claudeCoordinator.detachForWorkspaceSwitchFinalizeSync(session)
+        let detachedCodex = codexCoordinator.detachForWorkspaceSwitchFinalizeSync(
+            session,
+            runIDs: runIDs
+        )
+        let provider = session.provider
+        session.provider = nil
+        session.acpSteeringFlushTask?.cancel()
+        session.acpSteeringFlushTask = nil
+        session.pendingACPSteeringInstructions.removeAll()
+        let acpController = session.acpController
+        session.acpController = nil
+        // Workspace switch is context-terminal for the discarded session: force
+        // semantics are correct here, and this slice is provably pre-successor.
+        AgentModeProcessRunIdentity.clearProcessRunID(for: session)
+        return WorkspaceSwitchSessionCleanupTarget(
+            tabID: context.tabID,
+            session: session,
+            boundSessionID: context.boundSessionID,
+            runIDs: runIDs,
+            provider: provider,
+            acpController: acpController,
+            detachedClaude: detachedClaude,
+            detachedCodex: detachedCodex
+        )
     }
 
     func handleWorkspaceSwitch(_ workspace: WorkspaceModel?) async {
@@ -10912,21 +11138,32 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             let teardownStartMS = WorkspaceRestorePerfLog.timestampMSIfEnabled()
             let teardownSessionCount = sessions.count
         #endif
-        let cleanupTargets = sessions.values.map {
+        let discardContexts = sessions.values.map {
             prepareWorkspaceSwitchSessionDiscard(
                 $0,
                 reason: "Cancelled due to workspace switch"
             )
         }
+        // Safe to iterate across the awaits: `sessions.values` is a
+        // copy-on-write snapshot taken when the iterator is created, so map
+        // mutations during the suspensions cannot invalidate it, and
+        // cancelAgentRun(tabID:) re-resolves the live map by tab ID.
         for session in sessions.values where session.runState.isActive {
             await cancelAgentRun(tabID: session.tabID)
         }
+        // Ownership-transfer slice: from finalize through scheduleBackgroundCleanup
+        // this must stay one uninterrupted main-actor region with no await, so a
+        // successor can never install or observe state on a discarded session
+        // between handle capture and discard. Targets are assembled from the
+        // prepared contexts plus the map's current contents, so sessions
+        // admitted or replaced during the cancellation awaits are finalized too.
+        let cleanupTargets = assembleWorkspaceSwitchCleanupTargets(
+            preparedContexts: discardContexts,
+            reason: "Cancelled due to workspace switch"
+        )
         claudeCoordinator.detachAllClaudeToolTrackingHandlersForWorkspaceSwitch()
         codexCoordinator.stop()
         claudeCoordinator.stop()
-        for sessionID in Set(cleanupTargets.compactMap(\.boundSessionID)) {
-            await releaseSessionWorktreeOwnership(sessionID: sessionID)
-        }
         #if DEBUG
             WorkspaceRestorePerfLog.event(
                 "agentMode.workspaceSwitch.discardPrepared",
@@ -10949,13 +11186,20 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         mcpControlledTabIDs.removeAll()
         tabDraftText.removeAll()
         sidebarObservedRunStateByTabID.removeAll()
-        await applyEditsApprovalStore.cleanupWindowScopes(
-            windowID: windowID,
-            reason: "Cancelled due to workspace switch"
-        )
         workspaceSwitchProvider.scheduleBackgroundCleanup(
             targets: cleanupTargets,
             reason: "workspace_switch"
+        )
+        // End of the no-await ownership-transfer slice. The awaits below are
+        // safe after discard: worktree release is keyed by session ID and does
+        // not read `sessions`, and window-scope approval cleanup is
+        // window-scoped.
+        for sessionID in Set(cleanupTargets.compactMap(\.boundSessionID)) {
+            await releaseSessionWorktreeOwnership(sessionID: sessionID)
+        }
+        await applyEditsApprovalStore.cleanupWindowScopes(
+            windowID: windowID,
+            reason: "Cancelled due to workspace switch"
         )
         guard sessionIndexStore.isWorkspaceActivationCurrent(owner, workspace: workspace),
               sessionIndexStore.isOwnerCurrent(owner)
@@ -11642,6 +11886,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             #endif
         }
+        #if DEBUG
+            AgentTranscriptDebugInstrumentation.removeRefreshInputSignatures(for: tabIDs)
+        #endif
     }
 
     // MARK: - Persistence
@@ -11723,6 +11970,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             guard !Task.isCancelled else { return }
             await self?.saveSession(for: tabID)
         }
+    }
+
+    /// Schedules persistence only while the supplied object is still the live
+    /// owner of its tab identifier. Stale predecessors must not save successors.
+    func scheduleSave(for session: TabSession) {
+        guard sessions[session.tabID] === session else { return }
+        scheduleSave(for: session.tabID)
     }
 
     func scheduleSaveForCommandOutput(tabID: UUID, minInterval: TimeInterval = 5.0) {
