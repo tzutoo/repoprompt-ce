@@ -55,3 +55,5 @@ Icon
 .vscode/
 .idea/
 .claude/settings.local.json
+.reasonix/
+reasonix.toml
