@@ -123,6 +123,56 @@ final class OpenCodeACPLaunchResolverTests: XCTestCase {
         XCTAssertFalse(CLILaunchProfiles.cursor.supplementalSearchPaths.contains(openCodeHomeBin))
     }
 
+    func testV2OnlyInstallResolvesOpenCode2FallbackBasename() async throws {
+        let directory = try makeTemporaryDirectory()
+        let probePathRecord = directory.appendingPathComponent("probe-path")
+        let executable = try makeExecutable(in: directory, basename: "opencode2", marker: probePathRecord)
+        let environment = [
+            "PATH": directory.path,
+            "SHELL": "/bin/false"
+        ]
+        let resolver = OpenCodeACPLaunchResolver(environmentProvider: { _ in environment })
+        let config = OpenCodeAgentConfig(
+            commandName: "opencode",
+            additionalPathHints: [],
+            includeRepoPromptMCPServer: false,
+            includeManagedConfigOverlay: false
+        )
+
+        let support = try await resolver.probeSupport(for: config)
+        let launch = try resolver.resolvedLaunch(for: config)
+        let probedPath = try String(contentsOf: probePathRecord, encoding: .utf8)
+
+        XCTAssertEqual(support, .supported)
+        XCTAssertEqual(launch.command, try canonicalExecutablePath(executable))
+        XCTAssertEqual(launch.arguments, ["acp"])
+        XCTAssertEqual(probedPath, launch.command)
+    }
+
+    func testOpenCodeV1TakesPriorityOverOpenCode2Fallback() async throws {
+        let directory = try makeTemporaryDirectory()
+        let v1Executable = try makeExecutable(in: directory, output: "V1 OpenCode ACP")
+        let v2Executable = try makeExecutable(in: directory, basename: "opencode2", output: "V2 OpenCode ACP")
+        let environment = [
+            "PATH": directory.path,
+            "SHELL": "/bin/false"
+        ]
+        let resolver = OpenCodeACPLaunchResolver(environmentProvider: { _ in environment })
+        let config = OpenCodeAgentConfig(
+            commandName: "opencode",
+            additionalPathHints: [],
+            includeRepoPromptMCPServer: false,
+            includeManagedConfigOverlay: false
+        )
+
+        let support = try await resolver.probeSupport(for: config)
+        let launch = try resolver.resolvedLaunch(for: config)
+
+        XCTAssertEqual(support, .supported)
+        XCTAssertEqual(launch.command, try canonicalExecutablePath(v1Executable))
+        XCTAssertNotEqual(launch.command, try canonicalExecutablePath(v2Executable))
+    }
+
     func testRepeatedProbeRefreshesCurrentEnvironmentBeforeSpawn() async throws {
         let firstDirectory = try makeTemporaryDirectory()
         let secondDirectory = try makeTemporaryDirectory()
@@ -280,12 +330,13 @@ final class OpenCodeACPLaunchResolverTests: XCTestCase {
     @discardableResult
     private func makeExecutable(
         in directory: URL,
+        basename: String = "opencode",
         marker: URL? = nil,
         output: String = "OpenCode ACP support",
         exitStatus: Int32 = 0,
         sleepSeconds: Int? = nil
     ) throws -> URL {
-        let executable = directory.appendingPathComponent("opencode")
+        let executable = directory.appendingPathComponent(basename)
         var lines = ["#!/bin/sh"]
         if let marker {
             lines.append("printf '%s' \"$0\" > '\(marker.path)'")

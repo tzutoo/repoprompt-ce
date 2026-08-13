@@ -219,22 +219,32 @@ final class OpenCodeACPLaunchResolver: @unchecked Sendable {
             candidates.append(expanded)
         }
 
-        append(
-            CommandPathResolver.resolve(
-                configuredCommand,
-                environment: environment,
-                additionalPaths: additionalPathHints,
-                preferredBasenames: [configuredCommand],
-                shellLookupMode: .fallbackOnly
+        // V2 installs a separate `opencode2` binary; search it after `opencode` so V1 keeps
+        // priority when both exist while V2-only machines still resolve.
+        let searchBasenames = [configuredCommand] + Self.fallbackBasenames(for: configuredCommand)
+        for basename in searchBasenames {
+            append(
+                CommandPathResolver.resolve(
+                    basename,
+                    environment: environment,
+                    additionalPaths: additionalPathHints,
+                    preferredBasenames: [basename],
+                    shellLookupMode: .fallbackOnly
+                )
             )
-        )
-        for directory in CommandPathResolver.mergedPathComponents(
-            environment: environment,
-            additionalPaths: additionalPathHints
-        ) {
-            append((directory as NSString).appendingPathComponent(configuredCommand))
+            for directory in CommandPathResolver.mergedPathComponents(
+                environment: environment,
+                additionalPaths: additionalPathHints
+            ) {
+                append((directory as NSString).appendingPathComponent(basename))
+            }
         }
         return candidates
+    }
+
+    private static func fallbackBasenames(for configuredCommand: String) -> [String] {
+        guard configuredCommand.caseInsensitiveCompare("opencode") == .orderedSame else { return [] }
+        return ["opencode2"]
     }
 
     private func firstValidLaunch(

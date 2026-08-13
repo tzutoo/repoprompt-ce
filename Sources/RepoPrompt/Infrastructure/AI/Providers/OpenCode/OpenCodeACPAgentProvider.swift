@@ -123,7 +123,7 @@ struct OpenCodeACPAgentProvider: ACPAgentProvider {
         if let runnerError = error as? CLIProcessRunnerError,
            case .commandNotFound = runnerError
         {
-            return AIProviderError.invalidConfiguration(detail: "OpenCode CLI not found. Install it and ensure `opencode` is available on PATH.")
+            return AIProviderError.invalidConfiguration(detail: "OpenCode CLI not found. Install it and ensure `opencode` or `opencode2` is available on PATH.")
         }
         if error is OpenCodeACPLaunchResolutionError || error is ExecutableFileIdentityError {
             return AIProviderError.invalidConfiguration(detail: error.localizedDescription)
