@@ -304,6 +304,8 @@ enum AgentModel: String, CaseIterable, Codable {
             ]
         case .openCode:
             [.defaultModel, .deepseekV4Flash]
+        case .grokBuild:
+            [.defaultModel]
         case .cursor:
             [.cursorAuto, .cursorComposer2, .deepseekV4Flash]
         case .claudeCodeGLM:
