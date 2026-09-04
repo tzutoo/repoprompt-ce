@@ -186,6 +186,14 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Verify authenticated protected-main authority
+        env:
+          TIP_SOURCE_GH_TOKEN: ${{ github.token }}
+          TIP_SOURCE_REPOSITORY: ${{ github.repository }}
+          TIP_SOURCE_BRANCH: main
+          TIP_COMMIT: ${{ needs.setup.outputs.commit }}
+        run: ./trusted-control-plane/Scripts/verify_tip_source_commit.sh "credential preflight"
+
       - name: Validate role-selected Tip credentials
         env:
           SETUP_ROLLOUT_ROLE: ${{ needs.setup.outputs.rollout-role }}
@@ -315,9 +323,9 @@ jobs:
           if [[ "$ROLLOUT_ROLE" == "transition" ]]; then
             printf '%s' "$SUCCESSOR_INSTALLER_P12_BASE64" | base64 --decode > "$INSTALLER_CERTIFICATE_PATH" || fail "successor installer P12 write failed"
             security import "$INSTALLER_CERTIFICATE_PATH" -k "$PREFLIGHT_KEYCHAIN_PATH" -P "$SUCCESSOR_INSTALLER_P12_PASSWORD" \
-              -T /usr/bin/productbuild -T /usr/bin/security \
+              -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/security \
               >/dev/null || fail "successor installer P12 import failed"
-            security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild: \
+            security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild:,productsign: \
               -s -k "$CI_KEYCHAIN_PASSWORD" "$PREFLIGHT_KEYCHAIN_PATH" \
               >/dev/null || fail "successor installer key partition setup failed"
             security find-identity -v -p basic "$PREFLIGHT_KEYCHAIN_PATH" |
@@ -485,8 +493,8 @@ jobs:
             installer_certificate="$RUNNER_TEMP/repoprompt-tip-installer.p12"
             printf '%s' "$SUCCESSOR_INSTALLER_P12_BASE64" | base64 --decode > "$installer_certificate"
             security import "$installer_certificate" -k "$KEYCHAIN_PATH" \
-              -P "$SUCCESSOR_INSTALLER_P12_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/security
-            security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild: \
+              -P "$SUCCESSOR_INSTALLER_P12_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild:,productsign: \
               -s -k "$CI_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
             verify_identity basic "$EXPECTED_INSTALLER_IDENTITY" installer
             rm -f "$installer_certificate"
@@ -669,6 +677,7 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/repoprompt-tip.keychain-db" || true
           rm -rf "$RUNNER_TEMP/repoprompt-tip-secrets"
           rm -f "$RUNNER_TEMP/repoprompt-tip.p12"
+          rm -f "$RUNNER_TEMP/repoprompt-tip-installer.p12"
           rm -f "$RUNNER_TEMP/repoprompt-tip-successor.p12"
           rm -f "$RUNNER_TEMP/repoprompt-successor-identity-anchor"
 
@@ -811,6 +820,7 @@ jobs:
           TIP_TAG: ${{ needs.setup.outputs.tag }}
           TIP_UPDATE_REPOSITORY: ${{ vars.TIP_UPDATE_REPOSITORY || 'repoprompt/repoprompt-ce-tip-updates' }}
           TIP_GH_TOKEN: ${{ secrets.TIP_UPDATE_REPOSITORY_TOKEN }}
+          TIP_SOURCE_GH_TOKEN: ${{ github.token }}
           TIP_SOURCE_REPOSITORY: ${{ github.repository }}
           TIP_SOURCE_BRANCH: main
           TIP_PUBLISH_INSTALLATION_TYPE: ${{ needs.setup.outputs.installation-type }}
