@@ -35,6 +35,10 @@ enum AgentModeMCPToolPolicy {
         .classification(for: .agentModeGrokBuildEngineer)
         .grantedCapabilities
     static let grokBuildGrantedTools = MCPToolCapabilities.toolNames(for: grokBuildGrantedCapabilities)
+    static let piGrantedCapabilities = MCPClientToolPolicyCatalog
+        .classification(for: .agentModePiEngineer)
+        .grantedCapabilities
+    static let piGrantedTools = MCPToolCapabilities.toolNames(for: piGrantedCapabilities)
 
     static func grantedTools(forAgent agent: AgentProviderKind) -> Set<String> {
         switch agent {
@@ -48,6 +52,8 @@ enum AgentModeMCPToolPolicy {
             cursorGrantedTools
         case .grokBuild:
             grokBuildGrantedTools
+        case .piAgent:
+            piGrantedTools
         }
     }
 }

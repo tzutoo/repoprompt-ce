@@ -6,6 +6,7 @@ enum AgentProviderBindingID: String, CaseIterable, Hashable {
     case openCode
     case cursor
     case grokBuild
+    case pi
 
     var displayName: String {
         switch self {
@@ -19,6 +20,8 @@ enum AgentProviderBindingID: String, CaseIterable, Hashable {
             "Cursor CLI"
         case .grokBuild:
             "Grok Build"
+        case .pi:
+            "pi"
         }
     }
 }
@@ -36,6 +39,8 @@ extension AgentProviderKind {
             .cursor
         case .grokBuild:
             .grokBuild
+        case .piAgent:
+            .pi
         }
     }
 }

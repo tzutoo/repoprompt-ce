@@ -1346,6 +1346,9 @@ private enum AppSettingsMCPRegistry {
             .cursor
         case .grokBuild:
             .grokBuild
+        case .piAgent:
+            // pi app-settings candidates arrive with the pi settings slice.
+            nil
         }
     }
 

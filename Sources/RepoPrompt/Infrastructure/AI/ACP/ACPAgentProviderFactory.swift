@@ -46,7 +46,7 @@ enum ACPAgentProviderFactory {
                     apiKey: grokAPIKeyProvider()
                 )
             )
-        case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .codexExec:
+        case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .codexExec, .piAgent:
             nil
         }
     }

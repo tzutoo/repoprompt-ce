@@ -22,6 +22,7 @@ package enum MCPClientToolPolicyProfile: String, CaseIterable, Sendable {
     case agentModeOpenCodeEngineer = "agent_mode_open_code_engineer"
     case agentModeCursorEngineer = "agent_mode_cursor_engineer"
     case agentModeGrokBuildEngineer = "agent_mode_grok_build_engineer"
+    case agentModePiEngineer = "agent_mode_pi_engineer"
 }
 
 package struct MCPClientToolPolicyClassification: Sendable {
@@ -158,6 +159,14 @@ package enum MCPClientToolPolicyCatalog {
         ),
         .agentModeGrokBuildEngineer: .init(
             profile: .agentModeGrokBuildEngineer,
+            restrictedCapabilities: agentModeRestrictedCapabilities,
+            grantedCapabilities: agentModeNativeGrantedCapabilities,
+            role: .engineer,
+            allowsAgentExternalControlTools: false,
+            annotationProfile: .canonical
+        ),
+        .agentModePiEngineer: .init(
+            profile: .agentModePiEngineer,
             restrictedCapabilities: agentModeRestrictedCapabilities,
             grantedCapabilities: agentModeNativeGrantedCapabilities,
             role: .engineer,

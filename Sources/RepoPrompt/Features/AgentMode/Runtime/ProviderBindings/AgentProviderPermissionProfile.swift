@@ -155,11 +155,24 @@ extension AgentProviderPermissionProfile {
         }
     }
 
+    func piPermissionLevel(
+        userConfigured: PiAgentToolPreferences.PermissionLevel = PiAgentToolPreferences.permissionLevel()
+    ) -> PiAgentToolPreferences.PermissionLevel {
+        switch self {
+        case .userConfigured: userConfigured
+        case .mcpSafeDefaults: .mcpOnly
+        case let .providerOverride(.pi(level)): level
+        case .providerOverride: .mcpOnly
+        }
+    }
+
     func acpSessionModeID(for agent: AgentProviderKind) -> String? {
         switch agent {
         case .openCode:
             openCodeSessionModeID
         case .cursor, .grokBuild:
+            nil
+        case .piAgent:
             nil
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .codexExec:
             nil

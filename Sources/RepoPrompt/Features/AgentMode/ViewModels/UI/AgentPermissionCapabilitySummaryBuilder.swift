@@ -188,6 +188,22 @@ struct AgentPermissionCapabilitySummaryBuilder {
                 approvalModeDescription: level.launchesWithAlwaysApprove ? "Always-approve: on" : "Always-approve: off",
                 warnings: warnings
             )
+        case .pi:
+            let level = piPermissionLevel(profile: profile)
+            let warnings = level == .fullAccess
+                ? ["pi launches with its full built-in tool set — pi's own shell and edit tools run without per-request confirmation."]
+                : []
+            return AgentPermissionCapabilitySummary(
+                providerID: providerID,
+                providerName: providerID.displayName,
+                isAvailable: isAvailable,
+                fileMutation: "Launch tools: \(level.displayName)",
+                shell: level == .fullAccess ? "pi bash tool enabled" : "pi bash tool disabled",
+                externalMCP: "RepoPrompt MCP via pi-mcp-adapter",
+                search: "Managed by pi CLI",
+                approvalModeDescription: "Tool surface: \(level.displayName)",
+                warnings: warnings
+            )
         }
     }
 
@@ -210,6 +226,7 @@ struct AgentPermissionCapabilitySummaryBuilder {
         case .openCode: availability.openCodeAvailable
         case .cursor: availability.cursorAvailable
         case .grokBuild: availability.grokBuildAvailable
+        case .pi: availability.piAvailable
         }
     }
 
@@ -269,6 +286,19 @@ struct AgentPermissionCapabilitySummaryBuilder {
             level
         case .providerOverride:
             .managedDefault
+        }
+    }
+
+    private func piPermissionLevel(profile: AgentProviderPermissionProfile) -> PiAgentToolPreferences.PermissionLevel {
+        switch profile {
+        case .userConfigured:
+            PiAgentToolPreferences.permissionLevel()
+        case .mcpSafeDefaults:
+            .mcpOnly
+        case let .providerOverride(.pi(level)):
+            level
+        case .providerOverride:
+            .mcpOnly
         }
     }
 

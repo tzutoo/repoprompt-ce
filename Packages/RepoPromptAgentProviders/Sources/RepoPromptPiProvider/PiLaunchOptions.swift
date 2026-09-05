@@ -48,7 +48,7 @@ public enum PiToolProfile: Equatable, Sendable {
     /// `--tools <list>`: explicit allowlist across built-in, extension, and custom tools.
     case allowlist([String])
 
-    var arguments: [String] {
+    public var arguments: [String] {
         switch self {
         case .standard:
             []

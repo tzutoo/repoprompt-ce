@@ -143,6 +143,13 @@ final class AgentProviderPreferenceSnapshotStore {
                 autoApproveAllACPToolPermissions: level.launchesWithAlwaysApprove,
                 acceptsPendingACPApprovalWhenActivated: level.launchesWithAlwaysApprove
             )
+        case .pi:
+            // pi shapes its tool surface at launch (PiAgentToolPreferences.PermissionLevel ->
+            // launchToolProfile); there is no ACP permission surface to auto-approve.
+            return AgentProviderRuntimePermissionBinding(
+                autoApproveAllACPToolPermissions: false,
+                acceptsPendingACPApprovalWhenActivated: false
+            )
         }
     }
 
@@ -159,6 +166,8 @@ final class AgentProviderPreferenceSnapshotStore {
             CursorAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         case let .grokBuild(level):
             GrokBuildAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
+        case let .pi(level):
+            PiAgentToolPreferences.setPermissionLevel(level)
         }
         bumpRevision(for: id.providerID)
         return id.providerID
@@ -404,6 +413,26 @@ final class AgentProviderPreferenceSnapshotStore {
                     )
                 }
             )
+        case .pi:
+            let effective = profile.piPermissionLevel()
+            return AgentPermissionChromeBinding(
+                providerID: providerID,
+                displayName: effective.displayName,
+                iconName: effective.iconName,
+                isWarning: effective.isWarning,
+                externallyManagedReason: externallyManagedReason,
+                options: PiAgentToolPreferences.PermissionLevel.allCases.map { level in
+                    AgentPermissionOptionBinding(
+                        id: .pi(level),
+                        title: level.displayName,
+                        iconName: level.iconName,
+                        detailText: level.detailText,
+                        isWarning: level.isWarning,
+                        isSelected: level == effective,
+                        isEnabled: externallyManagedReason == nil
+                    )
+                }
+            )
         }
     }
 
@@ -619,6 +648,7 @@ final class AgentProviderPreferenceSnapshotStore {
         case .openCode: .openCode
         case .cursor: .cursor
         case .grokBuild: .grokBuild
+        case .pi: .piAgent
         }
     }
 

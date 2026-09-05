@@ -305,6 +305,10 @@ public class APISettingsViewModel: ObservableObject {
     // Grok Build CLI / ACP
     @Published var isGrokBuildConnected: Bool = UserDefaults.standard.bool(forKey: "GrokBuildCLIConnected")
     @Published var grokBuildError: String? = nil
+    /// pi availability is a persisted configuration hint like the other CLI flags;
+    /// the connect flow that sets it arrives with the pi settings slice.
+    @Published var isPiConnected: Bool = UserDefaults.standard.bool(forKey: "PiCLIConnected")
+    @Published var piError: String? = nil
     @Published private(set) var availableGrokBuildModelOptions: [AgentModelOption] = []
     private var grokBuildLogCollector: CLIProcessLogCollector?
 
@@ -389,6 +393,7 @@ public class APISettingsViewModel: ObservableObject {
             openCodeAvailable: isOpenCodeConnected,
             cursorAvailable: isCursorConnected,
             grokBuildAvailable: isGrokBuildConnected,
+            piAvailable: isPiConnected,
             zaiConfigured: compatibleBackendIsActive(.glmZAI),
             kimiConfigured: compatibleBackendIsActive(.kimi),
             customClaudeCompatibleConfigured: compatibleBackendIsActive(.custom)
@@ -420,6 +425,7 @@ public class APISettingsViewModel: ObservableObject {
             $isOpenCodeConnected.map { _ in () }.eraseToAnyPublisher(),
             $isCursorConnected.map { _ in () }.eraseToAnyPublisher(),
             $isGrokBuildConnected.map { _ in () }.eraseToAnyPublisher(),
+            $isPiConnected.map { _ in () }.eraseToAnyPublisher(),
             $claudeCodeCLIStatus.map { _ in () }.eraseToAnyPublisher(),
             $compatibleBackendConfigs.map { _ in () }.eraseToAnyPublisher(),
             $compatibleBackendSecretPresence.map { _ in () }.eraseToAnyPublisher()
@@ -441,6 +447,7 @@ public class APISettingsViewModel: ObservableObject {
             openCodeAvailable: isVerifiedContextBuilderProvider(.openCode) && isOpenCodeConnected,
             cursorAvailable: isVerifiedContextBuilderProvider(.cursor) && isCursorConnected,
             grokBuildAvailable: isVerifiedContextBuilderProvider(.grokBuild) && isGrokBuildConnected,
+            piAvailable: isVerifiedContextBuilderProvider(.piAgent) && isPiConnected,
             zaiConfigured: compatibleBackendIsActive(.glmZAI),
             kimiConfigured: compatibleBackendIsActive(.kimi),
             customClaudeCompatibleConfigured: compatibleBackendIsActive(.custom)
@@ -496,6 +503,8 @@ public class APISettingsViewModel: ObservableObject {
             isCursorConnected
         case .grokBuild:
             isGrokBuildConnected
+        case .piAgent:
+            isPiConnected
         case .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             false
         }
@@ -598,6 +607,7 @@ public class APISettingsViewModel: ObservableObject {
         isOpenCodeConnected = UserDefaults.standard.bool(forKey: "OpenCodeCLIConnected")
         isCursorConnected = UserDefaults.standard.bool(forKey: "CursorCLIConnected")
         isGrokBuildConnected = UserDefaults.standard.bool(forKey: "GrokBuildCLIConnected")
+        isPiConnected = UserDefaults.standard.bool(forKey: "PiCLIConnected")
         if wasGrokBuildConnected != isGrokBuildConnected {
             if isGrokBuildConnected {
                 startGrokBuildModelsSubscriptionIfNeeded(workspacePath: nil)

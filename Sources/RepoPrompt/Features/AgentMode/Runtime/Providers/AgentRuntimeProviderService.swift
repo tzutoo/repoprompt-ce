@@ -41,6 +41,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     case openCode
     case cursor
     case grokBuild
+    case piAgent
     case claudeCodeGLM
     case kimiCode
     case customClaudeCompatible
@@ -55,6 +56,11 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     /// family-only hint would never bind the run's frozen tab context. The canonical
     /// `grok-shell` family in `MCPClientIdentity` still covers family-level matching.
     static let grokBuildMCPClientID = "grok-shell-\(RepoPromptMCPServerConfiguration.defaultServerName)"
+    /// pi-mcp-adapter presents `pi-mcp-<injected server name>` (e.g. `pi-mcp-RepoPromptCE`)
+    /// to MCP servers. Like Grok Build, run-scoped tab-context store keys are raw client
+    /// names, so the hint must equal that exact registered name; the canonical
+    /// `pi-mcp` family in `MCPClientIdentity` covers family-level matching.
+    static let piMCPClientID = "pi-mcp-\(RepoPromptMCPServerConfiguration.defaultServerName)"
 
     var commandName: String {
         switch self {
@@ -68,6 +74,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "cursor-agent"
         case .grokBuild:
             "grok"
+        case .piAgent:
+            "pi"
         }
     }
 
@@ -83,6 +91,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "Cursor CLI"
         case .grokBuild:
             "Grok Build"
+        case .piAgent:
+            "pi"
         case .claudeCodeGLM:
             ClaudeCodeCompatibleBackendStore.shared.config(for: .glmZAI).normalizedDisplayName
         case .kimiCode:
@@ -104,6 +114,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             Self.cursorMCPClientID
         case .grokBuild:
             Self.grokBuildMCPClientID
+        case .piAgent:
+            Self.piMCPClientID
         }
     }
 
@@ -115,6 +127,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             .cursor
         case .grokBuild:
             .grokBuild
+        case .piAgent:
+            nil
         case .claudeCode, .codexExec, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             nil
         }
@@ -124,9 +138,15 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         switch self {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
-        case .codexExec, .openCode, .cursor, .grokBuild:
+        case .codexExec, .openCode, .cursor, .grokBuild, .piAgent:
             false
         }
+    }
+
+    /// pi runs its own native RPC runtime (PiNativeSessionController); Agent Mode
+    /// treats it as a native-CLI family distinct from the Claude-compatible one.
+    var usesPiNativeRuntime: Bool {
+        self == .piAgent
     }
 
     var usesClaudeTooling: Bool {
@@ -135,7 +155,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
 
     var requiresExpectedPIDOwnedAgentModeMCPRouting: Bool {
         switch self {
-        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
+        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .piAgent, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
         }
     }
@@ -144,7 +164,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         switch self {
         case .cursor, .grokBuild:
             false
-        case .claudeCode, .codexExec, .openCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
+        case .claudeCode, .codexExec, .openCode, .piAgent, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
         }
     }
@@ -162,6 +182,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             return "Cursor CLI ACP agent. Uses Cursor's ACP runtime and injects RepoPrompt MCP tools through ACP session configuration."
         case .grokBuild:
             return "xAI Grok Build ACP agent. Uses Grok Build's ACP runtime (`grok agent stdio`) and injects RepoPrompt MCP tools through ACP session configuration."
+        case .piAgent:
+            return "The pi coding agent (pi.dev) through its RPC mode with deterministic managed launches. RepoPrompt tools are injected via the pi-mcp-adapter extension."
         case .claudeCodeGLM:
             let config = ClaudeCodeCompatibleBackendStore.shared.config(for: .glmZAI)
             if case let .claudeSlotMapping(mapping) = config.modelBehavior {
@@ -196,6 +218,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "cursor_acp"
         case .grokBuild:
             "grok_build_acp"
+        case .piAgent:
+            "pi_rpc"
         }
     }
 
@@ -209,7 +233,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             .kimi
         case .customClaudeCompatible:
             .customCompatible
-        case .codexExec, .openCode, .cursor, .grokBuild:
+        case .codexExec, .openCode, .cursor, .grokBuild, .piAgent:
             nil
         }
     }
@@ -311,6 +335,14 @@ final class AgentRuntimeProviderService {
                 Self.logger.debug("Created GrokBuildACPHeadlessAgentProvider")
             }
             return GrokBuildACPHeadlessAgentProvider(config: config, workspacePath: workspacePath)
+        case .piAgent:
+            // Headless pi discovery/delegate runs land with the WI5 slice; the
+            // interactive PiNativeSessionController is wired by the coordinator
+            // slice. Availability stays false until then, so this branch is a
+            // guarded placeholder rather than a silent wrong-runtime fallback.
+            return UnsupportedHeadlessAgentProvider(
+                reason: "pi headless discovery runs are not available yet; interactive pi Agent Mode arrives with the coordinator wiring."
+            )
         }
     }
 }
