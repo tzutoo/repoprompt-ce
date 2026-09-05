@@ -26,6 +26,11 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         var processValidator: (@Sendable (URL) throws -> Void)?
         /// Ephemeral `--mcp-config` server entries for the RepoPrompt MCP server.
         var mcpServers: [String: PiProviderRuntimeBridge.MCPServerConfiguration]
+        /// MCP client name the pi-mcp-adapter presents (`pi-mcp-RepoPromptCE`).
+        /// When set, the launched process PID is registered as the expected agent
+        /// PID for the run-scoped pending connection policy, mirroring the Claude
+        /// controller's registration.
+        var expectedPIDMCPClientName: String?
         /// Version pin for the deterministic extension profile.
         var pinnedAdapterVersion: String
         /// Tool surface for the managed launch.
@@ -41,6 +46,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             workingDirectory: URL? = nil,
             processValidator: (@Sendable (URL) throws -> Void)? = nil,
             mcpServers: [String: PiProviderRuntimeBridge.MCPServerConfiguration] = [:],
+            expectedPIDMCPClientName: String? = nil,
             pinnedAdapterVersion: String = "2.32.1",
             toolProfile: PiProviderRuntimeBridge.ToolProfile = .standard,
             suppressDeterminismFlags: Bool = false,
@@ -52,6 +58,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             self.workingDirectory = workingDirectory
             self.processValidator = processValidator
             self.mcpServers = mcpServers
+            self.expectedPIDMCPClientName = expectedPIDMCPClientName
             self.pinnedAdapterVersion = pinnedAdapterVersion
             self.toolProfile = toolProfile
             self.suppressDeterminismFlags = suppressDeterminismFlags
@@ -95,6 +102,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var stdoutChunkChannel: FileHandleChunkChannel?
     private var stdoutConsumerTask: Task<Void, Never>?
     private var lineAccumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
+    private var registeredExpectedAgentPID: pid_t?
     private var pendingResponses: [String: (Result<PiProviderRuntimeBridge.RPCResponse, Error>) -> Void] = [:]
     private var nextRequestSequence = 0
     private var ephemeralMCPConfigURL: URL?
@@ -248,6 +256,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         guard !shutDown else { return }
         shutDown = true
         shutdownPendingResponses()
+        clearRegisteredExpectedAgentPID()
         if let stdinHandle {
             try? stdinHandle.close()
         }
@@ -335,6 +344,14 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         self.process = process
         stdinHandle = stdinPipe.fileHandleForWriting
+        if let expectedPIDMCPClientName = options.expectedPIDMCPClientName, process.isRunning {
+            registeredExpectedAgentPID = process.processIdentifier
+            let pid = process.processIdentifier
+            let runID = runID
+            Task {
+                await ServerNetworkManager.shared.registerExpectedAgentPID(pid, for: expectedPIDMCPClientName, runID: runID)
+            }
+        }
         let channel = FileHandleChunkChannel()
         stdoutChunkChannel = channel
         let stdoutHandle = stdoutPipe.fileHandleForReading
@@ -356,6 +373,17 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         if options.enableDebugLogging {
             print("[PiNativeSession] launched \(executableURL.path) \(launchOptions.arguments().joined(separator: " "))")
+        }
+    }
+
+    private func clearRegisteredExpectedAgentPID() {
+        guard let pid = registeredExpectedAgentPID,
+              let clientName = options.expectedPIDMCPClientName
+        else { return }
+        registeredExpectedAgentPID = nil
+        let runID = runID
+        Task {
+            await ServerNetworkManager.shared.clearExpectedAgentPID(pid, for: clientName, runID: runID)
         }
     }
 
@@ -446,6 +474,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         if let remainder = lineAccumulator.finish() {
             await handleLine(remainder)
         }
+        clearRegisteredExpectedAgentPID()
         guard !shutDown else { return }
         let exitCode = process?.terminationStatus ?? -1
         for (_, completion) in pendingResponses {

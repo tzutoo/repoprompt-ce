@@ -149,6 +149,13 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         self == .piAgent
     }
 
+    /// Families that keep an interactive native controller in the tab session and
+    /// share the integrated native runner machinery (steering, interrupt, resume,
+    /// transcript streaming through `NativeAgentRuntimeControlling`).
+    var usesNativeInteractiveRuntime: Bool {
+        usesClaudeNativeRuntime || usesPiNativeRuntime
+    }
+
     var usesClaudeTooling: Bool {
         usesClaudeNativeRuntime
     }

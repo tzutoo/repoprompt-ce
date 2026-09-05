@@ -14,6 +14,9 @@ final class AgentModeRunService {
         let workspacePathProvider: (AgentTabSession) throws -> String?
         let codexCoordinator: CodexAgentModeCoordinator
         let claudeCoordinator: ClaudeAgentModeCoordinator
+        /// Dedicated coordinator instance for pi native runs. Same machinery as the
+        /// Claude coordinator, constructed with the pi controller factory.
+        let piCoordinator: ClaudeAgentModeCoordinator
         let shouldManageCodexTooling: Bool
         let providerRuntimePermissionResolver: (_ agent: AgentProviderKind, _ profile: AgentProviderPermissionProfile) -> AgentProviderRuntimePermissionBinding
         /// Promotes an immutable launch review snapshot to the exact process run before its MCP
@@ -51,6 +54,7 @@ final class AgentModeRunService {
     private let headlessRunner: HeadlessAgentModeRunner
     private let codexRunner: CodexIntegratedAgentModeRunner
     private let claudeRunner: ClaudeIntegratedAgentModeRunner
+    private let piRunner: ClaudeIntegratedAgentModeRunner
     private let acpRunner: ACPIntegratedAgentModeRunner
     private let terminalCommitBarrier: AgentRunTerminalCommitBarrier
 
@@ -91,6 +95,11 @@ final class AgentModeRunService {
             hooks: hooks,
             terminalCommitBarrier: terminalCommitBarrier
         )
+        piRunner = ClaudeIntegratedAgentModeRunner(
+            claudeCoordinator: dependencies.piCoordinator,
+            hooks: hooks,
+            terminalCommitBarrier: terminalCommitBarrier
+        )
         acpRunner = ACPIntegratedAgentModeRunner(
             hooks: hooks,
             terminalCommitBarrier: terminalCommitBarrier,
@@ -98,6 +107,13 @@ final class AgentModeRunService {
             providerFactory: dependencies.acpProviderFactory,
             controllerFactory: dependencies.acpControllerFactory
         )
+    }
+
+    /// The integrated native coordinator owning a session's family: the pi
+    /// coordinator drives pi tabs through identical machinery with the pi
+    /// controller factory.
+    private func nativeCoordinator(for agent: AgentProviderKind) -> ClaudeAgentModeCoordinator {
+        agent.usesPiNativeRuntime ? dependencies.piCoordinator : dependencies.claudeCoordinator
     }
 
     @discardableResult
@@ -172,6 +188,17 @@ final class AgentModeRunService {
                 policyInstaller: MCPBootstrapLease.agentModePolicyInstaller(connectionPolicyInstaller),
                 expectedPIDPolicyArmer: expectedPIDPolicyArmer
             )
+        }
+        if selectedAgent.usesPiNativeRuntime {
+            await piRunner.startRun(
+                tabID: tabID,
+                session: session,
+                initialUserMessage: initialUserMessage,
+                initialMessageForRun: initialMessageForRun,
+                attachments: attachments,
+                makeLease: makeLease
+            )
+            return nil
         }
         if selectedAgent.usesClaudeNativeRuntime {
             await claudeRunner.startRun(
@@ -581,7 +608,7 @@ final class AgentModeRunService {
         session: AgentTabSession,
         steeringID: UUID
     ) {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               session.runState == .running,
               let runID = session.runID,
               let runAttemptID = session.activeRunAttemptID,
@@ -651,7 +678,7 @@ final class AgentModeRunService {
 
     @discardableResult
     func submitQueuedClaudeSteeringIfSupported(session: AgentTabSession) async -> Bool {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               session.runState == .running
         else {
             return false
@@ -684,7 +711,7 @@ final class AgentModeRunService {
             defer {
                 session.claudeSteeringFlushTask = nil
                 if session.runState == .running,
-                   session.selectedAgent.usesClaudeNativeRuntime,
+                   session.selectedAgent.usesNativeInteractiveRuntime,
                    !session.pendingClaudeSteeringInstructions.isEmpty
                 {
                     Task { @MainActor [weak self, weak session] in
@@ -823,7 +850,7 @@ final class AgentModeRunService {
         runAttemptID: UUID
     ) -> Bool {
         session.runState == .running
-            && session.selectedAgent.usesClaudeNativeRuntime
+            && session.selectedAgent.usesNativeInteractiveRuntime
             && session.runID == runID
             && session.activeRunAttemptID == runAttemptID
     }
@@ -1011,15 +1038,16 @@ final class AgentModeRunService {
                         capturedTarget: codexCancellationTarget
                     )
                 }
-                if session.selectedAgent.usesClaudeNativeRuntime {
-                    let oldController = dependencies.claudeCoordinator.prepareClaudeCancelSync(session)
+                if session.selectedAgent.usesNativeInteractiveRuntime {
+                    let coordinator = self.nativeCoordinator(for: session.selectedAgent)
+                    let oldController = coordinator.prepareClaudeCancelSync(session)
                     session.provider = nil
                     return {
-                        dependencies.claudeCoordinator.beginClaudeResumeTransferIfNeeded(
+                        coordinator.beginClaudeResumeTransferIfNeeded(
                             for: session,
                             oldController: oldController
                         )
-                        await dependencies.claudeCoordinator.awaitPendingClaudeResumeTransferIfNeeded(for: session)
+                        await coordinator.awaitPendingClaudeResumeTransferIfNeeded(for: session)
                     }
                 }
                 if let acpController {
@@ -1072,8 +1100,8 @@ final class AgentModeRunService {
         if agent.acpProviderID != nil {
             return acpRunner.handleToolStreamEvent(event, session: session)
         }
-        if agent.usesClaudeNativeRuntime {
-            return dependencies.claudeCoordinator.handleToolStreamEvent(event, session: session)
+        if agent.usesNativeInteractiveRuntime {
+            return nativeCoordinator(for: agent).handleToolStreamEvent(event, session: session)
         }
         return false
     }
