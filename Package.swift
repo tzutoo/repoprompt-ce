@@ -64,7 +64,8 @@ var repoPromptAppDependencies: [Target.Dependency] = [
     .product(name: "Cuchardet", package: "UniversalCharsetDetection"),
     .product(name: "JSONSchema", package: "JSONSchema"),
     .product(name: "Ontology", package: "ontology"),
-    .product(name: "RepoPromptClaudeCompatibleProvider", package: "RepoPromptAgentProviders")
+    .product(name: "RepoPromptClaudeCompatibleProvider", package: "RepoPromptAgentProviders"),
+    .product(name: "RepoPromptPiProvider", package: "RepoPromptAgentProviders")
 ]
 
 var repoPromptAppSwiftSettings: [SwiftSetting] = [
