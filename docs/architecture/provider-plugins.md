@@ -210,7 +210,7 @@ protocol NativeAgentRuntimeControlling: Actor {
 }
 ```
 
-The associated event/session/turn types are currently `typealias`es over the Claude-native runtime DTOs (`NativeAgentRuntimeEvent = ClaudeNativeProcessSessionController.Event`, etc.). When a second native provider arrives, the aliases will become proper neutral DTOs and the Claude controller will conform via its own mapping. Until then the alias layer keeps the seam ergonomic without forcing churn on coordinators, runners, and tab-session storage.
+The associated event/session/turn types are proper neutral DTOs owned by this contracts file (`NativeAgentRuntimeEvent`, `NativeAgentRuntimeSessionRef`, `NativeAgentRuntimeTurnStatus`, `NativeAgentRuntimeRuntimeInitStatus`, `NativeAgentRuntimeInterruptOutcome`, `NativeAgentRuntimeControllerError`). They originated from the Claude-compatible runtime; the Claude controller conforms through compatibility typealiases declared in its conformance extension, and additional native providers (pi RPC) emit the neutral types from their own controllers. `NativeAgentRuntimeRuntimeInitStatus.initializeResponse` carries the Claude-compatible family's Claude Code SDK initialize snapshot and is `nil` for other runtimes.
 
 `ClaudeSessionControlling` is retained as a backwards-compatible alias for existing Claude call sites.
 
