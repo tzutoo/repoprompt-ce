@@ -310,6 +310,7 @@ public class APISettingsViewModel: ObservableObject {
     @Published var isPiConnected: Bool = UserDefaults.standard.bool(forKey: "PiCLIConnected")
     @Published var piError: String? = nil
     @Published private(set) var availableGrokBuildModelOptions: [AgentModelOption] = []
+    @Published private(set) var availablePiModelOptions: [AgentModelOption] = []
     private var grokBuildLogCollector: CLIProcessLogCollector?
 
     /// CLI connection flags are persisted configuration hints, not proof that the provider is
@@ -361,6 +362,7 @@ public class APISettingsViewModel: ObservableObject {
     private var openCodeModelsTask: Task<Void, Never>?
     private var cursorModelsTask: Task<Void, Never>?
     private var grokBuildModelsTask: Task<Void, Never>?
+    private var piLogCollector: CLIProcessLogCollector?
     private var openRouterModelsTask: Task<Void, Never>?
     private var customModelsTask: Task<Void, Never>?
     private var initialLoadTask: Task<Void, Never>?
@@ -553,7 +555,8 @@ public class APISettingsViewModel: ObservableObject {
             NotificationCenter.default.publisher(for: .codexConnectionChanged).map { _ in AgentProviderKind.codexExec },
             NotificationCenter.default.publisher(for: .openCodeConnectionChanged).map { _ in AgentProviderKind.openCode },
             NotificationCenter.default.publisher(for: .cursorConnectionChanged).map { _ in AgentProviderKind.cursor },
-            NotificationCenter.default.publisher(for: .grokBuildConnectionChanged).map { _ in AgentProviderKind.grokBuild }
+            NotificationCenter.default.publisher(for: .grokBuildConnectionChanged).map { _ in AgentProviderKind.grokBuild },
+            NotificationCenter.default.publisher(for: .piConnectionChanged).map { _ in AgentProviderKind.piAgent }
         ])
         .receive(on: DispatchQueue.main)
         .sink { [weak self] provider in
@@ -3830,6 +3833,112 @@ public class APISettingsViewModel: ObservableObject {
             return "Installed Grok Build CLI does not advertise the ACP stdio subcommand. Update Grok Build and ensure `grok agent --help` lists `stdio`."
         }
         return message
+    }
+
+    // MARK: - pi coding agent CLI
+
+    func testPiConnection() async throws -> Bool {
+        let collector = CLIProcessLogCollector()
+        collector.append("pi CLI connection test started")
+        piLogCollector = collector
+
+        collector.append("Refreshing login-shell environment cache")
+        await CLIEnvironmentCache.shared.invalidate()
+        collector.append("Starting pi RPC probe (binary + RPC + pi-mcp-adapter preflight)")
+
+        do {
+            let result = try await PiConnectionProbe.probe()
+            collector.append("pi RPC responded; session \(result.sessionId ?? "unknown")")
+            if let modelSummary = result.modelSummary {
+                collector.append("Default model: \(modelSummary)")
+            }
+            collector.append("pi-mcp-adapter detected (MCP command registered)")
+            collector.append("\(result.availableModelCount) model(s) reported by get_available_models")
+            let piOptions = AgentModelCatalog.options(
+                for: .piAgent,
+                availability: AgentModelCatalog.AvailabilityContext(piAvailable: true)
+            )
+            availablePiModelOptions = piOptions
+            isPiConnected = true
+            setContextBuilderProviderVerified(.piAgent, verified: true)
+            piError = nil
+            UserDefaults.standard.set(true, forKey: "PiCLIConnected")
+            await updateAvailableModels()
+            collector.append("pi marked as connected")
+            piLogCollector = nil
+            NotificationCenter.default.post(
+                name: .piConnectionChanged,
+                object: nil,
+                userInfo: ["windowID": 0]
+            )
+            return true
+        } catch {
+            collector.append("Connection test threw error: \(error.localizedDescription)")
+            isPiConnected = false
+            setContextBuilderProviderVerified(.piAgent, verified: false)
+            piError = friendlyPiMessage(for: error)
+            UserDefaults.standard.set(false, forKey: "PiCLIConnected")
+            availablePiModelOptions = []
+            await updateAvailableModels()
+            let finalMessage = piError ?? error.localizedDescription
+            collector.append("User guidance: \(finalMessage)")
+            NotificationCenter.default.post(
+                name: .piConnectionChanged,
+                object: nil,
+                userInfo: ["windowID": 0]
+            )
+            throw error
+        }
+    }
+
+    func disconnectPi() {
+        isPiConnected = false
+        setContextBuilderProviderVerified(.piAgent, verified: false)
+        piError = nil
+        UserDefaults.standard.set(false, forKey: "PiCLIConnected")
+        availablePiModelOptions = []
+        Task {
+            await updateAvailableModels()
+        }
+        NotificationCenter.default.post(
+            name: .piConnectionChanged,
+            object: nil,
+            userInfo: ["windowID": 0]
+        )
+    }
+
+    private func friendlyPiMessage(for error: Error) -> String {
+        if let probeError = error as? PiConnectionProbe.ProbeError {
+            return probeError.localizedDescription
+        }
+        let message = error.localizedDescription
+        let lowered = message.lowercased()
+        if lowered.contains("not installed") || lowered.contains("no such file") || lowered.contains("command not found") || lowered.contains("not found") {
+            return "The pi CLI was not found. Install it under a user-owned npm prefix (`npm i -g @earendil-works/pi-coding-agent`) — Homebrew's /opt/homebrew prefix is rejected by the trusted-path launch check."
+        }
+        if lowered.contains("timed out") {
+            return "pi RPC did not respond in time. Check `pi --version` in a terminal and retry."
+        }
+        return message
+    }
+
+    func hasPiTrace() -> Bool {
+        piLogCollector?.isEmpty == false
+    }
+
+    func dumpPiTrace() throws -> URL {
+        guard let collector = piLogCollector else {
+            throw CLIProcessLogCollectorError.noEntries
+        }
+        collector.append("Exporting trace to Downloads folder")
+        let exportDate = Date()
+        let url = try collector.writeMarkdownToDownloads(
+            baseFilename: "RepoPrompt-PiTrace",
+            title: "pi CLI Connection Trace",
+            timestamp: exportDate
+        )
+        collector.append("Trace exported to \(url.lastPathComponent)")
+        return url
     }
 
     func hasGrokBuildTrace() -> Bool {

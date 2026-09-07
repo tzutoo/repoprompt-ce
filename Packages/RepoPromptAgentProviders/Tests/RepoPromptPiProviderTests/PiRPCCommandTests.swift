@@ -79,6 +79,13 @@ final class PiRPCCommandTests: XCTestCase {
         )
     }
 
+    func testGetCommandsAndBash() throws {
+        XCTAssertEqual(try encode(.getCommands)["type"]?.stringValue, "get_commands")
+        let bash = try encode(.bash(command: "ls -la"), id: "req-1")
+        XCTAssertEqual(bash["id"]?.stringValue, "req-1")
+        XCTAssertEqual(bash["command"]?.stringValue, "ls -la")
+    }
+
     func testExtensionUIDialogResponses() throws {
         let value = try encode(.extensionUIResponseValue(id: "uuid-1", value: "Allow"))
         XCTAssertEqual(value["type"]?.stringValue, "extension_ui_response")

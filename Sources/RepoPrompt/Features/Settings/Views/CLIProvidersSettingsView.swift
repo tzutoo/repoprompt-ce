@@ -53,6 +53,7 @@ struct CLIProvidersSettingsView: View {
     @State private var showOpenCodeTraceDump = false
     @State private var showCursorTraceDump = false
     @State private var showGrokBuildTraceDump = false
+    @State private var showPiTraceDump = false
     @State private var isClaudePromptSettingsExpanded = false
     @State private var claudeNativePromptMode = ClaudeAgentToolPreferences.agentModePromptDelivery()
 
@@ -66,6 +67,8 @@ struct CLIProvidersSettingsView: View {
     @State private var isOpenCodeExpanded: Bool = false
     @State private var isCursorExpanded: Bool = false
     @State private var isGrokBuildExpanded: Bool = false
+    @State private var isPiExpanded: Bool = false
+    @State private var isLoadingPi = false
 
     // Per-backend secret text entry buffers (GLM uses viewModel.zaiApiKey directly).
     // SEARCH-HELPER: Claude-Compatible Backends settings, Kimi API key entry, Custom backend key entry
@@ -142,6 +145,7 @@ struct CLIProvidersSettingsView: View {
                 openCodeCard
                 cursorCard
                 grokBuildCard
+                piCard
             }
             .padding(16)
         }
@@ -191,6 +195,13 @@ struct CLIProvidersSettingsView: View {
                     primaryButton: .default(Text("Save Trace to Downloads"), action: dumpCursorTrace),
                     secondaryButton: .cancel(Text("OK"), action: { showCursorTraceDump = false })
                 )
+            } else if showPiTraceDump, viewModel.hasPiTrace() {
+                Alert(
+                    title: Text("CLI Provider Management"),
+                    message: Text(alertMessage),
+                    primaryButton: .default(Text("Save Trace to Downloads"), action: dumpPiTrace),
+                    secondaryButton: .cancel(Text("OK"), action: { showPiTraceDump = false })
+                )
             } else {
                 Alert(
                     title: Text("CLI Provider Management"),
@@ -205,6 +216,7 @@ struct CLIProvidersSettingsView: View {
                 showCodexTraceDump = false
                 showOpenCodeTraceDump = false
                 showCursorTraceDump = false
+                showPiTraceDump = false
                 showCodexSignOutConfirmation = false
             }
         }
@@ -2478,5 +2490,127 @@ struct CLIProvidersSettingsView: View {
         showGrokBuildTraceDump = false
         showAlert = true
         onAPIKeyUpdated?()
+    }
+
+    // MARK: - pi card
+
+    private var piCard: some View {
+        providerCard(
+            title: "pi",
+            subtitle: "Uses the pi coding agent's RPC mode for Agent Mode. RepoPrompt MCP tools are injected through the pi-mcp-adapter extension with deterministic pinned launches.",
+            infoURL: "https://pi.dev",
+            isConnected: viewModel.isPiConnected,
+            isExpanded: $isPiExpanded
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                if viewModel.isPiConnected {
+                    HStack(spacing: 8) {
+                        Button(action: { testPiConnection() }) {
+                            if isLoadingPi {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(height: 16)
+                            } else {
+                                Label("Test Connection", systemImage: "antenna.radiowaves.left.and.right")
+                            }
+                        }
+                        .disabled(isLoadingPi)
+                        .buttonStyle(CustomButtonStyle())
+
+                        Spacer()
+
+                        Button(action: { signOutFromPi() }) {
+                            Text("Sign Out")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(CustomButtonStyle())
+                    }
+
+                    Text(piModelSummary)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    directProviderInlineControls(for: .pi)
+                } else {
+                    HStack(spacing: 10) {
+                        Button(action: { testPiConnection() }) {
+                            if isLoadingPi {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(height: 16)
+                            } else {
+                                Label("Connect", systemImage: "link")
+                            }
+                        }
+                        .disabled(isLoadingPi)
+                        .buttonStyle(CustomButtonStyle())
+
+                        if let error = viewModel.piError, !error.isEmpty {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("Install with `npm i -g @earendil-works/pi-coding-agent` and `pi install npm:pi-mcp-adapter`. Authenticate with `/login` inside pi.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var piModelSummary: String {
+        let options = viewModel.availablePiModelOptions
+        let count = options.count
+        if count <= 1 {
+            return "Using pi's configured default model; the dynamic model catalog refreshes per session."
+        }
+        return count == 1 ? "1 model available." : "\(count) models available (including Default)."
+    }
+
+    private func testPiConnection() {
+        isLoadingPi = true
+        Task {
+            do {
+                let ok = try await viewModel.testPiConnection()
+                await MainActor.run {
+                    isLoadingPi = false
+                    if ok {
+                        alertMessage = "pi connected. \(piModelSummary.lowercased())"
+                        showPiTraceDump = false
+                    }
+                    showAlert = true
+                    onAPIKeyUpdated?()
+                }
+            } catch {
+                await MainActor.run {
+                    isLoadingPi = false
+                    alertMessage = viewModel.piError ?? error.asFriendlyString()
+                    showPiTraceDump = viewModel.hasPiTrace()
+                    showAlert = true
+                }
+            }
+        }
+    }
+
+    private func signOutFromPi() {
+        viewModel.disconnectPi()
+        alertMessage = "Signed out from pi"
+        showPiTraceDump = false
+        showAlert = true
+        onAPIKeyUpdated?()
+    }
+
+    private func dumpPiTrace() {
+        do {
+            _ = try viewModel.dumpPiTrace()
+            alertMessage = "pi trace saved to Downloads"
+        } catch {
+            alertMessage = "Failed to save pi trace: \(error.localizedDescription)"
+        }
+        showPiTraceDump = false
     }
 }

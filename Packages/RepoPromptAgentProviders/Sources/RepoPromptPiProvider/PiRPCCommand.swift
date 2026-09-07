@@ -55,6 +55,8 @@ public enum PiRPCCommand: Equatable, Sendable {
     case clone
     /// Direct shell command whose output joins the conversation context.
     case bash(command: String)
+    /// Available extension commands, prompt templates, and skills (`/name`).
+    case getCommands
     /// Abort a running direct `bash` command.
     case abortBash
     /// Answer an `extension_ui_request` dialog with a string value (select/input/editor).
@@ -154,6 +156,8 @@ public enum PiRPCCommand: Equatable, Sendable {
         case let .bash(command):
             object["type"] = .string("bash")
             object["command"] = .string(command)
+        case .getCommands:
+            object["type"] = .string("get_commands")
         case .abortBash:
             object["type"] = .string("abort_bash")
         case let .extensionUIResponseValue(id, value):
