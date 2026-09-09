@@ -2342,6 +2342,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         windowID: Int,
         workspacePath: String?
     ) -> PiNativeSessionController {
+        if AgentRuntimeProviderService.enableDebugLogging {
+            print("[Pi-Dispatch] factory constructing controller runID=\(runID.uuidString) workspace=\(workspacePath ?? "nil")")
+        }
         _ = tabID
         _ = windowID
         let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt

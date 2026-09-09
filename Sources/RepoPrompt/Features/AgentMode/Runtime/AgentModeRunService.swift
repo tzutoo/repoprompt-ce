@@ -190,6 +190,9 @@ final class AgentModeRunService {
             )
         }
         if selectedAgent.usesPiNativeRuntime {
+            if AgentRuntimeProviderService.enableDebugLogging {
+                print("[Pi-Dispatch] runService dispatching to piRunner runID=\(session.runID?.uuidString ?? "nil")")
+            }
             await piRunner.startRun(
                 tabID: tabID,
                 session: session,

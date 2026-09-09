@@ -250,8 +250,10 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
 final class AgentRuntimeProviderService {
     static let shared = AgentRuntimeProviderService()
 
-    /// Enable debug logging for agent provider runtimes (enabled for debugging cancellation)
-    static var enableDebugLogging = false
+    /// Enable debug logging for agent provider runtimes. Opt in with
+    /// `RPCE_AGENT_DEBUG=1` when launching the app from a shell to capture the
+    /// provider/controller diagnostics on stdout.
+    static var enableDebugLogging = ProcessInfo.processInfo.environment["RPCE_AGENT_DEBUG"] == "1"
     private static let logger = Logger(label: "com.repoprompt.agent.runtime.provider")
 
     private init() {}

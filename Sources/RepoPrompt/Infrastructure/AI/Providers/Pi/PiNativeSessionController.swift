@@ -100,6 +100,8 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutChunkChannel: FileHandleChunkChannel?
+    private var stderrChunkChannel: FileHandleChunkChannel?
+    private var stderrTail = Data()
     private var stdoutConsumerTask: Task<Void, Never>?
     private var lineAccumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
     private var registeredExpectedAgentPID: pid_t?
@@ -164,21 +166,25 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         effortLevel: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride: String?
     ) async throws -> NativeAgentRuntimeSessionRef {
+        debugStage("startOrResume begin existingSessionID=\(existingSessionID ?? "nil")")
         if hasActiveSession {
             return NativeAgentRuntimeSessionRef(sessionID: currentSessionIDValue)
         }
-        try launchProcess(
+        try await launchProcess(
             existingSessionID: existingSessionID,
             model: model,
             effortLevel: effortLevel,
             systemPromptOverride: systemPromptOverride
         )
+        debugStage("sending get_state")
         // Correlate an initial get_state so Agent Mode learns the session identity
         // before the first prompt; failure here fails the run before any user input.
         let stateResponse = try await roundTrip(.getState, timeout: options.stateRequestTimeout)
         guard stateResponse.success else {
-            throw ControllerError.stateRequestFailed(stateResponse.errorMessage ?? "get_state failed")
+            let suffix = stderrTailSummary.map { ". stderr tail: \($0)" } ?? ""
+            throw ControllerError.stateRequestFailed((stateResponse.errorMessage ?? "get_state failed") + suffix)
         }
+        debugStage("get_state responded")
         let state = stateResponse.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
         currentSessionIDValue = state?.sessionId ?? existingSessionID
         emit(.runtimeInit(NativeAgentRuntimeRuntimeInitStatus(
@@ -290,8 +296,12 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         model: String?,
         effortLevel: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride: String?
-    ) throws {
-        let executableURL = try resolveExecutable()
+    ) async throws {
+        debugStage("resolving launch environment")
+        let environment = await launchEnvironment
+        debugStage("launch environment resolved (\(environment.keys.count) keys)")
+        let executableURL = try resolveExecutable(environment: environment)
+        debugStage("resolved executable \(executableURL.path)")
         var mcpConfigPath: String?
         if !options.mcpServers.isEmpty {
             mcpConfigPath = try writeEphemeralMCPConfiguration()
@@ -324,17 +334,18 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         if let workingDirectory = options.workingDirectory {
             process.currentDirectoryURL = workingDirectory
         }
-        var environment = ProcessInfo.processInfo.environment
+        var effectiveEnvironment = environment
         for (key, value) in launchOptions.environment(over: [:]) {
-            environment[key] = value
+            effectiveEnvironment[key] = value
         }
-        process.environment = environment
+        process.environment = effectiveEnvironment
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = Pipe()
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
 
         lineAccumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
         do {
@@ -344,13 +355,14 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         self.process = process
         stdinHandle = stdinPipe.fileHandleForWriting
+        debugStage("process spawned pid=\(process.processIdentifier)")
         if let expectedPIDMCPClientName = options.expectedPIDMCPClientName, process.isRunning {
-            registeredExpectedAgentPID = process.processIdentifier
             let pid = process.processIdentifier
-            let runID = runID
-            Task {
-                await ServerNetworkManager.shared.registerExpectedAgentPID(pid, for: expectedPIDMCPClientName, runID: runID)
-            }
+            registeredExpectedAgentPID = pid
+            // Await: the eagerly-connecting adapter can reach the server within
+            // seconds of launch; registration must land before the armed
+            // expected-PID policy evaluates the connection.
+            await ServerNetworkManager.shared.registerExpectedAgentPID(pid, for: expectedPIDMCPClientName, runID: runID)
         }
         let channel = FileHandleChunkChannel()
         stdoutChunkChannel = channel
@@ -387,13 +399,35 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
     }
 
-    private func resolveExecutable() throws -> URL {
+    /// GUI launches inherit a minimal PATH; resolve against the cached
+    /// login-shell environment plus native default search paths (npm prefixes)
+    /// exactly like the Claude native controller.
+    private var launchEnvironment: [String: String] {
+        get async {
+            let result = await ProcessEnvironmentBuilder.build(
+                ProcessEnvironmentRequest(
+                    purpose: .piNative,
+                    inheritedEnvironment: ProcessInfo.processInfo.environment,
+                    overrides: [:],
+                    additionalRemovedKeys: [],
+                    enableDebugLogging: options.enableDebugLogging
+                )
+            )
+            return result.environment
+        }
+    }
+
+    private func resolveExecutable(environment: [String: String]) throws -> URL {
         if let executableURL = options.executableURL {
             try options.processValidator?(executableURL)
             return executableURL
         }
-        let environment = ProcessInfo.processInfo.environment
-        let resolved = CommandPathResolver.resolve("pi", environment: environment, additionalPaths: [])
+        let resolved = CommandPathResolver.resolve(
+            "pi",
+            environment: environment,
+            additionalPaths: CLIPathHints.nativeDefaultsSupplemented(with: []),
+            preferredBasenames: ["pi"]
+        )
         guard resolved.contains("/"), FileManager.default.isExecutableFile(atPath: resolved) else {
             throw ControllerError.piNotInstalled
         }
@@ -470,6 +504,23 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
     }
 
+    private func appendStderrTail(_ chunk: Data) {
+        appendTail(&stderrTail, chunk: chunk, limit: 64 * 1024)
+        if options.enableDebugLogging,
+           let text = String(data: chunk, encoding: .utf8), !text.isEmpty
+        {
+            print("[PiNativeSession][stderr] \(text)")
+        }
+    }
+
+    private var stderrTailSummary: String? {
+        guard !stderrTail.isEmpty,
+              let text = String(data: stderrTail.suffix(2000), encoding: .utf8)
+        else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func handleStdoutEOF() async {
         if let remainder = lineAccumulator.finish() {
             await handleLine(remainder)
@@ -486,7 +537,11 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             turnInFlight = false
             emit(.turnCompleted(turnID: turnID, status: .failed))
         }
-        emit(.error("pi process exited (code \(exitCode))"))
+        if let summary = stderrTailSummary {
+            emit(.error("pi process exited (code \(exitCode)). stderr tail: \(summary)"))
+        } else {
+            emit(.error("pi process exited (code \(exitCode))"))
+        }
     }
 
     private func handleLine(_ line: Data) async {
@@ -685,6 +740,12 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private func jsonString(from value: PiProviderRuntimeBridge.JSONValue) -> String? {
         guard let data = try? JSONEncoder().encode(value) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    private func debugStage(_ stage: String) {
+        if options.enableDebugLogging {
+            print("[PiNativeSession] \(stage)")
+        }
     }
 
     private func emit(_ event: NativeAgentRuntimeEvent) {
