@@ -3854,6 +3854,15 @@ public class APISettingsViewModel: ObservableObject {
             }
             collector.append("pi-mcp-adapter detected (MCP command registered)")
             collector.append("\(result.availableModelCount) model(s) reported by get_available_models")
+            PiModelRegistry.shared.update(records: result.models.map { model in
+                PiModelRegistry.ModelRecord(
+                    id: model.id,
+                    name: model.name,
+                    provider: model.provider,
+                    reasoning: model.reasoning,
+                    contextWindow: model.contextWindow
+                )
+            })
             let piOptions = AgentModelCatalog.options(
                 for: .piAgent,
                 availability: AgentModelCatalog.AvailabilityContext(piAvailable: true)
@@ -3879,6 +3888,7 @@ public class APISettingsViewModel: ObservableObject {
             piError = friendlyPiMessage(for: error)
             UserDefaults.standard.set(false, forKey: "PiCLIConnected")
             availablePiModelOptions = []
+            PiModelRegistry.shared.clear()
             await updateAvailableModels()
             let finalMessage = piError ?? error.localizedDescription
             collector.append("User guidance: \(finalMessage)")

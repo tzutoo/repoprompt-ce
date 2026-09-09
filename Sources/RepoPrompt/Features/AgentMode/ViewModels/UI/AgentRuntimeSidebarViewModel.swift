@@ -70,7 +70,8 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: return 200_000
             case .openCode, .cursor: return 200_000
             case .grokBuild: return 500_000 // grok 4.5/4.6 advertise totalContextTokens 500000
-            case .piAgent: return 200_000 // refined per-model from get_available_models in the catalog slice
+            case .piAgent:
+                return PiModelRegistry.shared.contextWindow(forRaw: selectedModelRaw ?? "") ?? 200_000
             case .codexExec, .none: return 200_000
             }
         }

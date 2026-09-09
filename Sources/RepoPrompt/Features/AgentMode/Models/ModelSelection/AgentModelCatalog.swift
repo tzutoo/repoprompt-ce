@@ -350,6 +350,15 @@ enum AgentModelCatalog {
             }
             return fallbacks
         }
+        if agentKind == .piAgent {
+            let fallback = staticOption(.defaultModel, for: .piAgent)
+            if let discoveredOptions = PiModelRegistry.shared.resolvedOptions(),
+               !discoveredOptions.isEmpty
+            {
+                return discoveredOptions
+            }
+            return [fallback]
+        }
         if agentKind == .grokBuild {
             let fallback = staticOption(.defaultModel, for: .grokBuild)
             guard let discoveredOptions = resolvedACPDiscoveredModels(for: agentKind)?.options,
@@ -411,6 +420,15 @@ enum AgentModelCatalog {
            normalized.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame
         {
             return true
+        }
+        if agentKind == .piAgent {
+            // The Default placeholder always validates; discovered ids validate
+            // against the registry. With an empty registry (pre-connect) only
+            // Default remains selectable.
+            if normalized.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame {
+                return true
+            }
+            return PiModelRegistry.shared.contains(rawModel: normalized)
         }
         if let discoveredModels = resolvedACPDiscoveredModels(for: agentKind) {
             if agentKind == .cursor {

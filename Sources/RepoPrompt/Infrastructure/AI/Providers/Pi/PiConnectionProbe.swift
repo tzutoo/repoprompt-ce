@@ -12,6 +12,7 @@ enum PiConnectionProbe {
         let modelSummary: String?
         let adapterDetected: Bool
         let availableModelCount: Int
+        let models: [PiProviderRuntimeBridge.ModelDescriptor]
     }
 
     enum ProbeError: Error, LocalizedError, Equatable {
@@ -112,6 +113,7 @@ enum PiConnectionProbe {
         var state: PiProviderRuntimeBridge.SessionState?
         var adapterDetected = false
         var modelCount = 0
+        var models: [PiProviderRuntimeBridge.ModelDescriptor] = []
         var pending = Set([stateID, commandsID, modelsID])
 
         var accumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
@@ -137,7 +139,9 @@ enum PiConnectionProbe {
                         }
                     }
                 case modelsID:
-                    modelCount = response.data?["models"]?.arrayValue?.count ?? 0
+                    let modelValues = response.data?["models"]?.arrayValue ?? []
+                    models = modelValues.compactMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:))
+                    modelCount = models.count
                 default:
                     break
                 }
@@ -155,7 +159,8 @@ enum PiConnectionProbe {
             sessionId: state.sessionId,
             modelSummary: modelSummary,
             adapterDetected: adapterDetected,
-            availableModelCount: modelCount
+            availableModelCount: modelCount,
+            models: models
         )
     }
 }
