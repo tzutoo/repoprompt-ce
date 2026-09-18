@@ -103,6 +103,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var stderrChunkChannel: FileHandleChunkChannel?
     private var stderrTail = Data()
     private var stdoutConsumerTask: Task<Void, Never>?
+    private var stderrConsumerTask: Task<Void, Never>?
     private var lineAccumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
     private var registeredExpectedAgentPID: pid_t?
     private var pendingResponses: [String: (Result<PiProviderRuntimeBridge.RPCResponse, Error>) -> Void] = [:]
@@ -232,7 +233,12 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         let turnID = UUID()
         pendingTurnIDBuffer.append(turnID)
         let behavior: PiProviderRuntimeBridge.StreamingBehavior? = turnInFlight ? .steer : nil
-        let response = try await roundTrip(.prompt(message: text, streamingBehavior: behavior))
+        // Prompt acceptance can lag while the eager MCP adapter finishes its
+        // first handshake; keep this above the default command timeout.
+        let response = try await roundTrip(
+            .prompt(message: text, streamingBehavior: behavior),
+            timeout: max(options.commandTimeout, 30)
+        )
         guard response.success else {
             pendingTurnIDBuffer.removeAll { $0 == turnID }
             throw ControllerError.commandFailed(response.errorMessage ?? "prompt was rejected")
@@ -271,6 +277,10 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         stdoutConsumerTask = nil
         stdoutChunkChannel?.finish()
         stdoutChunkChannel = nil
+        stderrConsumerTask?.cancel()
+        stderrConsumerTask = nil
+        stderrChunkChannel?.finish()
+        stderrChunkChannel = nil
         if let process, process.isRunning {
             process.terminate()
         }
@@ -364,25 +374,47 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             // expected-PID policy evaluates the connection.
             await ServerNetworkManager.shared.registerExpectedAgentPID(pid, for: expectedPIDMCPClientName, runID: runID)
         }
-        let channel = FileHandleChunkChannel()
-        stdoutChunkChannel = channel
+        let stdoutChannel = FileHandleChunkChannel()
+        stdoutChunkChannel = stdoutChannel
         let stdoutHandle = stdoutPipe.fileHandleForReading
         stdoutHandle.readabilityHandler = { readable in
             let data = readable.availableData
             if data.isEmpty {
-                channel.finish()
+                stdoutChannel.finish()
                 readable.readabilityHandler = nil
             } else {
-                channel.yield(data)
+                stdoutChannel.yield(data)
             }
         }
         stdoutConsumerTask = Task { [weak self] in
-            for await chunk in channel.stream {
+            for await chunk in stdoutChannel.stream {
                 guard let self else { break }
                 await handleStdoutChunk(chunk)
             }
             await self?.handleStdoutEOF()
         }
+
+        // Always drain stderr. npm/adapter chatter can fill the 64KB pipe and
+        // deadlock the pi process before prompt responses arrive.
+        let stderrChannel = FileHandleChunkChannel()
+        stderrChunkChannel = stderrChannel
+        let stderrHandle = stderrPipe.fileHandleForReading
+        stderrHandle.readabilityHandler = { readable in
+            let data = readable.availableData
+            if data.isEmpty {
+                stderrChannel.finish()
+                readable.readabilityHandler = nil
+            } else {
+                stderrChannel.yield(data)
+            }
+        }
+        stderrConsumerTask = Task { [weak self] in
+            for await chunk in stderrChannel.stream {
+                guard let self else { break }
+                await appendStderrTail(chunk)
+            }
+        }
+
         if options.enableDebugLogging {
             print("[PiNativeSession] launched \(executableURL.path) \(launchOptions.arguments().joined(separator: " "))")
         }

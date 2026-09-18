@@ -313,7 +313,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let previousAgent = session.selectedAgent
                 if previousAgent != selectedAgent {
                     codexCoordinator.handleProviderSwitch(from: previousAgent, to: selectedAgent, session: session)
-                    claudeCoordinator.handleProviderIdentityTransitionSync(
+                    nativeCoordinator(for: previousAgent).handleProviderIdentityTransitionSync(
                         session: session,
                         from: previousAgent,
                         to: selectedAgent
@@ -593,6 +593,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     /// Same coordinator machinery as `claudeCoordinator`, constructed with the pi
     /// controller factory so pi tabs drive `PiNativeSessionController` sessions.
     let piCoordinator: ClaudeAgentModeCoordinator
+
+    /// Routes native interactive work to the coordinator that owns the provider's
+    /// controller factory (Claude-compatible vs pi).
+    func nativeCoordinator(for agent: AgentProviderKind) -> ClaudeAgentModeCoordinator {
+        agent.usesPiNativeRuntime ? piCoordinator : claudeCoordinator
+    }
+
     let providerBindingService: AgentModeProviderBindingService
     private weak var runInteractionStateObserver: (any AgentModeRunInteractionStateObserving)?
     private let shouldManageCodexTooling: Bool
@@ -7640,7 +7647,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let previousAgent = session.selectedAgent
         if previousAgent != normalized.agent {
             codexCoordinator.handleProviderSwitch(from: previousAgent, to: normalized.agent, session: session)
-            await claudeCoordinator.handleProviderIdentityTransition(
+            await nativeCoordinator(for: previousAgent).handleProviderIdentityTransition(
                 session: session,
                 from: previousAgent,
                 to: normalized.agent

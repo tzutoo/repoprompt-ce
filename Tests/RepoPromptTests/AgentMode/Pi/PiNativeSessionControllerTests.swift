@@ -161,20 +161,25 @@ final class PiNativeSessionControllerTests: XCTestCase {
             )
         )
         await controller.ensureEventsStreamReady()
-        _ = try await controller.startOrResume(existingSessionID: nil, model: nil, effortLevel: nil, systemPromptOverride: nil)
-        // The validator observes the executable; the config file is discoverable by
-        // its documented name pattern while the process is live.
         let tempDirectory = FileManager.default.temporaryDirectory
-        let candidates = try FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)
+        let preexisting = Set(
+            try FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("rpce-pi-mcp-") && $0.pathExtension == "json" }
+                .map(\.path)
+        )
+        _ = try await controller.startOrResume(existingSessionID: nil, model: nil, effortLevel: nil, systemPromptOverride: nil)
+        // Observe only files this controller created so concurrent live smokes or
+        // leftover sessions cannot fail the assertion.
+        let created = try FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasPrefix("rpce-pi-mcp-") && $0.pathExtension == "json" }
-        XCTAssertGreaterThanOrEqual(candidates.count, 1, "Expected an ephemeral pi MCP config file")
+            .filter { !preexisting.contains($0.path) }
+        XCTAssertEqual(created.count, 1, "Expected exactly one ephemeral pi MCP config file from this controller")
+        let createdPath = try XCTUnwrap(created.first?.path)
         await controller.shutdown()
-        for candidate in candidates {
-            XCTAssertFalse(
-                FileManager.default.fileExists(atPath: candidate.path),
-                "Ephemeral config \(candidate.path) should be removed on shutdown"
-            )
-        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: createdPath),
+            "Ephemeral config \(createdPath) should be removed on shutdown"
+        )
     }
 
     func testProcessExitFailsPendingTurn() async throws {

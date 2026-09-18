@@ -345,12 +345,12 @@ final class AgentRuntimeProviderService {
             }
             return GrokBuildACPHeadlessAgentProvider(config: config, workspacePath: workspacePath)
         case .piAgent:
-            // Headless pi discovery/delegate runs land with the WI5 slice; the
-            // interactive PiNativeSessionController is wired by the coordinator
-            // slice. Availability stays false until then, so this branch is a
-            // guarded placeholder rather than a silent wrong-runtime fallback.
+            // Headless pi discovery/delegate runs land with the WI5 slice.
+            // Interactive Agent Mode already uses PiNativeSessionController;
+            // keep this branch an explicit unsupported placeholder rather than
+            // a silent wrong-runtime fallback.
             return UnsupportedHeadlessAgentProvider(
-                reason: "pi headless discovery runs are not available yet; interactive pi Agent Mode arrives with the coordinator wiring."
+                reason: "pi headless discovery runs are not available yet; use interactive pi Agent Mode."
             )
         }
     }

@@ -36,8 +36,23 @@ enum PiConnectionProbe {
     }
 
     static func probe(timeout: TimeInterval = 20) async throws -> Result {
-        let environment = ProcessInfo.processInfo.environment
-        let resolved = CommandPathResolver.resolve("pi", environment: environment, additionalPaths: [])
+        // GUI launches inherit a minimal PATH; mirror the interactive controller and
+        // resolve against the cached login-shell environment plus native defaults.
+        let launchEnvironment = await ProcessEnvironmentBuilder.build(
+            ProcessEnvironmentRequest(
+                purpose: .piNative,
+                inheritedEnvironment: ProcessInfo.processInfo.environment,
+                overrides: [:],
+                additionalRemovedKeys: [],
+                enableDebugLogging: false
+            )
+        ).environment
+        let resolved = CommandPathResolver.resolve(
+            "pi",
+            environment: launchEnvironment,
+            additionalPaths: CLIPathHints.nativeDefaultsSupplemented(with: []),
+            preferredBasenames: ["pi"]
+        )
         guard resolved.contains("/"), FileManager.default.isExecutableFile(atPath: resolved) else {
             throw ProbeError.piNotInstalled
         }
@@ -45,7 +60,7 @@ enum PiConnectionProbe {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: resolved)
         process.arguments = ["--mode", "rpc", "--no-session", "-nc", "-na"]
-        process.environment = environment.merging([
+        process.environment = launchEnvironment.merging([
             "PI_OFFLINE": "1",
             "PI_SKIP_VERSION_CHECK": "1"
         ]) { _, new in new }

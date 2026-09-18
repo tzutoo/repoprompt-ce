@@ -264,7 +264,7 @@ final class ClaudeAgentModeCoordinator {
         for session: AgentTabSession,
         reason: String
     ) {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               session.claudeController != nil
         else {
             return
@@ -279,7 +279,7 @@ final class ClaudeAgentModeCoordinator {
         for session: AgentTabSession,
         reason: String
     ) async {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               let controller = session.claudeController
         else {
             return
@@ -335,7 +335,10 @@ final class ClaudeAgentModeCoordinator {
         session: AgentTabSession,
         intent: NativeSessionIntent
     ) async -> EnsureSessionOutcome {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        // Shared by Claude-compatible and pi native controllers: both ride this
+        // coordinator through NativeAgentRuntimeControlling. Reject only agents
+        // that do not keep an interactive native controller on the tab session.
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               intentIsCurrent(intent, for: session)
         else {
             return .superseded
@@ -1027,7 +1030,11 @@ final class ClaudeAgentModeCoordinator {
             do {
                 let outboundText = hostCapabilities.prependPendingHandoff(text, session)
                 let instructions = agentModeInstructionInjection(for: session)
-                let providerBoundText = providerBoundUserMessage(outboundText, instructions: instructions)
+                let providerBoundText = providerBoundUserMessage(
+                    outboundText,
+                    instructions: instructions,
+                    agent: session.selectedAgent
+                )
                 let turnID = try await controller.sendUserMessage(providerBoundText)
                 guard intentIsCurrent(intent, for: session),
                       sessionOwnsClaudeController(controller, for: session)
@@ -1144,7 +1151,7 @@ final class ClaudeAgentModeCoordinator {
     /// Detaches the current Claude controller and its tool tracker synchronously
     /// so a replacement run cannot be affected by the old controller's async cleanup.
     func prepareClaudeCancelSync(_ session: AgentTabSession) -> DetachedClaudeController? {
-        guard session.selectedAgent.usesClaudeNativeRuntime else { return nil }
+        guard session.selectedAgent.usesNativeInteractiveRuntime else { return nil }
         invalidateControllerRetirement(for: session)
         let detached = session.claudeController.flatMap {
             detachClaudeController($0, from: session, removeToolTracking: true)
@@ -1175,8 +1182,8 @@ final class ClaudeAgentModeCoordinator {
         from previousAgent: AgentProviderKind,
         to nextAgent: AgentProviderKind
     ) {
-        guard previousAgent.usesClaudeNativeRuntime,
-              !nextAgent.usesClaudeNativeRuntime || previousAgent != nextAgent
+        guard previousAgent.usesNativeInteractiveRuntime,
+              !nextAgent.usesNativeInteractiveRuntime || previousAgent != nextAgent
         else {
             return
         }
@@ -1189,8 +1196,8 @@ final class ClaudeAgentModeCoordinator {
         from previousAgent: AgentProviderKind,
         to nextAgent: AgentProviderKind
     ) async {
-        guard previousAgent.usesClaudeNativeRuntime,
-              !nextAgent.usesClaudeNativeRuntime || previousAgent != nextAgent
+        guard previousAgent.usesNativeInteractiveRuntime,
+              !nextAgent.usesNativeInteractiveRuntime || previousAgent != nextAgent
         else {
             return
         }
@@ -1293,7 +1300,7 @@ final class ClaudeAgentModeCoordinator {
     func shutdownClaudeSessionIfNeeded(_ session: AgentTabSession) async {
         guard session.claudeController != nil
             || hasPendingResumeTransfer(for: session)
-            || session.selectedAgent.usesClaudeNativeRuntime
+            || session.selectedAgent.usesNativeInteractiveRuntime
         else {
             return
         }
@@ -1543,13 +1550,30 @@ final class ClaudeAgentModeCoordinator {
     }
 
     private func agentModeSystemPromptOverride(for session: AgentTabSession) -> String? {
-        ClaudeAgentToolPreferences.agentModePromptDelivery().nativeSystemPromptOverride(
-            instructions: agentModeInstructionInjection(for: session)
+        let instructions = agentModeInstructionInjection(for: session)
+        // pi has no Claude native system prompt to preserve or clear; append the
+        // RepoPrompt Agent Mode instructions via the launch/system-prompt path.
+        if session.selectedAgent.usesPiNativeRuntime {
+            let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return ClaudeAgentToolPreferences.agentModePromptDelivery().nativeSystemPromptOverride(
+            instructions: instructions
         )
     }
 
-    private func providerBoundUserMessage(_ outboundText: String, instructions: String) -> String {
-        ClaudeCompatiblePluginBridge.providerBoundUserMessage(
+    private func providerBoundUserMessage(
+        _ outboundText: String,
+        instructions: String,
+        agent: AgentProviderKind
+    ) -> String {
+        // Keep pi prompts plain: Claude-compatible XML decoration is not a pi
+        // contract, and the controller already carries Agent Mode instructions
+        // through the system-prompt override.
+        if agent.usesPiNativeRuntime {
+            return outboundText
+        }
+        return ClaudeCompatiblePluginBridge.providerBoundUserMessage(
             outboundText,
             instructions: instructions,
             delivery: ClaudeAgentToolPreferences.agentModePromptDelivery()
