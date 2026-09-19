@@ -167,7 +167,6 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         effortLevel: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride: String?
     ) async throws -> NativeAgentRuntimeSessionRef {
-        debugStage("startOrResume begin existingSessionID=\(existingSessionID ?? "nil")")
         if hasActiveSession {
             return NativeAgentRuntimeSessionRef(sessionID: currentSessionIDValue)
         }
@@ -177,7 +176,6 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             effortLevel: effortLevel,
             systemPromptOverride: systemPromptOverride
         )
-        debugStage("sending get_state")
         // Correlate an initial get_state so Agent Mode learns the session identity
         // before the first prompt; failure here fails the run before any user input.
         let stateResponse = try await roundTrip(.getState, timeout: options.stateRequestTimeout)
@@ -185,7 +183,6 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             let suffix = stderrTailSummary.map { ". stderr tail: \($0)" } ?? ""
             throw ControllerError.stateRequestFailed((stateResponse.errorMessage ?? "get_state failed") + suffix)
         }
-        debugStage("get_state responded")
         let state = stateResponse.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
         currentSessionIDValue = state?.sessionId ?? existingSessionID
         emit(.runtimeInit(NativeAgentRuntimeRuntimeInitStatus(
@@ -307,11 +304,8 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         effortLevel: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride: String?
     ) async throws {
-        debugStage("resolving launch environment")
         let environment = await launchEnvironment
-        debugStage("launch environment resolved (\(environment.keys.count) keys)")
         let executableURL = try resolveExecutable(environment: environment)
-        debugStage("resolved executable \(executableURL.path)")
         var mcpConfigPath: String?
         if !options.mcpServers.isEmpty {
             mcpConfigPath = try writeEphemeralMCPConfiguration()
@@ -365,7 +359,6 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         self.process = process
         stdinHandle = stdinPipe.fileHandleForWriting
-        debugStage("process spawned pid=\(process.processIdentifier)")
         if let expectedPIDMCPClientName = options.expectedPIDMCPClientName, process.isRunning {
             let pid = process.processIdentifier
             registeredExpectedAgentPID = pid
@@ -772,12 +765,6 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private func jsonString(from value: PiProviderRuntimeBridge.JSONValue) -> String? {
         guard let data = try? JSONEncoder().encode(value) else { return nil }
         return String(data: data, encoding: .utf8)
-    }
-
-    private func debugStage(_ stage: String) {
-        if options.enableDebugLogging {
-            print("[PiNativeSession] \(stage)")
-        }
     }
 
     private func emit(_ event: NativeAgentRuntimeEvent) {

@@ -1,10 +1,10 @@
 # Agent Provider Plugin Seam
 
-Current as of 2026-05-13. This document is contributor-facing: use it when you are wiring a new autonomous-agent provider, editing the Claude-compatible runtime, or moving code across the core ↔ plugin boundary.
+Current as of 2026-09-19. This document is contributor-facing: use it when you are wiring a new autonomous-agent provider, editing the Claude-compatible runtime, the pi coding-agent runtime, or moving code across the core ↔ plugin boundary.
 
 ## Scope and goals
 
-RepoPrompt CE keeps a small, provider-neutral runtime contract in the app and pushes provider-specific protocol/codec/runtime logic into a Swift package product. The first plugin product is `RepoPromptClaudeCompatibleProvider`, which owns the Claude-compatible family (Claude Code, GLM/Zai, Kimi, custom Claude-compatible). The seam preserves:
+RepoPrompt CE keeps a small, provider-neutral runtime contract in the app and pushes provider-specific protocol/codec/runtime logic into Swift package products under `Packages/RepoPromptAgentProviders/`. The first plugin product is `RepoPromptClaudeCompatibleProvider` (Claude Code, GLM/Zai, Kimi, custom Claude-compatible). The second is `RepoPromptPiProvider` (pi coding agent RPC/JSON codec, launch args, and MCP adapter config DTOs). The seam preserves:
 
 - public `AgentProviderKind` raw values;
 - `AgentProviderBindingID.claude` settings/permission grouping;
@@ -56,9 +56,10 @@ The provider package lives in-repo at `Packages/RepoPromptAgentProviders/` and i
 
 // RepoPrompt executable target dependencies
 .product(name: "RepoPromptClaudeCompatibleProvider", package: "RepoPromptAgentProviders"),
+.product(name: "RepoPromptPiProvider", package: "RepoPromptAgentProviders"),
 ```
 
-The package itself exposes a single library product today:
+The package currently exposes two library products:
 
 ```swift
 // Packages/RepoPromptAgentProviders/Package.swift
@@ -66,6 +67,10 @@ products: [
     .library(
         name: "RepoPromptClaudeCompatibleProvider",
         targets: ["RepoPromptClaudeCompatibleProvider"]
+    ),
+    .library(
+        name: "RepoPromptPiProvider",
+        targets: ["RepoPromptPiProvider"]
     ),
 ],
 ```
@@ -293,7 +298,10 @@ Add the relevant focused suite before any catalog/codec change, and snapshot mod
 - `Package.swift` — root manifest and product wiring.
 - `Packages/RepoPromptAgentProviders/Package.swift` — provider package manifest.
 - `Packages/RepoPromptAgentProviders/Sources/RepoPromptClaudeCompatibleProvider/` — plugin DTOs, codec, translator, prompt delivery, environment builder, catalog, headless arg builder, launch-env resolver.
-- `Sources/RepoPrompt/Infrastructure/AI/Providers/ClaudeCode/ClaudeCompatibleProviderRuntimeBridge.swift` — single package import point.
+- `Packages/RepoPromptAgentProviders/Sources/RepoPromptPiProvider/` — pi RPC/JSON codec, launch options, model-catalog DTOs, and ephemeral pi-mcp-adapter `--mcp-config` document.
+- `Sources/RepoPrompt/Infrastructure/AI/Providers/ClaudeCode/ClaudeCompatibleProviderRuntimeBridge.swift` — single Claude-compatible package import point.
+- `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/PiProviderRuntimeBridge.swift` — single pi package import point.
+- `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/` — core process control (`PiNativeSessionController`, `PiExecAgentProvider`) and Settings connect probe.
 - `Sources/RepoPrompt/Features/AgentMode/Providers/ClaudeCompatible/` — Agent-Mode facade and adapter trio.
 - `Sources/RepoPrompt/Features/AgentMode/Runtime/Native/NativeAgentRuntimeContracts.swift` — provider-neutral runtime contract.
 - `Sources/RepoPromptShared/Workflows/` — provider-neutral RepoPrompt workflow IDs, catalog metadata, variants, and renderers shared by the app, installs, MCP prompt registration, and direct headless execution.

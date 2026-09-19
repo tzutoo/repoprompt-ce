@@ -187,7 +187,7 @@ The guardrail script verifies:
 - Benchmark, debug, and stress harnesses were classified as app-integrated diagnostics or documented wiring exceptions.
 - The old top-level layer buckets were pruned as part of Work Item 11.
 - The native file-tree visualization, IDE-era search view-model layer, and eager root materialization seams were removed. Textual project structure maps and MCP `get_file_tree` output remain supported compatibility surfaces.
-- The Claude-compatible Agent Mode provider family was extracted into the `RepoPromptClaudeCompatibleProvider` package product under `Packages/RepoPromptAgentProviders/`; see `docs/architecture/provider-plugins.md` for the bridge/adapter layout and rules for adding new providers.
+- The Claude-compatible Agent Mode provider family was extracted into the `RepoPromptClaudeCompatibleProvider` package product under `Packages/RepoPromptAgentProviders/`; see `docs/architecture/provider-plugins.md` for the bridge/adapter layout and rules for adding new providers. The pi coding agent follows the same seam as `RepoPromptPiProvider` (Foundation-only codec/launch DTOs) with core owning `PiNativeSessionController`, `PiExecAgentProvider`, and Agent Mode wiring.
 - Workflow prompt generation now lives in the provider-neutral catalog under `Sources/RepoPromptShared/Workflows/`; the old provider-specific `ClaudeCodeCommands` surface and duplicated bundled prompt mirror under `AppResources/Services/AI/Prompts/` should not be restored.
 
 ## Contributor validation commands
