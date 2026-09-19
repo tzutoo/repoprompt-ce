@@ -162,8 +162,8 @@ final class PiNativeSessionControllerTests: XCTestCase {
         )
         await controller.ensureEventsStreamReady()
         let tempDirectory = FileManager.default.temporaryDirectory
-        let preexisting = Set(
-            try FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)
+        let preexisting = try Set(
+            FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)
                 .filter { $0.lastPathComponent.hasPrefix("rpce-pi-mcp-") && $0.pathExtension == "json" }
                 .map(\.path)
         )

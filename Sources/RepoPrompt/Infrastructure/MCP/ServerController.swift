@@ -52,7 +52,11 @@ final actor ServerController: ObservableObject {
         "opencode",
         "cursor",
         "cursor-mcp-client",
-        "claude-ai"
+        "claude-ai",
+        // pi-mcp-adapter presents `pi-mcp-<serverName>` (e.g. `pi-mcp-RepoPromptCE`).
+        // Auto-approve the family so Agent Mode initialize does not wait on a user
+        // dialog and time out before the first prompt.
+        "pi-mcp"
     ]
     /// In-memory copy (always mutate on MainActor)
     private var alwaysAllowedClients: Set<String> = ServerController.loadSanitizedAlwaysAllowedClients()

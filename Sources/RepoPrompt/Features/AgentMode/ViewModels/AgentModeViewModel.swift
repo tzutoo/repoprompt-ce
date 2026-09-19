@@ -2361,6 +2361,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 arguments: serverConfiguration.args,
                 environment: serverConfiguration.environmentDictionary,
                 lifecycle: .eager,
+                requestTimeoutMilliseconds: 15000,
                 directTools: .all
             )
         ]

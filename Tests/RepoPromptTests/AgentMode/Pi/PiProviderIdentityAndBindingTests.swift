@@ -12,6 +12,9 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         // Storage keys canonicalize the exact registered client name.
         XCTAssertEqual(MCPClientIdentity.storageKey("pi-mcp-RepoPromptCE"), "pi-mcp")
         XCTAssertFalse(MCPClientIdentity.sameFamily("pi-mcp-RepoPromptCE", "grok-shell-RepoPromptCE"))
+        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi-mcp-RepoPromptCE"))
+        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi-mcp"))
+        XCTAssertFalse(ServerController.isBuiltInAlwaysAllowedClient("pi-mcpx"))
     }
 
     func testProviderKindMetadata() {
