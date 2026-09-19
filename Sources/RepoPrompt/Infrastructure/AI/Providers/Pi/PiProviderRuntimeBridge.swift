@@ -42,6 +42,8 @@ enum PiProviderRuntimeBridge {
     typealias MCPAdapterClientIdentity = PiMCPAdapterClientIdentity
     typealias ExtensionUIRequest = PiExtensionUIRequest
     typealias AssistantMessageDelta = PiAssistantMessageDelta
+    typealias AgentMessage = PiAgentMessage
+    typealias TokenUsage = PiTokenUsage
 
     // MARK: - Pure helpers
 
