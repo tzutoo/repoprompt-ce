@@ -64,5 +64,9 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         let filtered = AgentModelCatalog.AvailabilityContext(piAvailable: true)
             .filteredForRecommendationProviders([])
         XCTAssertFalse(filtered.piAvailable)
+        XCTAssertTrue(AgentModelCatalog.AvailabilityContext.current.piAvailable)
+        XCTAssertTrue(
+            AgentModelCatalog.AvailabilityContext.none.assumingAvailable(.piAgent).piAvailable
+        )
     }
 }

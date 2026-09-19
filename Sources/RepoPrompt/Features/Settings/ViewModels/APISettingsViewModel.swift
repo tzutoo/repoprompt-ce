@@ -1233,6 +1233,7 @@ public class APISettingsViewModel: ObservableObject {
         let shouldValidateOpenCode = isOpenCodeConnected
         let shouldValidateCursor = isCursorConnected
         let shouldValidateGrokBuild = isGrokBuildConnected
+        let shouldValidatePi = isPiConnected
 
         let task = Task { @MainActor [weak self] in
             guard let self, !Task.isCancelled, !hasPreparedForWindowClose else { return }
@@ -1245,7 +1246,8 @@ public class APISettingsViewModel: ObservableObject {
             async let openCodeReady = probeCachedOpenCodeConnection(ifNeeded: shouldValidateOpenCode)
             async let cursorReady = probeCachedCursorConnection(ifNeeded: shouldValidateCursor)
             async let grokBuildReady = probeCachedGrokBuildConnection(ifNeeded: shouldValidateGrokBuild)
-            let readiness = await (claudeReady, codexReady, openCodeReady, cursorReady, grokBuildReady)
+            async let piReady = probeCachedPiConnection(ifNeeded: shouldValidatePi)
+            let readiness = await (claudeReady, codexReady, openCodeReady, cursorReady, grokBuildReady, piReady)
             guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
 
             applyContextBuilderProviderValidationResult(readiness.0, provider: .claudeCode)
@@ -1257,6 +1259,7 @@ public class APISettingsViewModel: ObservableObject {
             applyContextBuilderProviderValidationResult(readiness.2, provider: .openCode)
             applyContextBuilderProviderValidationResult(readiness.3, provider: .cursor)
             applyContextBuilderProviderValidationResult(readiness.4, provider: .grokBuild)
+            applyContextBuilderProviderValidationResult(readiness.5, provider: .piAgent)
             if codexPublicationAllowed,
                isCodexConnected,
                isVerifiedContextBuilderProvider(.codexExec)
@@ -1362,6 +1365,14 @@ public class APISettingsViewModel: ObservableObject {
             return true
         }
         return await GrokBuildACPModelPollingService.shared.refreshNow(workspacePath: nil)
+    }
+
+    private func probeCachedPiConnection(ifNeeded: Bool) async -> Bool {
+        guard ifNeeded else { return false }
+        // The interactive Settings connect probe already persisted PiCLIConnected after a
+        // successful RPC + adapter check. Re-running that probe here would stall Context
+        // Builder startup; honor the cached connected flag and treat the CLI as ready.
+        return isPiConnected || UserDefaults.standard.bool(forKey: "PiCLIConnected")
     }
 
     private func diagnosticReason(for error: Error) -> APIKeychainAccessDiagnostic.Reason {
