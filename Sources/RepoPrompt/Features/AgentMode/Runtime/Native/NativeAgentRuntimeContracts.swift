@@ -22,7 +22,9 @@ protocol NativeAgentRuntimeControlling: Actor {
     ) async throws -> NativeAgentRuntimeSessionRef
     func currentSessionRef() async -> NativeAgentRuntimeSessionRef
     func applyModelAndEffort(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws
-    func sendUserMessage(_ text: String) async throws -> UUID
+    /// Sends a user turn. `images` is ignored by runtimes that have no native image
+    /// prompt field; pi maps them onto RPC `prompt.images`.
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID
     /// Sends a reasoned interrupt request to the provider runtime.
     /// - Parameter reason: "interrupt" for steering (graceful), "cancel" for forceful stop.
     func interruptTurn(reason: String) async -> NativeAgentRuntimeInterruptOutcome
@@ -35,6 +37,17 @@ extension NativeAgentRuntimeControlling {
     func cleanupConversation(_ handle: ProviderConversationCleanupHandle, action: ProviderConversationCleanupAction) async -> ProviderConversationCleanupOutcome {
         .unsupported(message: "Native runtime has no local API for \(action.rawValue) cleanup of conversations.")
     }
+
+    func sendUserMessage(_ text: String) async throws -> UUID {
+        try await sendUserMessage(text, images: [])
+    }
+}
+
+/// In-memory image payload for native prompt APIs. Callers encode composer
+/// attachments before crossing into the runtime controller.
+struct NativeAgentRuntimeImage: Equatable {
+    let data: Data
+    let mimeType: String
 }
 
 // MARK: - Neutral native-runtime DTOs

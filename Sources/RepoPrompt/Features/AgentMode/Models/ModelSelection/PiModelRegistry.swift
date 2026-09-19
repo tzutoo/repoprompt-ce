@@ -16,6 +16,33 @@ final class PiModelRegistry {
         let provider: String
         let reasoning: Bool
         let contextWindow: Int
+        let inputTypes: [String]
+
+        init(
+            id: String,
+            name: String,
+            provider: String,
+            reasoning: Bool,
+            contextWindow: Int,
+            inputTypes: [String] = ["text"]
+        ) {
+            self.id = id
+            self.name = name
+            self.provider = provider
+            self.reasoning = reasoning
+            self.contextWindow = contextWindow
+            self.inputTypes = inputTypes
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            name = try container.decode(String.self, forKey: .name)
+            provider = try container.decode(String.self, forKey: .provider)
+            reasoning = try container.decode(Bool.self, forKey: .reasoning)
+            contextWindow = try container.decode(Int.self, forKey: .contextWindow)
+            inputTypes = try container.decodeIfPresent([String].self, forKey: .inputTypes) ?? ["text"]
+        }
     }
 
     private static let storeKey = "PiDiscoveredModels"
@@ -70,6 +97,24 @@ final class PiModelRegistry {
         return resolvedRecords().first {
             $0.id.caseInsensitiveCompare(normalized) == .orderedSame
         }?.contextWindow
+    }
+
+    /// Whether the selected model advertises image input. Unknown / Default
+    /// selections are treated as image-capable so a first-run connect snapshot
+    /// that omitted `input` does not block composer attachments.
+    func modelAcceptsImages(rawModel: String) -> Bool {
+        let normalized = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty || normalized == AgentModel.defaultModel.rawValue {
+            return true
+        }
+        guard let record = resolvedRecords().first(where: {
+            $0.id.caseInsensitiveCompare(normalized) == .orderedSame
+        }) else {
+            return true
+        }
+        let types = record.inputTypes.map { $0.lowercased() }
+        guard !types.isEmpty else { return true }
+        return types.contains(where: { $0 == "image" || $0.hasPrefix("image/") })
     }
 
     /// Catalog options: the Default placeholder first, then discovered models.

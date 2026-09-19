@@ -3871,7 +3871,8 @@ public class APISettingsViewModel: ObservableObject {
                     name: model.name,
                     provider: model.provider,
                     reasoning: model.reasoning,
-                    contextWindow: model.contextWindow
+                    contextWindow: model.contextWindow,
+                    inputTypes: model.inputTypes
                 )
             })
             let piOptions = AgentModelCatalog.options(

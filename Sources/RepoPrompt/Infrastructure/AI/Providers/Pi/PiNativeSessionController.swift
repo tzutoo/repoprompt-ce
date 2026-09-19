@@ -223,17 +223,20 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
     }
 
-    func sendUserMessage(_ text: String) async throws -> UUID {
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
         guard hasActiveSession else {
             throw NativeAgentRuntimeControllerError.processNotRunning
         }
         let turnID = UUID()
         pendingTurnIDBuffer.append(turnID)
         let behavior: PiProviderRuntimeBridge.StreamingBehavior? = turnInFlight ? .steer : nil
+        let rpcImages = images.map {
+            PiProviderRuntimeBridge.ImageAttachment(data: $0.data.base64EncodedString(), mimeType: $0.mimeType)
+        }
         // Prompt acceptance can lag while the eager MCP adapter finishes its
         // first handshake; keep this above the default command timeout.
         let response = try await roundTrip(
-            .prompt(message: text, streamingBehavior: behavior),
+            .prompt(message: text, images: rpcImages, streamingBehavior: behavior),
             timeout: max(options.commandTimeout, 30)
         )
         guard response.success else {

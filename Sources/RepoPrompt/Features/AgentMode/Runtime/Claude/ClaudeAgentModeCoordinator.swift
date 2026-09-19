@@ -908,7 +908,7 @@ final class ClaudeAgentModeCoordinator {
     func sendClaudeNativeMessage(
         session: AgentTabSession,
         text: String,
-        attachments _: [AgentImageAttachment],
+        attachments: [AgentImageAttachment],
         intent: NativeSessionIntent
     ) async -> NativeSendOutcome {
         guard intentIsCurrent(intent, for: session) else { return .superseded }
@@ -1035,7 +1035,24 @@ final class ClaudeAgentModeCoordinator {
                     instructions: instructions,
                     agent: session.selectedAgent
                 )
-                let turnID = try await controller.sendUserMessage(providerBoundText)
+                let images: [NativeAgentRuntimeImage]
+                if session.selectedAgent.usesPiNativeRuntime, !attachments.isEmpty {
+                    do {
+                        images = try encodePiPromptImages(
+                            attachments,
+                            selectedModelRaw: session.selectedModelRaw
+                        )
+                    } catch {
+                        return recordSendFailure(
+                            error.localizedDescription,
+                            session: session,
+                            intent: intent
+                        )
+                    }
+                } else {
+                    images = []
+                }
+                let turnID = try await controller.sendUserMessage(providerBoundText, images: images)
                 guard intentIsCurrent(intent, for: session),
                       sessionOwnsClaudeController(controller, for: session)
                 else {
@@ -1578,5 +1595,21 @@ final class ClaudeAgentModeCoordinator {
             instructions: instructions,
             delivery: ClaudeAgentToolPreferences.agentModePromptDelivery()
         )
+    }
+
+    private func encodePiPromptImages(
+        _ attachments: [AgentImageAttachment],
+        selectedModelRaw: String
+    ) throws -> [NativeAgentRuntimeImage] {
+        if !PiModelRegistry.shared.modelAcceptsImages(rawModel: selectedModelRaw) {
+            let name = selectedModelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = name.isEmpty || name == AgentModel.defaultModel.rawValue
+                ? "the current pi model"
+                : name
+            throw PiPromptImageEncoder.EncoderError.unsupportedSource(
+                "\(label) does not accept image input. Choose a multimodal pi model, or send the image as a file path after enabling pi built-in read tools."
+            )
+        }
+        return try PiPromptImageEncoder.encode(attachments)
     }
 }

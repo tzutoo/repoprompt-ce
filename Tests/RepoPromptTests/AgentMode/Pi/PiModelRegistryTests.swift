@@ -89,4 +89,29 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertEqual(options.count, 1)
         XCTAssertTrue(options[0].isPlaceholderDefault)
     }
+
+    func testModelAcceptsImagesUsesInputTypes() {
+        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: AgentModel.defaultModel.rawValue))
+        PiModelRegistry.shared.update(records: [
+            PiModelRegistry.ModelRecord(
+                id: "text-only",
+                name: "Text",
+                provider: "zai",
+                reasoning: false,
+                contextWindow: 128_000,
+                inputTypes: ["text"]
+            ),
+            PiModelRegistry.ModelRecord(
+                id: "vision",
+                name: "Vision",
+                provider: "zai",
+                reasoning: false,
+                contextWindow: 128_000,
+                inputTypes: ["text", "image"]
+            )
+        ])
+        XCTAssertFalse(PiModelRegistry.shared.modelAcceptsImages(rawModel: "text-only"))
+        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: "vision"))
+        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: "unknown-model"))
+    }
 }

@@ -344,7 +344,8 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     @discardableResult
-    func sendUserMessage(_ text: String) async throws -> UUID {
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        _ = images
         guard process != nil else {
             throw ControllerError.processNotRunning
         }
