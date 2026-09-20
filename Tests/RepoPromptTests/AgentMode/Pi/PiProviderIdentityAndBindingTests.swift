@@ -68,5 +68,12 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertTrue(
             AgentModelCatalog.AvailabilityContext.none.assumingAvailable(.piAgent).piAvailable
         )
+        XCTAssertTrue(
+            AgentModelCatalog.selectableAgents(availability: available).contains(.piAgent)
+        )
+        XCTAssertFalse(
+            AgentModelCatalog.selectableAgents(availability: .none).contains(.piAgent)
+        )
+        XCTAssertTrue(AgentModelCatalog.supportedCLIProviderAgents.contains(.piAgent))
     }
 }
