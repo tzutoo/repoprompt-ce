@@ -74,7 +74,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         case mcpConfigurationWriteFailed(String)
         case stateRequestFailed(String)
         case commandFailed(String)
-        case processTerminated(Int32)
+        case processTerminated(Int32, stderr: String?)
 
         var errorDescription: String? {
             switch self {
@@ -88,8 +88,12 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
                 "pi RPC initialization failed: \(detail)"
             case let .commandFailed(detail):
                 "pi RPC command failed: \(detail)"
-            case let .processTerminated(exitCode):
-                "The pi process exited unexpectedly (code \(exitCode))."
+            case let .processTerminated(exitCode, stderr):
+                if let stderr, !stderr.isEmpty {
+                    "The pi process exited unexpectedly (code \(exitCode)). \(stderr)"
+                } else {
+                    "The pi process exited unexpectedly (code \(exitCode))."
+                }
             }
         }
     }
@@ -172,16 +176,17 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         try await launchProcess(
             existingSessionID: existingSessionID,
-            model: model,
-            effortLevel: effortLevel,
+            model: nil,
+            effortLevel: nil,
             systemPromptOverride: systemPromptOverride
         )
         // Correlate an initial get_state so Agent Mode learns the session identity
         // before the first prompt; failure here fails the run before any user input.
         let stateResponse = try await roundTrip(.getState, timeout: options.stateRequestTimeout)
         guard stateResponse.success else {
-            let suffix = stderrTailSummary.map { ". stderr tail: \($0)" } ?? ""
-            throw ControllerError.stateRequestFailed((stateResponse.errorMessage ?? "get_state failed") + suffix)
+            throw ControllerError.stateRequestFailed(
+                annotatedFailure(stateResponse.errorMessage ?? "get_state failed")
+            )
         }
         let state = stateResponse.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
         currentSessionIDValue = state?.sessionId ?? existingSessionID
@@ -191,6 +196,14 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             mcpServerStatuses: [:],
             initializeResponse: nil
         )))
+        // Apply picker model over RPC after the process is alive. Passing
+        // --provider/--model on argv can make pi exit before RPC starts when the
+        // selected family is unauthenticated.
+        if let model, !model.isEmpty, model != AgentModel.defaultModel.rawValue {
+            try await applyModelAndEffort(model: model, effortLevel: effortLevel)
+        } else if effortLevel != nil {
+            try await applyModelAndEffort(model: nil, effortLevel: effortLevel)
+        }
         return NativeAgentRuntimeSessionRef(sessionID: currentSessionIDValue)
     }
 
@@ -210,7 +223,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             )
             let response = try await roundTrip(setModel)
             guard response.success else {
-                throw ControllerError.commandFailed(response.errorMessage ?? "set_model failed")
+                throw ControllerError.commandFailed(
+                    annotatedFailure(response.errorMessage ?? "set_model failed")
+                )
             }
         }
         if let effortLevel {
@@ -549,6 +564,13 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func annotatedFailure(_ detail: String) -> String {
+        if let stderrTailSummary {
+            return "\(detail). stderr tail: \(stderrTailSummary)"
+        }
+        return detail
+    }
+
     private func handleStdoutEOF() async {
         if let remainder = lineAccumulator.finish() {
             await handleLine(remainder)
@@ -557,7 +579,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         guard !shutDown else { return }
         let exitCode = process?.terminationStatus ?? -1
         for (_, completion) in pendingResponses {
-            completion(.failure(ControllerError.processTerminated(exitCode)))
+            completion(.failure(ControllerError.processTerminated(exitCode, stderr: stderrTailSummary)))
         }
         pendingResponses.removeAll()
         if turnInFlight, let turnID = pendingTurnIDBuffer.first {

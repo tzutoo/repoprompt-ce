@@ -470,7 +470,8 @@ final class ClaudeAgentModeCoordinator {
             return .superseded
         } catch {
             guard intentIsCurrent(intent, for: session) else { return .superseded }
-            return .failed(message: "Claude native start failed: \(error.localizedDescription)")
+            let prefix = session.selectedAgent.usesPiNativeRuntime ? "pi start failed" : "Claude native start failed"
+            return .failed(message: "\(prefix): \(error.localizedDescription)")
         }
     }
 
