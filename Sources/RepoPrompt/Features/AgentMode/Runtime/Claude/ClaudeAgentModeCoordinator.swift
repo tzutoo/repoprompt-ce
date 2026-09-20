@@ -1072,8 +1072,9 @@ final class ClaudeAgentModeCoordinator {
                     }
                     return .superseded
                 }
+                let prefix = session.selectedAgent.usesPiNativeRuntime ? "pi send failed" : "Claude native send failed"
                 return recordSendFailure(
-                    "Claude native send failed: \(error.localizedDescription)",
+                    "\(prefix): \(error.localizedDescription)",
                     session: session,
                     intent: intent
                 )

@@ -56,6 +56,9 @@ final class PiRPCCommandTests: XCTestCase {
         let thinking = try encode(.setThinkingLevel(level: "high"))
         XCTAssertEqual(thinking["type"]?.stringValue, "set_thinking_level")
         XCTAssertEqual(thinking["level"]?.stringValue, "high")
+        let noProvider = try encode(.setModel(provider: "", modelId: "glm-5.3"))
+        XCTAssertNil(noProvider["provider"])
+        XCTAssertEqual(noProvider["modelId"]?.stringValue, "glm-5.3")
     }
 
     func testQueueDeliveryModeWireValues() throws {

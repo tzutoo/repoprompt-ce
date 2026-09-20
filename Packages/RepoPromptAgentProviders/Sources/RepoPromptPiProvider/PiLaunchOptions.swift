@@ -18,8 +18,19 @@ public struct PiModelSelection: Equatable, Sendable {
     public let thinkingLevel: String?
 
     public init(provider: String? = nil, modelPattern: String, thinkingLevel: String? = nil) {
-        self.provider = provider
-        self.modelPattern = modelPattern
+        let trimmedPattern = modelPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedProvider = provider?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedProvider == nil || trimmedProvider?.isEmpty == true,
+           let slash = trimmedPattern.firstIndex(of: "/"),
+           slash > trimmedPattern.startIndex,
+           slash < trimmedPattern.index(before: trimmedPattern.endIndex)
+        {
+            self.provider = String(trimmedPattern[..<slash])
+            self.modelPattern = String(trimmedPattern[trimmedPattern.index(after: slash)...])
+        } else {
+            self.provider = trimmedProvider?.isEmpty == true ? nil : trimmedProvider
+            self.modelPattern = trimmedPattern
+        }
         self.thinkingLevel = thinkingLevel
     }
 }

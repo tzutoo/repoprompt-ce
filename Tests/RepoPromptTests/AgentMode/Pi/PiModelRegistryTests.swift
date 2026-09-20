@@ -46,7 +46,7 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertEqual(options.count, 2)
         XCTAssertTrue(options[0].isPlaceholderDefault)
         XCTAssertEqual(options[0].rawValue, AgentModel.defaultModel.rawValue)
-        XCTAssertEqual(options[1].rawValue, "glm-5.3")
+        XCTAssertEqual(options[1].rawValue, "zai/glm-5.3")
         XCTAssertEqual(options[1].displayName, "GLM 5.3")
         XCTAssertEqual(options[1].description, "zai")
     }
@@ -60,6 +60,7 @@ final class PiModelRegistryTests: XCTestCase {
             record("glm-5.3", contextWindow: 200_000)
         ])
         XCTAssertTrue(PiModelRegistry.shared.contains(rawModel: "GLM-5.3"))
+        XCTAssertTrue(PiModelRegistry.shared.contains(rawModel: "zai/GLM-5.3"))
         XCTAssertFalse(PiModelRegistry.shared.contains(rawModel: "other"))
         XCTAssertEqual(PiModelRegistry.shared.contextWindow(forRaw: "GLM-5.3"), 200_000)
         XCTAssertNil(PiModelRegistry.shared.contextWindow(forRaw: "missing"))
@@ -72,10 +73,11 @@ final class PiModelRegistryTests: XCTestCase {
         let availability = AgentModelCatalog.AvailabilityContext(piAvailable: true)
         let options = AgentModelCatalog.options(for: .piAgent, availability: availability)
         XCTAssertEqual(options.count, 2)
-        XCTAssertEqual(options.last?.rawValue, "glm-5.3")
+        XCTAssertEqual(options.last?.rawValue, "zai/glm-5.3")
 
         XCTAssertTrue(AgentModelCatalog.isValid(rawModel: AgentModel.defaultModel.rawValue, for: .piAgent, availability: availability))
         XCTAssertTrue(AgentModelCatalog.isValid(rawModel: "glm-5.3", for: .piAgent, availability: availability))
+        XCTAssertTrue(AgentModelCatalog.isValid(rawModel: "zai/glm-5.3", for: .piAgent, availability: availability))
         XCTAssertFalse(AgentModelCatalog.isValid(rawModel: "not-a-pi-model", for: .piAgent, availability: availability))
         // Unavailable provider blocks everything.
         XCTAssertFalse(AgentModelCatalog.isValid(rawModel: "glm-5.3", for: .piAgent, availability: .none))

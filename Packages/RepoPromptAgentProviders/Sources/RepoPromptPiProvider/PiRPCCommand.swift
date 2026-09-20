@@ -117,7 +117,9 @@ public enum PiRPCCommand: Equatable, Sendable {
             object["type"] = .string("get_last_assistant_text")
         case let .setModel(provider, modelId):
             object["type"] = .string("set_model")
-            object["provider"] = .string(provider)
+            if !provider.isEmpty {
+                object["provider"] = .string(provider)
+            }
             object["modelId"] = .string(modelId)
         case let .setThinkingLevel(level):
             object["type"] = .string("set_thinking_level")

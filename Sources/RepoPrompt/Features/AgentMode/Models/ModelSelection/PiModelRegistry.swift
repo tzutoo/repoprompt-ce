@@ -43,6 +43,19 @@ final class PiModelRegistry {
             contextWindow = try container.decode(Int.self, forKey: .contextWindow)
             inputTypes = try container.decodeIfPresent([String].self, forKey: .inputTypes) ?? ["text"]
         }
+
+        /// Stable picker value. Prefix with `provider/` so later `set_model` keeps
+        /// the originating auth family (ids like `grok` collide across providers).
+        var catalogRawValue: String {
+            let trimmedProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedProvider.isEmpty { return id }
+            return "\(trimmedProvider)/\(id)"
+        }
+
+        var catalogDisplayName: String {
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmedName.isEmpty ? id : trimmedName
+        }
     }
 
     private static let storeKey = "PiDiscoveredModels"
@@ -85,18 +98,25 @@ final class PiModelRegistry {
     }
 
     func contains(rawModel: String) -> Bool {
-        let normalized = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return false }
-        return resolvedRecords().contains {
-            $0.id.caseInsensitiveCompare(normalized) == .orderedSame
-        }
+        record(matchingRaw: rawModel) != nil
     }
 
     func contextWindow(forRaw rawModel: String) -> Int? {
+        record(matchingRaw: rawModel)?.contextWindow
+    }
+
+    func record(matchingRaw rawModel: String) -> ModelRecord? {
         let normalized = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return resolvedRecords().first {
+        guard !normalized.isEmpty else { return nil }
+        let records = resolvedRecords()
+        if let exact = records.first(where: {
+            $0.catalogRawValue.caseInsensitiveCompare(normalized) == .orderedSame
+        }) {
+            return exact
+        }
+        return records.first {
             $0.id.caseInsensitiveCompare(normalized) == .orderedSame
-        }?.contextWindow
+        }
     }
 
     /// Whether the selected model advertises image input. Unknown / Default
@@ -107,9 +127,7 @@ final class PiModelRegistry {
         if normalized.isEmpty || normalized == AgentModel.defaultModel.rawValue {
             return true
         }
-        guard let record = resolvedRecords().first(where: {
-            $0.id.caseInsensitiveCompare(normalized) == .orderedSame
-        }) else {
+        guard let record = record(matchingRaw: normalized) else {
             return true
         }
         let types = record.inputTypes.map { $0.lowercased() }
@@ -132,8 +150,8 @@ final class PiModelRegistry {
         )
         let discovered = records.map { record in
             AgentModelOption(
-                rawValue: record.id,
-                displayName: record.name.isEmpty ? record.id : record.name,
+                rawValue: record.catalogRawValue,
+                displayName: record.catalogDisplayName,
                 description: record.provider.isEmpty ? nil : record.provider,
                 isPlaceholderDefault: false,
                 isProviderDefault: false

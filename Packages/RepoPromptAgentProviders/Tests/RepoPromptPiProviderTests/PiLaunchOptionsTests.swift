@@ -107,6 +107,15 @@ final class PiLaunchOptionsTests: XCTestCase {
         XCTAssertFalse(persistent.arguments().contains("--no-session"))
     }
 
+    func testModelSelectionParsesProviderSlashId() {
+        let selection = PiModelSelection(modelPattern: "xai/grok-4")
+        XCTAssertEqual(selection.provider, "xai")
+        XCTAssertEqual(selection.modelPattern, "grok-4")
+        let explicit = PiModelSelection(provider: "zai", modelPattern: "xai/grok-4")
+        XCTAssertEqual(explicit.provider, "zai")
+        XCTAssertEqual(explicit.modelPattern, "xai/grok-4")
+    }
+
     func testEnvironmentPreservesBaseValues() {
         let options = PiLaunchOptions(mode: .rpc)
         let env = options.environment(over: ["PATH": "/usr/bin"])
