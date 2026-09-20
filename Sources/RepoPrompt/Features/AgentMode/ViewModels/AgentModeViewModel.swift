@@ -1203,15 +1203,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func restoreLastUsedAgentSelectionIfNeeded() {
         guard let savedAgentRaw = UserDefaults.standard.string(forKey: Self.lastUsedAgentKey) else { return }
         let savedModelRaw = Self.lastUsedModelRaw(forAgentRaw: savedAgentRaw)
+        // New chats should land on a currently connected provider. Preserving an
+        // unavailable last-used agent (for example OpenCode after disconnect) locks
+        // the picker onto that family and greys out connected agents such as pi.
         let normalized = normalizedSelection(
             agentRaw: savedAgentRaw,
             modelRaw: savedModelRaw,
-            preserveUnavailableAgent: true
+            preserveUnavailableAgent: false
         )
         isRestoringState = true
         selectedAgent = normalized.agent
         selectedModelRaw = normalized.modelRaw
         isRestoringState = false
+        if usesProductionAgentDefaultsAndModelPolling,
+           normalized.agent.rawValue != savedAgentRaw
+        {
+            UserDefaults.standard.set(normalized.agent.rawValue, forKey: Self.lastUsedAgentKey)
+        }
     }
 
     private func persistLastUsedModelIfNeeded(agent: AgentProviderKind, modelRaw: String) {
