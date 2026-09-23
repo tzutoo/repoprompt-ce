@@ -337,7 +337,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             model: model.map { PiProviderRuntimeBridge.ModelSelection(modelPattern: $0) },
             session: existingSessionID.map(PiProviderRuntimeBridge.SessionSelection.resume) ?? .persistent,
             toolProfile: options.toolProfile,
-            extensionPolicy: .pinnedAdapterOnly(version: options.pinnedAdapterVersion),
+            extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
+                adapterVersion: options.pinnedAdapterVersion
+            ),
             mcpConfigPath: mcpConfigPath,
             suppressProjectResources: !options.suppressDeterminismFlags,
             suppressContextFiles: !options.suppressDeterminismFlags,

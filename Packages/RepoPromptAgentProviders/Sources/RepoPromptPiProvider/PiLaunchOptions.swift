@@ -73,13 +73,73 @@ public enum PiToolProfile: Equatable, Sendable {
     }
 }
 
-/// Which extensions a managed launch loads. The pinned profile is deterministic: user
-/// and project extension discovery is disabled and only the version-pinned
-/// pi-mcp-adapter loads, so user extensions cannot alter defaults, tools, or raise
-/// blocking dialogs. Unpinned `npm:` specs resolve to latest and must not be used.
+/// Discovers user-global pi extension sources under `~/.pi/agent/extensions`.
+///
+/// Matches pi's documented auto-discovery: `*.ts` files and `*/index.ts`
+/// packages. Project-local `.pi/extensions` are intentionally excluded so
+/// managed launches stay independent of the current worktree.
+public enum PiUserGlobalExtensionDiscovery: Sendable {
+    public static func defaultDirectory(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        homeDirectory
+            .appendingPathComponent(".pi", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true)
+            .appendingPathComponent("extensions", isDirectory: true)
+    }
+
+    public static func sourcePaths(
+        in directory: URL,
+        fileManager: FileManager = .default
+    ) -> [String] {
+        let contents = (try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        var paths: [String] = []
+        for url in contents.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDirectory {
+                let index = url.appendingPathComponent("index.ts")
+                if fileManager.isReadableFile(atPath: index.path) {
+                    paths.append(index.standardizedFileURL.path)
+                }
+            } else if url.pathExtension == "ts" {
+                paths.append(url.standardizedFileURL.path)
+            }
+        }
+        return paths
+    }
+}
+
+/// Which extensions a managed launch loads. Unpinned `npm:` specs resolve to
+/// latest and must not be used.
+///
+/// `--no-extensions` disables both auto-discovery and installed `settings.json`
+/// packages so a second `-e npm:pi-mcp-adapter@…` cannot double-load the
+/// adapter. User-global custom providers (for example a `local` OpenAI-compatible
+/// catalog) live under `~/.pi/agent/extensions` and must be re-attached
+/// explicitly or Agent Mode's catalog will not match the Settings connect probe.
 public enum PiExtensionPolicy: Equatable, Sendable {
     case userEnvironment
     case pinnedAdapterOnly(version: String)
+    /// `--no-extensions`, then each discovered user-global extension source,
+    /// then the version-pinned pi-mcp-adapter.
+    case pinnedAdapterWithUserGlobalExtensions(version: String, directory: String)
+
+    /// Managed Agent Mode / probe / headless launches: keep `--no-extensions` so
+    /// installed packages cannot double-load the adapter, then re-attach the
+    /// user's global extension sources and the pinned adapter.
+    public static func pinnedAdapterWithDiscoveredUserGlobalExtensions(
+        version: String,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> PiExtensionPolicy {
+        .pinnedAdapterWithUserGlobalExtensions(
+            version: version,
+            directory: PiUserGlobalExtensionDiscovery.defaultDirectory(homeDirectory: homeDirectory).path
+        )
+    }
 
     var arguments: [String] {
         switch self {
@@ -87,6 +147,12 @@ public enum PiExtensionPolicy: Equatable, Sendable {
             []
         case let .pinnedAdapterOnly(version):
             ["--no-extensions", "-e", "npm:pi-mcp-adapter@\(version)"]
+        case let .pinnedAdapterWithUserGlobalExtensions(version, directory):
+            ["--no-extensions"]
+                + PiUserGlobalExtensionDiscovery.sourcePaths(
+                    in: URL(fileURLWithPath: directory, isDirectory: true)
+                ).flatMap { ["-e", $0] }
+                + ["-e", "npm:pi-mcp-adapter@\(version)"]
         }
     }
 }

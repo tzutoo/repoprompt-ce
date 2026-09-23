@@ -80,7 +80,9 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
             model: modelSelection,
             session: .ephemeral,
             toolProfile: config.toolProfile,
-            extensionPolicy: .pinnedAdapterOnly(version: config.pinnedAdapterVersion),
+            extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
+                adapterVersion: config.pinnedAdapterVersion
+            ),
             mcpConfigPath: mcpConfigPath,
             suppressProjectResources: true,
             suppressContextFiles: true,

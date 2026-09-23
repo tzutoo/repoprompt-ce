@@ -173,7 +173,7 @@ final class PiModelRegistry {
     private func dedupe(_ records: [ModelRecord]) -> [ModelRecord] {
         var seen = Set<String>()
         return records.filter { record in
-            let key = record.id.lowercased()
+            let key = record.catalogRawValue.lowercased()
             guard !seen.contains(key) else { return false }
             seen.insert(key)
             return true

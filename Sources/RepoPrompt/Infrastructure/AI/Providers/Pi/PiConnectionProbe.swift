@@ -1,11 +1,11 @@
 import Foundation
 
 /// One-shot connectivity probe for the pi coding agent used by the Settings
-/// connect flow. A single `pi --mode rpc --no-session` process verifies the
+/// connect flow. A managed `pi --mode rpc --no-session` process verifies the
 /// binary, RPC liveness, and pi-mcp-adapter presence (the adapter registers
 /// the `/mcp` extension command), and captures a model snapshot for the
-/// connect log. The dynamic Agent Mode catalog (WI4) will reuse the same
-/// `get_available_models` surface.
+/// Agent Mode catalog. Launch flags match interactive/headless Agent Mode so
+/// user-global custom catalogs remain visible.
 enum PiConnectionProbe {
     struct Result: Equatable {
         let sessionId: String?
@@ -57,13 +57,17 @@ enum PiConnectionProbe {
             throw ProbeError.piNotInstalled
         }
 
+        let launchOptions = PiProviderRuntimeBridge.LaunchOptions(
+            mode: .rpc,
+            session: .ephemeral,
+            extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
+                adapterVersion: "2.32.1"
+            )
+        )
         let process = Process()
         process.executableURL = URL(fileURLWithPath: resolved)
-        process.arguments = ["--mode", "rpc", "--no-session", "-nc", "-na"]
-        process.environment = launchEnvironment.merging([
-            "PI_OFFLINE": "1",
-            "PI_SKIP_VERSION_CHECK": "1"
-        ]) { _, new in new }
+        process.arguments = launchOptions.arguments()
+        process.environment = launchEnvironment.merging(launchOptions.environment(over: [:])) { _, new in new }
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         process.standardInput = stdinPipe

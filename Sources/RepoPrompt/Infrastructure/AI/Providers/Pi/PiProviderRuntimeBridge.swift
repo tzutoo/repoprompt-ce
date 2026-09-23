@@ -27,6 +27,7 @@ enum PiProviderRuntimeBridge {
     typealias SessionSelection = PiSessionSelection
     typealias ToolProfile = PiToolProfile
     typealias ExtensionPolicy = PiExtensionPolicy
+    typealias UserGlobalExtensionDiscovery = PiUserGlobalExtensionDiscovery
 
     typealias ModelDescriptor = PiModelDescriptor
     typealias ThinkingLevel = PiThinkingLevel
@@ -58,5 +59,13 @@ enum PiProviderRuntimeBridge {
     /// value transfers directly.
     static func thinkingLevel(for effort: NativeAgentRuntimeEffortLevel) -> String {
         effort.rawValue
+    }
+
+    /// `--no-extensions` plus user-global `~/.pi/agent/extensions` and the pinned
+    /// pi-mcp-adapter. Keeps custom catalogs (for example a `local` OpenAI-compatible
+    /// provider) aligned with the Settings connect probe without double-loading
+    /// the adapter from `settings.json` packages.
+    static func managedExtensionPolicy(adapterVersion: String) -> ExtensionPolicy {
+        .pinnedAdapterWithDiscoveredUserGlobalExtensions(version: adapterVersion)
     }
 }

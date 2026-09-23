@@ -92,6 +92,19 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertTrue(options[0].isPlaceholderDefault)
     }
 
+    func testDedupeKeepsSameIdFromDifferentProviders() {
+        XCTAssertTrue(PiModelRegistry.shared.update(records: [
+            record("grok", name: "Grok", provider: "local"),
+            record("grok", name: "Grok", provider: "xai")
+        ]))
+        XCTAssertEqual(
+            PiModelRegistry.shared.resolvedRecords().map(\.catalogRawValue),
+            ["local/grok", "xai/grok"]
+        )
+        XCTAssertEqual(PiModelRegistry.shared.record(matchingRaw: "grok")?.provider, "local")
+        XCTAssertEqual(PiModelRegistry.shared.record(matchingRaw: "local/grok")?.provider, "local")
+    }
+
     func testModelAcceptsImagesUsesInputTypes() {
         XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: AgentModel.defaultModel.rawValue))
         PiModelRegistry.shared.update(records: [

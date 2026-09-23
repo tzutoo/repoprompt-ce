@@ -298,7 +298,7 @@ Add the relevant focused suite before any catalog/codec change, and snapshot mod
 - `Package.swift` — root manifest and product wiring.
 - `Packages/RepoPromptAgentProviders/Package.swift` — provider package manifest.
 - `Packages/RepoPromptAgentProviders/Sources/RepoPromptClaudeCompatibleProvider/` — plugin DTOs, codec, translator, prompt delivery, environment builder, catalog, headless arg builder, launch-env resolver.
-- `Packages/RepoPromptAgentProviders/Sources/RepoPromptPiProvider/` — pi RPC/JSON codec, launch options, model-catalog DTOs, and ephemeral pi-mcp-adapter `--mcp-config` document.
+- `Packages/RepoPromptAgentProviders/Sources/RepoPromptPiProvider/` — pi RPC/JSON codec, launch options, model-catalog DTOs, and ephemeral pi-mcp-adapter `--mcp-config` document. Managed launches use `--no-extensions` plus discovered `~/.pi/agent/extensions` sources and a version-pinned `pi-mcp-adapter`, so user-global custom catalogs stay available without double-loading the adapter from `settings.json` packages.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/ClaudeCode/ClaudeCompatibleProviderRuntimeBridge.swift` — single Claude-compatible package import point.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/PiProviderRuntimeBridge.swift` — single pi package import point.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/` — core process control (`PiNativeSessionController`, `PiExecAgentProvider`) and Settings connect probe.

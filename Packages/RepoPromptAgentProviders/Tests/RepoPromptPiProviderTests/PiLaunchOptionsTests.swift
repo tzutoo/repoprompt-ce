@@ -122,4 +122,81 @@ final class PiLaunchOptionsTests: XCTestCase {
         XCTAssertEqual(env["PATH"], "/usr/bin")
         XCTAssertEqual(env["PI_OFFLINE"], "1")
     }
+
+    func testUserGlobalExtensionDiscoveryFindsTsFilesAndIndexPackages() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rpce-pi-ext-\(UUID().uuidString)", isDirectory: true)
+        let nested = root.appendingPathComponent("catalog", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("appmosa-sync.ts")
+        try "export {}".write(to: file, atomically: true, encoding: .utf8)
+        try "export {}".write(
+            to: nested.appendingPathComponent("index.ts"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "ignored".write(
+            to: root.appendingPathComponent("notes.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            PiUserGlobalExtensionDiscovery.sourcePaths(in: root),
+            [
+                file.standardizedFileURL.path,
+                nested.appendingPathComponent("index.ts").standardizedFileURL.path
+            ]
+        )
+    }
+
+    func testPinnedAdapterWithUserGlobalExtensionsKeepsNoExtensionsAndPinnedAdapter() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rpce-pi-ext-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let extensionPath = root.appendingPathComponent("appmosa-sync.ts")
+        try "export {}".write(to: extensionPath, atomically: true, encoding: .utf8)
+
+        let options = PiLaunchOptions(
+            mode: .rpc,
+            extensionPolicy: .pinnedAdapterWithUserGlobalExtensions(
+                version: "2.32.1",
+                directory: root.path
+            )
+        )
+        XCTAssertEqual(
+            options.arguments(),
+            [
+                "--mode", "rpc",
+                "--no-session",
+                "--no-extensions",
+                "-e", extensionPath.standardizedFileURL.path,
+                "-e", "npm:pi-mcp-adapter@2.32.1",
+                "-na",
+                "-nc"
+            ]
+        )
+
+        let missing = PiLaunchOptions(
+            mode: .rpc,
+            extensionPolicy: .pinnedAdapterWithUserGlobalExtensions(
+                version: "2.32.1",
+                directory: root.appendingPathComponent("missing").path
+            )
+        )
+        XCTAssertEqual(
+            missing.arguments(),
+            [
+                "--mode", "rpc",
+                "--no-session",
+                "--no-extensions",
+                "-e", "npm:pi-mcp-adapter@2.32.1",
+                "-na",
+                "-nc"
+            ]
+        )
+    }
 }
