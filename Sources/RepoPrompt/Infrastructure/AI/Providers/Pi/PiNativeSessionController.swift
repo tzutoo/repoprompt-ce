@@ -216,10 +216,10 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             throw NativeAgentRuntimeControllerError.processNotRunning
         }
         if let model, !model.isEmpty {
-            let selection = PiProviderRuntimeBridge.ModelSelection(modelPattern: model)
+            let resolved = try resolvePiModelSelection(model)
             let setModel = PiProviderRuntimeBridge.RPCCommand.setModel(
-                provider: selection.provider ?? "",
-                modelId: selection.modelPattern
+                provider: resolved.provider ?? "",
+                modelId: resolved.modelPattern
             )
             let response = try await roundTrip(setModel)
             guard response.success else {
@@ -569,6 +569,28 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             return "\(detail). stderr tail: \(stderrTailSummary)"
         }
         return detail
+    }
+
+    /// Prefer registry-backed provider/id. Bare leftover picker values (for example
+    /// `grok`) must not be sent without a provider — pi reports them as
+    /// `undefined/<id>` and fails the turn.
+    private func resolvePiModelSelection(_ rawModel: String) throws -> PiProviderRuntimeBridge.ModelSelection {
+        let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let record = PiModelRegistry.shared.record(matchingRaw: trimmed),
+           !record.provider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return PiProviderRuntimeBridge.ModelSelection(
+                provider: record.provider,
+                modelPattern: record.id
+            )
+        }
+        let parsed = PiProviderRuntimeBridge.ModelSelection(modelPattern: trimmed)
+        if let provider = parsed.provider, !provider.isEmpty {
+            return parsed
+        }
+        throw ControllerError.commandFailed(
+            "Model '\(trimmed)' is not available for the connected pi providers. Choose Default or a model from the refreshed pi catalog."
+        )
     }
 
     private func handleStdoutEOF() async {
