@@ -22,6 +22,7 @@ enum ProcessLaunchPurpose: Equatable {
     case codexAppServer
     case codexPreflight
     case claudeNative
+    case piNative
     case acpAgent(providerID: String?)
     case sidebarAgentTerminal(provider: String?)
     case sidebarInteractiveShell

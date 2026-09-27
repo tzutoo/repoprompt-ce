@@ -10,115 +10,11 @@ final actor ClaudeNativeProcessSessionController {
         return formatter
     }()
 
-    enum TurnStatus {
-        case completed
-        case cancelled
-        case failed
-    }
-
-    struct RuntimeInitStatus: Equatable {
-        struct InitializeResponseSnapshot: Equatable {
-            struct Command: Equatable {
-                let name: String
-                let description: String
-                let argumentHint: String
-            }
-
-            struct Agent: Equatable {
-                let name: String
-                let description: String
-                let model: String?
-            }
-
-            struct Account: Equatable {
-                let email: String?
-                let organization: String?
-                let subscriptionType: String?
-                let tokenSource: String?
-                let apiKeySource: String?
-                let apiProvider: String?
-            }
-
-            let commands: [Command]
-            let agents: [Agent]
-            let outputStyle: String?
-            let availableOutputStyles: [String]
-            let account: Account?
-            let pid: Int?
-            let modelsJSON: String?
-            let fastModeStateJSON: String?
-        }
-
-        let sessionID: String?
-        let tools: [String]
-        let mcpServerStatuses: [String: String]
-        let initializeResponse: InitializeResponseSnapshot?
-
-        var repoPromptServerStatus: String? {
-            mcpServerStatuses.first {
-                $0.key.compare(MCPIntegrationHelper.repoPromptMCPServerName, options: .caseInsensitive) == .orderedSame
-            }?.value
-        }
-
-        var isRepoPromptServerFailed: Bool {
-            guard let status = repoPromptServerStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
-                return false
-            }
-            return status == "failed"
-        }
-    }
-
-    enum Event {
-        case stream(AIStreamResult)
-        case runtimeInit(RuntimeInitStatus)
-        case approvalRequest(AgentApprovalRequest)
-        case approvalCancelled(requestID: String)
-        case turnCompleted(turnID: UUID, status: TurnStatus)
-        case error(String)
-    }
-
-    struct SessionRef {
-        var sessionID: String?
-    }
-
-    /// Outcome of an interrupt control request, used by the coordinator to decide
-    /// whether it is safe to proceed with a superseding user turn.
-    enum InterruptOutcome: Equatable {
-        /// Claude acknowledged the interrupt via control_response success.
-        case acknowledged
-        /// No turn was in flight; the turn likely completed naturally before the interrupt.
-        case noTurnInFlight
-        /// The interrupt control request timed out without an acknowledgement.
-        case timedOut
-        /// The interrupt request failed (e.g. process not running or write error).
-        case failed
-    }
-
-    enum ControllerError: Error, LocalizedError {
-        case processNotRunning
-        case initializationFailed(String)
-        case invalidControlResponse(String)
-        case inputWriteFailed(String)
-        case controlRequestTimedOut(requestID: String)
-        case liveModelSwitchRequiresRestart
-
-        var errorDescription: String? {
-            switch self {
-            case .processNotRunning:
-                "Claude process is not running."
-            case let .initializationFailed(message):
-                "Claude initialization failed: \(message)"
-            case let .invalidControlResponse(message):
-                "Claude control response failed: \(message)"
-            case let .inputWriteFailed(message):
-                "Failed writing to Claude process stdin: \(message)"
-            case let .controlRequestTimedOut(requestID):
-                "Claude control request timed out: \(requestID)"
-            case .liveModelSwitchRequiresRestart:
-                "Changing to the selected model requires restarting Claude because its launch environment changes."
-            }
-        }
-    }
+    // Neutral native-runtime DTOs (Event, SessionRef, RuntimeInitStatus,
+    // TurnStatus, InterruptOutcome, ControllerError) are owned by
+    // NativeAgentRuntimeContracts.swift. This controller conforms through the
+    // compatibility aliases declared in its NativeAgentRuntimeControlling
+    // conformance extension there.
 
     private struct PendingPermissionRequest {
         let requestID: String
@@ -448,7 +344,8 @@ final actor ClaudeNativeProcessSessionController {
     }
 
     @discardableResult
-    func sendUserMessage(_ text: String) async throws -> UUID {
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        _ = images
         guard process != nil else {
             throw ControllerError.processNotRunning
         }

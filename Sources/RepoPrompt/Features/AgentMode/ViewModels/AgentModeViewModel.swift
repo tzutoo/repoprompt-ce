@@ -313,7 +313,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let previousAgent = session.selectedAgent
                 if previousAgent != selectedAgent {
                     codexCoordinator.handleProviderSwitch(from: previousAgent, to: selectedAgent, session: session)
-                    claudeCoordinator.handleProviderIdentityTransitionSync(
+                    nativeCoordinator(for: previousAgent).handleProviderIdentityTransitionSync(
                         session: session,
                         from: previousAgent,
                         to: selectedAgent
@@ -434,7 +434,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     private func lockedAgentSelectionMessage(for session: TabSession?) -> String? {
         guard let session, session.isProviderSelectionLocked else { return nil }
-        if session.selectedAgent.usesClaudeNativeRuntime {
+        if session.selectedAgent.usesNativeInteractiveRuntime {
             return "Fork (⑂) or start a new chat to switch agent kinds."
         }
         return "Fork (⑂) or start a new chat to switch from \(session.selectedAgent.displayName)."
@@ -449,7 +449,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if candidate == session.selectedAgent {
             return true
         }
-        if session.selectedAgent.usesClaudeNativeRuntime, candidate.usesClaudeNativeRuntime {
+        if session.selectedAgent.usesNativeInteractiveRuntime, candidate.usesNativeInteractiveRuntime {
             return true
         }
         return false
@@ -590,6 +590,16 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private var providerConversationCleanupRegistry: ProviderConversationCleanupRegistry
     let codexCoordinator: CodexAgentModeCoordinator
     let claudeCoordinator: ClaudeAgentModeCoordinator
+    /// Same coordinator machinery as `claudeCoordinator`, constructed with the pi
+    /// controller factory so pi tabs drive `PiNativeSessionController` sessions.
+    let piCoordinator: ClaudeAgentModeCoordinator
+
+    /// Routes native interactive work to the coordinator that owns the provider's
+    /// controller factory (Claude-compatible vs pi).
+    func nativeCoordinator(for agent: AgentProviderKind) -> ClaudeAgentModeCoordinator {
+        agent.usesPiNativeRuntime ? piCoordinator : claudeCoordinator
+    }
+
     let providerBindingService: AgentModeProviderBindingService
     private weak var runInteractionStateObserver: (any AgentModeRunInteractionStateObserving)?
     private let shouldManageCodexTooling: Bool
@@ -1193,15 +1203,23 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     private func restoreLastUsedAgentSelectionIfNeeded() {
         guard let savedAgentRaw = UserDefaults.standard.string(forKey: Self.lastUsedAgentKey) else { return }
         let savedModelRaw = Self.lastUsedModelRaw(forAgentRaw: savedAgentRaw)
+        // New chats should land on a currently connected provider. Preserving an
+        // unavailable last-used agent (for example OpenCode after disconnect) locks
+        // the picker onto that family and greys out connected agents such as pi.
         let normalized = normalizedSelection(
             agentRaw: savedAgentRaw,
             modelRaw: savedModelRaw,
-            preserveUnavailableAgent: true
+            preserveUnavailableAgent: false
         )
         isRestoringState = true
         selectedAgent = normalized.agent
         selectedModelRaw = normalized.modelRaw
         isRestoringState = false
+        if usesProductionAgentDefaultsAndModelPolling,
+           normalized.agent.rawValue != savedAgentRaw
+        {
+            UserDefaults.standard.set(normalized.agent.rawValue, forKey: Self.lastUsedAgentKey)
+        }
     }
 
     private func persistLastUsedModelIfNeeded(agent: AgentProviderKind, modelRaw: String) {
@@ -1750,6 +1768,31 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             initialLastUsedReasoningEffort: CodexAgentToolPreferences.lastUsedReasoningEffort(),
             initialLastUsedReasoningEffortsByModelSlug: CodexAgentToolPreferences.lastUsedReasoningEffortsByModelSlug()
         )
+        piCoordinator = ClaudeAgentModeCoordinator(
+            windowID: windowID,
+            workspacePathProvider: sessionWorkspacePathProvider,
+            claudeControllerFactory: { runID, tabID, windowID, launchSettings in
+                Self.makePiNativeController(
+                    runID: runID,
+                    tabID: tabID,
+                    windowID: windowID,
+                    workspacePath: launchSettings.workspacePath
+                )
+            },
+            awaitNoActiveMCPTools: { [weak mcpServer] runID in
+                guard let mcpServer else { return }
+                try await mcpServer.awaitNoActiveToolExecutions(runID: runID)
+            },
+            toolEndedCount: { [weak mcpServer] runID in
+                mcpServer?.toolEndedCount(runID: runID) ?? 0
+            },
+            hasActiveMCPTools: { [weak mcpServer] runID in
+                mcpServer?.hasActiveToolExecutions(runID: runID) ?? false
+            },
+            hasActiveChildAgentRunWaits: { [weak mcpServer] runID in
+                mcpServer?.hasActiveChildAgentRunWaits(runID: runID) ?? false
+            }
+        )
         claudeCoordinator = ClaudeAgentModeCoordinator(
             windowID: windowID,
             workspacePathProvider: sessionWorkspacePathProvider,
@@ -1770,7 +1813,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         self.clearConsumedAttachmentsAfterProviderConsumption = clearConsumedAttachmentsAfterProviderConsumption
         workspaceSwitchProvider = AgentModeWorkspaceSwitchCleanupProvider(
             codexCoordinator: codexCoordinator,
-            claudeCoordinator: claudeCoordinator
+            claudeCoordinator: claudeCoordinator,
+            piCoordinator: piCoordinator
         )
         self.providerBindingService = providerBindingService
         codexCoordinator.setActiveAgentRunWaitDrain { [weak self] runID, runAttemptID, source, steeringMessage in
@@ -1968,6 +2012,18 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 initialLastUsedReasoningEffort: CodexAgentToolPreferences.lastUsedReasoningEffort(),
                 initialLastUsedReasoningEffortsByModelSlug: CodexAgentToolPreferences.lastUsedReasoningEffortsByModelSlug()
             )
+            piCoordinator = ClaudeAgentModeCoordinator(
+                windowID: testWindowID,
+                workspacePathProvider: sessionWorkspacePathProvider,
+                claudeControllerFactory: { runID, tabID, windowID, launchSettings in
+                    Self.makePiNativeController(
+                        runID: runID,
+                        tabID: tabID,
+                        windowID: windowID,
+                        workspacePath: launchSettings.workspacePath
+                    )
+                }
+            )
             claudeCoordinator = ClaudeAgentModeCoordinator(
                 windowID: testWindowID,
                 workspacePathProvider: sessionWorkspacePathProvider,
@@ -1985,7 +2041,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             self.clearConsumedAttachmentsAfterProviderConsumption = clearConsumedAttachmentsAfterProviderConsumption
             workspaceSwitchProvider = AgentModeWorkspaceSwitchCleanupProvider(
                 codexCoordinator: codexCoordinator,
-                claudeCoordinator: claudeCoordinator
+                claudeCoordinator: claudeCoordinator,
+                piCoordinator: piCoordinator
             )
             providerBindingService = AgentModeProviderBindingService()
             codexCoordinator.attach(viewModel: self)
@@ -2288,6 +2345,43 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         return false
     }
 
+    /// Constructs the pi native controller for a managed Agent Mode run. The pi
+    /// coordinator's Claude-shaped launch settings are ignored beyond the
+    /// workspace path: pi tool surface comes from `PiAgentToolPreferences`
+    /// (launch-time policy, like Claude's environment settings), and the
+    /// RepoPrompt MCP server is injected through the ephemeral `--mcp-config`
+    /// document with an eager lifecycle so routing completes pre-prompt.
+    static func makePiNativeController(
+        runID: UUID,
+        tabID: UUID,
+        windowID: Int,
+        workspacePath: String?
+    ) -> PiNativeSessionController {
+        _ = tabID
+        _ = windowID
+        let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt
+        let mcpServers = [
+            serverConfiguration.name: PiProviderRuntimeBridge.MCPServerConfiguration(
+                command: serverConfiguration.command,
+                arguments: serverConfiguration.args,
+                environment: serverConfiguration.environmentDictionary,
+                lifecycle: .eager,
+                requestTimeoutMilliseconds: 15000,
+                directTools: .all
+            )
+        ]
+        return PiNativeSessionController(
+            options: .init(
+                workingDirectory: workspacePath.map { URL(fileURLWithPath: $0) },
+                mcpServers: mcpServers,
+                expectedPIDMCPClientName: AgentProviderKind.piMCPClientID,
+                toolProfile: PiAgentToolPreferences.permissionLevel().launchToolProfile,
+                enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
+            ),
+            runID: runID
+        )
+    }
+
     private func makeRunService() -> AgentModeRunService {
         let dependencies = AgentModeRunService.Dependencies(
             windowID: windowID,
@@ -2312,6 +2406,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             },
             codexCoordinator: codexCoordinator,
             claudeCoordinator: claudeCoordinator,
+            piCoordinator: piCoordinator,
             shouldManageCodexTooling: shouldManageCodexTooling,
             providerRuntimePermissionResolver: { [providerBindingService] agent, profile in
                 providerBindingService.runtimePermission(for: agent, profile: profile)
@@ -3542,7 +3637,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if session.selectedAgent == .codexExec, session.runState.isActive {
                 await codexCoordinator.ensureCodexNativeSession(session: session)
             }
-            if session.selectedAgent.usesClaudeNativeRuntime, session.runState.isActive {
+            if session.selectedAgent.usesNativeInteractiveRuntime, session.runState.isActive {
                 await reconnectClaudeNativeSessionIfNeeded(session)
             }
         }
@@ -4837,7 +4932,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     modelContextWindow: session.codexContextUsage?.modelContextWindow
                 )
             }
-        case .codexExec, .openCode, .cursor, .grokBuild:
+        case .codexExec, .openCode, .cursor, .grokBuild, .piAgent:
             break
         }
         session.contextUsageSnapshot = ContextUsageSnapshot.fromAgentContextUsage(
@@ -4882,7 +4977,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     private func reconnectClaudeNativeSessionIfNeeded(_ session: TabSession) async {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               session.runState.isActive,
               session.activeRunOwnership == nil
         else {
@@ -4933,7 +5028,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) {
         guard persistentBindingTransitionIsCurrent(currency),
               sessions[session.tabID] === session,
-              session.selectedAgent.usesClaudeNativeRuntime,
+              session.selectedAgent.usesNativeInteractiveRuntime,
               session.runState.isActive,
               session.activeRunOwnership == nil,
               session.runID == expectedRunID,
@@ -4980,7 +5075,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if reconnectActiveProviders, session.selectedAgent == .codexExec, session.runState.isActive {
             await codexCoordinator.ensureCodexNativeSession(session: session)
         }
-        if reconnectActiveProviders, session.selectedAgent.usesClaudeNativeRuntime, session.runState.isActive {
+        if reconnectActiveProviders, session.selectedAgent.usesNativeInteractiveRuntime, session.runState.isActive {
             await reconnectClaudeNativeSessionIfNeeded(session)
         }
 
@@ -7558,7 +7653,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let previousAgent = session.selectedAgent
         if previousAgent != normalized.agent {
             codexCoordinator.handleProviderSwitch(from: previousAgent, to: normalized.agent, session: session)
-            await claudeCoordinator.handleProviderIdentityTransition(
+            await nativeCoordinator(for: previousAgent).handleProviderIdentityTransition(
                 session: session,
                 from: previousAgent,
                 to: normalized.agent
@@ -11637,7 +11732,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             // routing needs cleanup alongside the prepared run's.
             runIDs.append(currentRunID)
         }
-        let detachedClaude = claudeCoordinator.detachForWorkspaceSwitchFinalizeSync(session)
+        let nativeCoordinator = session.selectedAgent.usesPiNativeRuntime ? piCoordinator : claudeCoordinator
+        let detachedClaude = nativeCoordinator.detachForWorkspaceSwitchFinalizeSync(session)
         let detachedCodex = codexCoordinator.detachForWorkspaceSwitchFinalizeSync(
             session,
             runIDs: runIDs
@@ -11660,6 +11756,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             provider: provider,
             acpController: acpController,
             detachedClaude: detachedClaude,
+            detachedClaudeBelongsToPiCoordinator: session.selectedAgent.usesPiNativeRuntime,
             detachedCodex: detachedCodex
         )
     }
@@ -14388,7 +14485,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         if activeACPPromptIsAvailable(for: session, attachments: attachments) {
             return .acpPrompt
         }
-        if session.selectedAgent.usesClaudeNativeRuntime {
+        if session.selectedAgent.usesNativeInteractiveRuntime {
             return .claudeNativeInterrupt
         }
         return nil
@@ -14891,7 +14988,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         switch agent {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .openCode, .cursor:
             return renderAtPathAttachmentMessage(text: text, attachments: attachments)
-        case .codexExec, .grokBuild:
+        case .codexExec, .grokBuild, .piAgent:
             return text
         }
     }
@@ -15658,7 +15755,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         attachments: [AgentImageAttachment]
     ) -> AgentMessage {
         // Build initial message - for providers with resumable sessions, use --resume when available.
-        let supportsSessionResume = session.selectedAgent.usesClaudeNativeRuntime || session.selectedAgent.acpProviderID != nil
+        let supportsSessionResume = session.selectedAgent.usesNativeInteractiveRuntime || session.selectedAgent.acpProviderID != nil
         // Fresh handoff tabs already carry their continuity inside the staged
         // <forked_session> payload injected into the first user turn. Replaying
         // the migrated local transcript as <previous_conversation> would duplicate
@@ -16215,7 +16312,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
                 // Store provider session ID for resumption (native Claude or ACP runtimes).
                 if let sessionID = result.providerSessionID,
-                   session.selectedAgent.usesClaudeNativeRuntime || session.selectedAgent.acpProviderID != nil
+                   session.selectedAgent.usesNativeInteractiveRuntime || session.selectedAgent.acpProviderID != nil
                 {
                     session.providerSessionID = sessionID
                     session.providerCleanupHandle = ProviderConversationCleanupHandle.resolved(

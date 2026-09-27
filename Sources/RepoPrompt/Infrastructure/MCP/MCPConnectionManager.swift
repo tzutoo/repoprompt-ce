@@ -10606,34 +10606,45 @@ actor ServerNetworkManager {
         runID: UUID,
         signalRouting: Bool = true
     ) async -> (routed: Bool, replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?) {
-        let resolved = await MainActor.run {
-            () -> (
-                workspaceID: UUID,
-                snapshot: ComposeTabState,
-                routed: Bool,
-                replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?
-            )? in
-            guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
-                return nil
+        // Hop via a detached MainActor task so this network-manager method does not
+        // park the actor on MainActor.run while Agent Mode still holds the main actor
+        // during native process launch / get_state.
+        let resolved = await withCheckedContinuation {
+            (
+                continuation: CheckedContinuation<(
+                    workspaceID: UUID,
+                    snapshot: ComposeTabState,
+                    routed: Bool,
+                    replacementToken: MCPServerViewModel.PendingPolicyRunIDMappingToken?
+                )?, Never>
+            ) in
+            Task { @MainActor in
+                guard let windowState = WindowStatesManager.shared.window(withID: windowID) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard let resolved = windowState.workspaceManager.resolveComposeTabRoutingSnapshot(
+                    for: tabID,
+                    captureActiveUIState: false
+                ) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let replacementToken = windowState.mcpServer.installTabContext(
+                    clientID: clientID,
+                    clientName: clientName,
+                    windowID: windowID,
+                    workspaceID: resolved.workspaceID,
+                    snapshot: resolved.snapshot,
+                    runID: runID,
+                    signalRouting: signalRouting,
+                    deferRunIDReplacementForPendingPolicy: true
+                )
+                let routed = replacementToken != nil
+                continuation.resume(
+                    returning: (resolved.workspaceID, resolved.snapshot, routed, replacementToken)
+                )
             }
-            guard let resolved = windowState.workspaceManager.resolveComposeTabRoutingSnapshot(
-                for: tabID,
-                captureActiveUIState: false
-            ) else {
-                return nil
-            }
-            let replacementToken = windowState.mcpServer.installTabContext(
-                clientID: clientID,
-                clientName: clientName,
-                windowID: windowID,
-                workspaceID: resolved.workspaceID,
-                snapshot: resolved.snapshot,
-                runID: runID,
-                signalRouting: signalRouting,
-                deferRunIDReplacementForPendingPolicy: true
-            )
-            let routed = replacementToken != nil
-            return (resolved.workspaceID, resolved.snapshot, routed, replacementToken)
         }
 
         guard let resolved else {

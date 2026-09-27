@@ -582,6 +582,7 @@ struct AgentModeGeneralSettingsView: View {
         case .openCode: apiSettingsVM.isOpenCodeConnected
         case .cursor: apiSettingsVM.isCursorConnected
         case .grokBuild: apiSettingsVM.isGrokBuildConnected
+        case .pi: apiSettingsVM.isPiConnected
         }
     }
 

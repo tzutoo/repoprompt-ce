@@ -264,7 +264,7 @@ final class ClaudeAgentModeCoordinator {
         for session: AgentTabSession,
         reason: String
     ) {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               session.claudeController != nil
         else {
             return
@@ -279,7 +279,7 @@ final class ClaudeAgentModeCoordinator {
         for session: AgentTabSession,
         reason: String
     ) async {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               let controller = session.claudeController
         else {
             return
@@ -335,7 +335,10 @@ final class ClaudeAgentModeCoordinator {
         session: AgentTabSession,
         intent: NativeSessionIntent
     ) async -> EnsureSessionOutcome {
-        guard session.selectedAgent.usesClaudeNativeRuntime,
+        // Shared by Claude-compatible and pi native controllers: both ride this
+        // coordinator through NativeAgentRuntimeControlling. Reject only agents
+        // that do not keep an interactive native controller on the tab session.
+        guard session.selectedAgent.usesNativeInteractiveRuntime,
               intentIsCurrent(intent, for: session)
         else {
             return .superseded
@@ -467,7 +470,8 @@ final class ClaudeAgentModeCoordinator {
             return .superseded
         } catch {
             guard intentIsCurrent(intent, for: session) else { return .superseded }
-            return .failed(message: "Claude native start failed: \(error.localizedDescription)")
+            let prefix = session.selectedAgent.usesPiNativeRuntime ? "pi start failed" : "Claude native start failed"
+            return .failed(message: "\(prefix): \(error.localizedDescription)")
         }
     }
 
@@ -905,7 +909,7 @@ final class ClaudeAgentModeCoordinator {
     func sendClaudeNativeMessage(
         session: AgentTabSession,
         text: String,
-        attachments _: [AgentImageAttachment],
+        attachments: [AgentImageAttachment],
         intent: NativeSessionIntent
     ) async -> NativeSendOutcome {
         guard intentIsCurrent(intent, for: session) else { return .superseded }
@@ -1027,8 +1031,29 @@ final class ClaudeAgentModeCoordinator {
             do {
                 let outboundText = hostCapabilities.prependPendingHandoff(text, session)
                 let instructions = agentModeInstructionInjection(for: session)
-                let providerBoundText = providerBoundUserMessage(outboundText, instructions: instructions)
-                let turnID = try await controller.sendUserMessage(providerBoundText)
+                let providerBoundText = providerBoundUserMessage(
+                    outboundText,
+                    instructions: instructions,
+                    agent: session.selectedAgent
+                )
+                let images: [NativeAgentRuntimeImage]
+                if session.selectedAgent.usesPiNativeRuntime, !attachments.isEmpty {
+                    do {
+                        images = try encodePiPromptImages(
+                            attachments,
+                            selectedModelRaw: session.selectedModelRaw
+                        )
+                    } catch {
+                        return recordSendFailure(
+                            error.localizedDescription,
+                            session: session,
+                            intent: intent
+                        )
+                    }
+                } else {
+                    images = []
+                }
+                let turnID = try await controller.sendUserMessage(providerBoundText, images: images)
                 guard intentIsCurrent(intent, for: session),
                       sessionOwnsClaudeController(controller, for: session)
                 else {
@@ -1048,8 +1073,9 @@ final class ClaudeAgentModeCoordinator {
                     }
                     return .superseded
                 }
+                let prefix = session.selectedAgent.usesPiNativeRuntime ? "pi send failed" : "Claude native send failed"
                 return recordSendFailure(
-                    "Claude native send failed: \(error.localizedDescription)",
+                    "\(prefix): \(error.localizedDescription)",
                     session: session,
                     intent: intent
                 )
@@ -1144,7 +1170,7 @@ final class ClaudeAgentModeCoordinator {
     /// Detaches the current Claude controller and its tool tracker synchronously
     /// so a replacement run cannot be affected by the old controller's async cleanup.
     func prepareClaudeCancelSync(_ session: AgentTabSession) -> DetachedClaudeController? {
-        guard session.selectedAgent.usesClaudeNativeRuntime else { return nil }
+        guard session.selectedAgent.usesNativeInteractiveRuntime else { return nil }
         invalidateControllerRetirement(for: session)
         let detached = session.claudeController.flatMap {
             detachClaudeController($0, from: session, removeToolTracking: true)
@@ -1175,8 +1201,8 @@ final class ClaudeAgentModeCoordinator {
         from previousAgent: AgentProviderKind,
         to nextAgent: AgentProviderKind
     ) {
-        guard previousAgent.usesClaudeNativeRuntime,
-              !nextAgent.usesClaudeNativeRuntime || previousAgent != nextAgent
+        guard previousAgent.usesNativeInteractiveRuntime,
+              !nextAgent.usesNativeInteractiveRuntime || previousAgent != nextAgent
         else {
             return
         }
@@ -1189,8 +1215,8 @@ final class ClaudeAgentModeCoordinator {
         from previousAgent: AgentProviderKind,
         to nextAgent: AgentProviderKind
     ) async {
-        guard previousAgent.usesClaudeNativeRuntime,
-              !nextAgent.usesClaudeNativeRuntime || previousAgent != nextAgent
+        guard previousAgent.usesNativeInteractiveRuntime,
+              !nextAgent.usesNativeInteractiveRuntime || previousAgent != nextAgent
         else {
             return
         }
@@ -1293,7 +1319,7 @@ final class ClaudeAgentModeCoordinator {
     func shutdownClaudeSessionIfNeeded(_ session: AgentTabSession) async {
         guard session.claudeController != nil
             || hasPendingResumeTransfer(for: session)
-            || session.selectedAgent.usesClaudeNativeRuntime
+            || session.selectedAgent.usesNativeInteractiveRuntime
         else {
             return
         }
@@ -1543,16 +1569,49 @@ final class ClaudeAgentModeCoordinator {
     }
 
     private func agentModeSystemPromptOverride(for session: AgentTabSession) -> String? {
-        ClaudeAgentToolPreferences.agentModePromptDelivery().nativeSystemPromptOverride(
-            instructions: agentModeInstructionInjection(for: session)
+        let instructions = agentModeInstructionInjection(for: session)
+        // pi has no Claude native system prompt to preserve or clear; append the
+        // RepoPrompt Agent Mode instructions via the launch/system-prompt path.
+        if session.selectedAgent.usesPiNativeRuntime {
+            let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return ClaudeAgentToolPreferences.agentModePromptDelivery().nativeSystemPromptOverride(
+            instructions: instructions
         )
     }
 
-    private func providerBoundUserMessage(_ outboundText: String, instructions: String) -> String {
-        ClaudeCompatiblePluginBridge.providerBoundUserMessage(
+    private func providerBoundUserMessage(
+        _ outboundText: String,
+        instructions: String,
+        agent: AgentProviderKind
+    ) -> String {
+        // Keep pi prompts plain: Claude-compatible XML decoration is not a pi
+        // contract, and the controller already carries Agent Mode instructions
+        // through the system-prompt override.
+        if agent.usesPiNativeRuntime {
+            return outboundText
+        }
+        return ClaudeCompatiblePluginBridge.providerBoundUserMessage(
             outboundText,
             instructions: instructions,
             delivery: ClaudeAgentToolPreferences.agentModePromptDelivery()
         )
+    }
+
+    private func encodePiPromptImages(
+        _ attachments: [AgentImageAttachment],
+        selectedModelRaw: String
+    ) throws -> [NativeAgentRuntimeImage] {
+        if !PiModelRegistry.shared.modelAcceptsImages(rawModel: selectedModelRaw) {
+            let name = selectedModelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = name.isEmpty || name == AgentModel.defaultModel.rawValue
+                ? "the current pi model"
+                : name
+            throw PiPromptImageEncoder.EncoderError.unsupportedSource(
+                "\(label) does not accept image input. Choose a multimodal pi model, or send the image as a file path after enabling pi built-in read tools."
+            )
+        }
+        return try PiPromptImageEncoder.encode(attachments)
     }
 }

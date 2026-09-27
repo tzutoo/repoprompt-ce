@@ -312,6 +312,10 @@ enum AgentModel: String, CaseIterable, Codable {
             [.defaultModel, .deepseekV4Flash]
         case .grokBuild:
             [.defaultModel]
+        case .piAgent:
+            // Dynamic per-user catalog (pi providers/models via get_available_models)
+            // replaces this default-only list in the catalog slice.
+            [.defaultModel]
         case .cursor:
             [.cursorAuto, .cursorComposer2, .deepseekV4Flash]
         case .claudeCodeGLM:

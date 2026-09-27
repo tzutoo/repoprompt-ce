@@ -245,7 +245,6 @@ struct AgentModelsSettingsView: View {
 
     // MARK: - Recommendation Banner
 
-    @ViewBuilder
     private var recommendationBanner: some View {
         // Recommendation banner intentionally hidden per user preference.
         EmptyView()

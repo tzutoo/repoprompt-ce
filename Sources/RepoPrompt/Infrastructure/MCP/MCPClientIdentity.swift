@@ -56,6 +56,11 @@ enum MCPClientIdentity {
         if normalized == "grok-shell" || normalized.hasPrefix("grok-shell-") {
             return "grok-shell"
         }
+        // pi-mcp-adapter presents `pi-mcp-<server name>` (e.g. `pi-mcp-RepoPromptCE`).
+        // Same literal-prefix family treatment as grok-shell; `pi-mcpx` must not match.
+        if normalized == "pi-mcp" || normalized.hasPrefix("pi-mcp-") {
+            return "pi-mcp"
+        }
         if matchesFamily(normalized, tokens: ["claude", "ai"]) { return "claude-ai" }
         if matchesFamily(normalized, tokens: ["repoprompt", "cli"]) { return "repoprompt-cli" }
         return nil

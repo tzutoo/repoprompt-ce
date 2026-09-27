@@ -41,4 +41,7 @@ extension Notification.Name {
     /// Posted when Grok Build CLI connection status changes
     /// userInfo mirrors `claudeCodeConnectionChanged`
     static let grokBuildConnectionChanged = Notification.Name("grokBuildConnectionChanged")
+    /// Posted when the pi coding agent CLI connection status changes
+    /// userInfo mirrors `claudeCodeConnectionChanged`
+    static let piConnectionChanged = Notification.Name("piConnectionChanged")
 }

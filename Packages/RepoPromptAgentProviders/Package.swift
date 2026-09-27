@@ -8,6 +8,10 @@ let package = Package(
         .library(
             name: "RepoPromptClaudeCompatibleProvider",
             targets: ["RepoPromptClaudeCompatibleProvider"]
+        ),
+        .library(
+            name: "RepoPromptPiProvider",
+            targets: ["RepoPromptPiProvider"]
         )
     ],
     targets: [
@@ -20,6 +24,16 @@ let package = Package(
             name: "RepoPromptClaudeCompatibleProviderTests",
             dependencies: ["RepoPromptClaudeCompatibleProvider"],
             path: "Tests/RepoPromptClaudeCompatibleProviderTests"
+        ),
+        .target(
+            name: "RepoPromptPiProvider",
+            path: "Sources/RepoPromptPiProvider",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptPiProviderTests",
+            dependencies: ["RepoPromptPiProvider"],
+            path: "Tests/RepoPromptPiProviderTests"
         )
     ],
     swiftLanguageModes: [.v5]

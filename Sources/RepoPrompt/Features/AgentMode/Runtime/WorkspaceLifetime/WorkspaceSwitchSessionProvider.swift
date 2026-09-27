@@ -28,6 +28,8 @@ struct WorkspaceSwitchSessionCleanupTarget {
     let provider: HeadlessAgentProvider?
     let acpController: ACPAgentSessionController?
     let detachedClaude: ClaudeAgentModeCoordinator.DetachedClaudeController?
+    /// Whether `detachedClaude` belongs to the pi coordinator (pi native family).
+    let detachedClaudeBelongsToPiCoordinator: Bool
     let detachedCodex: CodexAgentModeCoordinator.DetachedCodexController?
 }
 
@@ -70,6 +72,7 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
 
     private let codexCoordinator: CodexAgentModeCoordinator
     private let claudeCoordinator: ClaudeAgentModeCoordinator
+    private let piCoordinator: ClaudeAgentModeCoordinator
 
     private var backgroundCleanupTasks: [UUID: Task<Void, Never>] = [:]
     #if DEBUG
@@ -78,10 +81,12 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
 
     init(
         codexCoordinator: CodexAgentModeCoordinator,
-        claudeCoordinator: ClaudeAgentModeCoordinator
+        claudeCoordinator: ClaudeAgentModeCoordinator,
+        piCoordinator: ClaudeAgentModeCoordinator
     ) {
         self.codexCoordinator = codexCoordinator
         self.claudeCoordinator = claudeCoordinator
+        self.piCoordinator = piCoordinator
     }
 
     /// Schedules background cleanup for discarded sessions after a workspace
@@ -105,6 +110,7 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
         // does not depend on `self` surviving past the initial suspension.
         let codexCoordinator = codexCoordinator
         let claudeCoordinator = claudeCoordinator
+        let piCoordinator = piCoordinator
         let task = Task { @MainActor [weak self] in
             defer {
                 self?.backgroundCleanupTasks.removeValue(forKey: cleanupID)
@@ -145,7 +151,8 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
                 await Self.disposeDetachedTarget(
                     target,
                     codexCoordinator: codexCoordinator,
-                    claudeCoordinator: claudeCoordinator
+                    claudeCoordinator: claudeCoordinator,
+                    piCoordinator: piCoordinator
                 )
                 await Task.yield()
             }
@@ -163,7 +170,8 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
     private static func disposeDetachedTarget(
         _ target: WorkspaceSwitchSessionCleanupTarget,
         codexCoordinator: CodexAgentModeCoordinator,
-        claudeCoordinator: ClaudeAgentModeCoordinator
+        claudeCoordinator: ClaudeAgentModeCoordinator,
+        piCoordinator: ClaudeAgentModeCoordinator
     ) async {
         if let provider = target.provider {
             await provider.dispose()
@@ -176,7 +184,10 @@ final class AgentModeWorkspaceSwitchCleanupProvider {
             await codexCoordinator.retireDetachedControllerForWorkspaceSwitch(detachedCodex)
         }
         if let detachedClaude = target.detachedClaude {
-            await claudeCoordinator.retireDetachedControllerForWorkspaceSwitch(
+            let owningCoordinator = target.detachedClaudeBelongsToPiCoordinator
+                ? piCoordinator
+                : claudeCoordinator
+            await owningCoordinator.retireDetachedControllerForWorkspaceSwitch(
                 detachedClaude,
                 discardedSession: target.session
             )
