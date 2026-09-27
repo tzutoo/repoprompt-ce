@@ -70,9 +70,10 @@ enum PiConnectionProbe {
         process.environment = launchEnvironment.merging(launchOptions.environment(over: [:])) { _, new in new }
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = Pipe()
+        process.standardError = stderrPipe
         try process.run()
 
         let stdin = stdinPipe.fileHandleForWriting
@@ -87,9 +88,20 @@ enum PiConnectionProbe {
                 channel.yield(data)
             }
         }
+        // Drain stderr so a chatty extension/adapter cannot fill the pipe and stall
+        // the process before get_state completes.
+        let stderrHandle = stderrPipe.fileHandleForReading
+        stderrHandle.readabilityHandler = { readable in
+            let data = readable.availableData
+            if data.isEmpty {
+                readable.readabilityHandler = nil
+            }
+        }
 
         return try await withTaskCancellationHandler {
             defer {
+                stdoutHandle.readabilityHandler = nil
+                stderrHandle.readabilityHandler = nil
                 if process.isRunning {
                     process.terminate()
                 }
@@ -119,52 +131,42 @@ enum PiConnectionProbe {
         stdin: FileHandle,
         channel: FileHandleChunkChannel
     ) async throws -> Result {
-        // Correlated requests: state (RPC liveness + session identity + model),
-        // commands (adapter detection via the registered /mcp command), and
-        // available models (count for the connect log).
+        // Phase 1: RPC liveness + adapter presence. Do not batch get_available_models
+        // with these — on current pi builds that multi-request burst never completes
+        // models while state/commands succeed, and the probe then reports a false
+        // "get_state did not complete" after the stream ends or times out.
         let stateID = "probe-state"
         let commandsID = "probe-commands"
-        let modelsID = "probe-models"
         try stdin.write(contentsOf: PiProviderRuntimeBridge.RPCWire.encodeRequestLine(.getState, id: stateID))
         try stdin.write(contentsOf: PiProviderRuntimeBridge.RPCWire.encodeRequestLine(.getCommands, id: commandsID))
-        try stdin.write(contentsOf: PiProviderRuntimeBridge.RPCWire.encodeRequestLine(.getAvailableModels, id: modelsID))
 
         var state: PiProviderRuntimeBridge.SessionState?
         var adapterDetected = false
-        var modelCount = 0
-        var models: [PiProviderRuntimeBridge.ModelDescriptor] = []
-        var pending = Set([stateID, commandsID, modelsID])
-
+        var pending = Set([stateID, commandsID])
         var accumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
+
         for await chunk in channel.stream {
-            for line in accumulator.append(chunk) {
-                guard let json = try? PiProviderRuntimeBridge.RPCWire.decodeLine(line) else { continue }
-                guard let response = PiProviderRuntimeBridge.RPCResponse(json: json),
-                      let id = response.id,
-                      pending.contains(id)
-                else { continue }
-                pending.remove(id)
-                guard response.success else {
-                    throw ProbeError.rpcInitializationFailed(response.errorMessage ?? "\(response.command) failed")
-                }
-                switch id {
-                case stateID:
-                    state = response.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
-                case commandsID:
-                    if let commands = response.data?["commands"]?.arrayValue {
-                        adapterDetected = commands.contains {
-                            let name = $0["name"]?.stringValue
-                            return name == "mcp" || name == "pi-mcp"
+            try processProbeChunk(
+                chunk,
+                accumulator: &accumulator,
+                stdin: stdin,
+                pending: &pending,
+                onResponse: { id, response in
+                    switch id {
+                    case stateID:
+                        state = response.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
+                    case commandsID:
+                        if let commands = response.data?["commands"]?.arrayValue {
+                            adapterDetected = commands.contains {
+                                let name = $0["name"]?.stringValue
+                                return name == "mcp" || name == "pi-mcp"
+                            }
                         }
+                    default:
+                        break
                     }
-                case modelsID:
-                    let modelValues = response.data?["models"]?.arrayValue ?? []
-                    models = modelValues.compactMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:))
-                    modelCount = models.count
-                default:
-                    break
                 }
-            }
+            )
             if pending.isEmpty { break }
         }
         guard let state else {
@@ -173,13 +175,73 @@ enum PiConnectionProbe {
         guard adapterDetected else {
             throw ProbeError.adapterMissing
         }
+
+        // Phase 2: catalog snapshot. Best-effort — connect already succeeded.
+        let modelsID = "probe-models"
+        var models: [PiProviderRuntimeBridge.ModelDescriptor] = []
+        do {
+            try stdin.write(contentsOf: PiProviderRuntimeBridge.RPCWire.encodeRequestLine(.getAvailableModels, id: modelsID))
+            var modelsPending = Set([modelsID])
+            for await chunk in channel.stream {
+                try processProbeChunk(
+                    chunk,
+                    accumulator: &accumulator,
+                    stdin: stdin,
+                    pending: &modelsPending,
+                    onResponse: { id, response in
+                        guard id == modelsID else { return }
+                        let modelValues = response.data?["models"]?.arrayValue ?? []
+                        models = modelValues.compactMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:))
+                    }
+                )
+                if modelsPending.isEmpty { break }
+            }
+        } catch {
+            // Connect already verified; keep an empty catalog rather than failing Settings.
+            models = []
+        }
+
         let modelSummary = state.model.map { "\($0.provider)/\($0.id)" }
         return Result(
             sessionId: state.sessionId,
             modelSummary: modelSummary,
             adapterDetected: adapterDetected,
-            availableModelCount: modelCount,
+            availableModelCount: models.count,
             models: models
         )
+    }
+
+    private static func processProbeChunk(
+        _ chunk: Data,
+        accumulator: inout PiProviderRuntimeBridge.RPCLineAccumulator,
+        stdin: FileHandle,
+        pending: inout Set<String>,
+        onResponse: (String, PiProviderRuntimeBridge.RPCResponse) throws -> Void
+    ) throws {
+        for line in accumulator.append(chunk) {
+            guard let json = try? PiProviderRuntimeBridge.RPCWire.decodeLine(line) else { continue }
+
+            // Auto-cancel extension UI dialogs so a status/notify dialog cannot
+            // stall the one-shot probe (interactive controller does the same).
+            let event = PiProviderRuntimeBridge.RPCEvent(json: json)
+            if case let .extensionUIRequest(request) = event, request.isDialog {
+                if let cancelLine = try? PiProviderRuntimeBridge.RPCWire.encodeRequestLine(
+                    .extensionUIResponseCancelled(id: request.id)
+                ) {
+                    try? stdin.write(contentsOf: cancelLine)
+                }
+                continue
+            }
+
+            guard let response = PiProviderRuntimeBridge.RPCResponse(json: json),
+                  let id = response.id,
+                  pending.contains(id)
+            else { continue }
+            pending.remove(id)
+            guard response.success else {
+                throw ProbeError.rpcInitializationFailed(response.errorMessage ?? "\(response.command) failed")
+            }
+            try onResponse(id, response)
+        }
     }
 }
