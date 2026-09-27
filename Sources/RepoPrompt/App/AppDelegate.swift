@@ -24,6 +24,13 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
     /// Prevents re-entrant termination (Cmd+Q twice, menu + dock quit, etc.)
     private var terminationInProgress = false
     private let dockMenuController = DockMenuController()
+    /// The app delegate retains signal routing so its Dispatch sources remain active for the
+    /// entire application lifetime.
+    private lazy var terminationSignalRouter = AppTerminationSignalRouter(
+        observer: DispatchTerminationSignalObserver()
+    ) {
+        NSApp.terminate(nil)
+    }
 
     /// App startup owns one explicit registration attempt; readiness only observes it.
     private var domainRuntimeStartupTask: Task<Void, Never>?
@@ -121,9 +128,16 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
 
     // MARK: - NSApplicationDelegate
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // The notification delegate must be installed before launch finishes so a click that launched
+        // the app is delivered. This does not prompt for authorization (that stays in didFinishLaunching).
+        NotificationService.shared.installDelegate()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let launchConfiguration = AppLaunchConfiguration.current
         ProcessTermination.resetAppTerminationFastPath()
+        terminationSignalRouter.install()
 
         if launchConfiguration.isUITestSession {
             NSApp.setActivationPolicy(.regular)
@@ -204,6 +218,10 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
         WindowStatesManager.shared.signalTermination()
         ProcessTermination.beginAppTerminationFastPath()
         MCPBackgroundModeCoordinator.shared.resetForTermination()
+        // Synchronous oversight freeze, before any async teardown can run: quitting closes every
+        // window, and an unfrozen bridge would treat that cascade as ordinary lifecycle and delete
+        // exactly the saved oversight the next launch is supposed to restore.
+        AgentSessionLinkRuntimeBridge.shared.freezeForTermination()
 
         // 2) Persist the final restorable window session before async shutdown begins.
         // Using .terminateLater lets us do async work without deadlocking.
@@ -212,12 +230,18 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
                 await WindowStatesManager.shared.persistWindowSessionImmediately(reason: "appShouldTerminate")
             }
 
+            // 2b) Bounded settlement of durable oversight transactions the user already started.
+            // Total deadline, losing branch never awaited: a stuck filesystem must not hold up quit,
+            // and the write-through store means every *reported* Add or Stop is already durable.
+            await AgentSessionLinkRuntimeBridge.shared.settleIntentTransactions()
+
             // 3) Shut down agent processes and MCP tools on the main actor WITHOUT blocking.
             // Kill Claude CLI and Codex app-server processes BEFORE stopping MCP servers,
             // so child processes are terminated and reaped rather than orphaned on quit.
             await WindowStatesManager.shared.shutdownAllAgentSessions()
             await WindowStatesManager.shared.stopAllServers()
             await shutdownDomainRuntimeForTermination()
+            await NotificationService.shared.prepareForTermination()
             sender.reply(toApplicationShouldTerminate: true)
         }
 
@@ -232,6 +256,9 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
         MCPBackgroundModeCoordinator.shared.resetForTermination()
         WindowStatesManager.shared.signalTermination()
         ProcessTermination.beginAppTerminationFastPath()
+        // Idempotent and synchronous only. Correctness comes from the write-through store and the
+        // bounded `.terminateLater` settlement above, never from work attempted here.
+        AgentSessionLinkRuntimeBridge.shared.freezeForTermination()
         if !AppLaunchConfiguration.current.suppressesWindowPersistence {
             WindowStatesManager.shared.persistWindowSession(reason: "appWillTerminate")
         }

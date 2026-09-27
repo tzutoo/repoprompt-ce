@@ -363,6 +363,9 @@ public class APISettingsViewModel: ObservableObject {
     private var cursorModelsTask: Task<Void, Never>?
     private var grokBuildModelsTask: Task<Void, Never>?
     private var piLogCollector: CLIProcessLogCollector?
+    private var devinModelsTask: Task<Void, Never>?
+    @Published private(set) var isDiscoveringDevinModels = false
+    @Published private(set) var devinModelDiscoveryMessage: String?
     private var openRouterModelsTask: Task<Void, Never>?
     private var customModelsTask: Task<Void, Never>?
     private var initialLoadTask: Task<Void, Never>?
@@ -396,6 +399,8 @@ public class APISettingsViewModel: ObservableObject {
             cursorAvailable: isCursorConnected,
             grokBuildAvailable: isGrokBuildConnected,
             piAvailable: isPiConnected,
+            antigravityAvailable: AntigravityRuntimeManager.installedRuntimeSync() != nil,
+            devinAvailable: DevinRuntimeLocator.isInstalledSync(),
             zaiConfigured: compatibleBackendIsActive(.glmZAI),
             kimiConfigured: compatibleBackendIsActive(.kimi),
             customClaudeCompatibleConfigured: compatibleBackendIsActive(.custom)
@@ -450,10 +455,18 @@ public class APISettingsViewModel: ObservableObject {
             cursorAvailable: isVerifiedContextBuilderProvider(.cursor) && isCursorConnected,
             grokBuildAvailable: isVerifiedContextBuilderProvider(.grokBuild) && isGrokBuildConnected,
             piAvailable: isVerifiedContextBuilderProvider(.piAgent) && isPiConnected,
+            antigravityAvailable: AntigravityRuntimeManager.installedRuntimeSync() != nil,
+            devinAvailable: DevinRuntimeLocator.isInstalledSync(),
             zaiConfigured: compatibleBackendIsActive(.glmZAI),
             kimiConfigured: compatibleBackendIsActive(.kimi),
             customClaudeCompatibleConfigured: compatibleBackendIsActive(.custom)
         )
+    }
+
+    /// Provider availability safe for automatic routing. Persisted connection flags are only
+    /// configuration hints; Router may choose a provider only after this process has verified it.
+    var modelRouterAvailabilityContext: AgentModelCatalog.AvailabilityContext {
+        contextBuilderRestorationAvailabilityContext
     }
 
     var recommendationProviderStatusSnapshot: ProviderStatusSnapshot {
@@ -507,6 +520,10 @@ public class APISettingsViewModel: ObservableObject {
             isGrokBuildConnected
         case .piAgent:
             isPiConnected
+        case .antigravity:
+            AntigravityRuntimeManager.installedRuntimeSync() != nil
+        case .devin:
+            DevinRuntimeLocator.isInstalledSync()
         case .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             false
         }
@@ -1063,6 +1080,10 @@ public class APISettingsViewModel: ObservableObject {
                 guard let self else { return }
                 await loadStoredDataIfNeeded()
                 guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
+                refreshDevinModels()
+                if let devinModelsTask {
+                    await devinModelsTask.value
+                }
                 await validateCachedContextBuilderProvidersIfNeeded()
             }
         }
@@ -1073,6 +1094,8 @@ public class APISettingsViewModel: ObservableObject {
         hasPreparedForWindowClose = true
         initialLoadTask?.cancel()
         initialLoadTask = nil
+        devinModelsTask?.cancel()
+        devinModelsTask = nil
         openAIModelsTask?.cancel()
         openAIModelsTask = nil
         deepSeekModelsTask?.cancel()
@@ -1101,6 +1124,7 @@ public class APISettingsViewModel: ObservableObject {
 
     deinit {
         initialLoadTask?.cancel()
+        devinModelsTask?.cancel()
         openAIModelsTask?.cancel()
         deepSeekModelsTask?.cancel()
         fireworksModelsTask?.cancel()
@@ -1767,6 +1791,31 @@ public class APISettingsViewModel: ObservableObject {
         return host == "api.openai.com" || host.hasSuffix(".openai.com")
     }
 
+    func refreshDevinModels(force: Bool = false) {
+        guard devinModelsTask == nil else { return }
+        isDiscoveringDevinModels = true
+        devinModelDiscoveryMessage = nil
+        devinModelsTask = Task { [weak self] in
+            guard let self else { return }
+            let outcome = await DevinModelDiscoveryService.shared.discoverIfNeeded(force: force)
+            guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
+            isDiscoveringDevinModels = false
+            switch outcome {
+            case .notInstalled:
+                devinModelDiscoveryMessage = "Devin CLI is not installed."
+            case let .discovered(modelCount):
+                devinModelDiscoveryMessage = "\(modelCount) models advertised by Devin."
+            case .noModelsAdvertised:
+                devinModelDiscoveryMessage = "Devin ACP advertised no selectable models."
+            case let .failed(message):
+                devinModelDiscoveryMessage = "Model discovery failed: \(message)"
+            }
+            refreshAgentAvailability()
+            await updateAvailableModels()
+            devinModelsTask = nil
+        }
+    }
+
     func updateAvailableModels() async {
         var modelSet = Set<AIModel>()
 
@@ -1887,6 +1936,10 @@ public class APISettingsViewModel: ObservableObject {
             modelSet.formUnion(AIModel.modelsForProvider(.grokBuild))
         }
 
+        if DevinRuntimeLocator.isInstalledSync() {
+            modelSet.formUnion(AIModel.modelsForProvider(.devin))
+        }
+
         // ── Custom provider (OpenAI compatible) ────────────────────────────────
         if isCustomProviderValid,
            let config = try? CustomProviderConfiguration.load()
@@ -1956,6 +2009,7 @@ public class APISettingsViewModel: ObservableObject {
         case .claudeCode: "claude_code"
         case .codex: "codex"
         case .openCode: "opencode"
+        case .devin: "devin"
         }
     }
 
@@ -2032,6 +2086,8 @@ public class APISettingsViewModel: ObservableObject {
                 break
             case .grokBuild:
                 break
+            case .devin:
+                break
             }
 
             await updateAvailableModels()
@@ -2093,6 +2149,8 @@ public class APISettingsViewModel: ObservableObject {
         case .cursor:
             break
         case .grokBuild:
+            break
+        case .devin:
             break
         }
         await updateAvailableModels()
@@ -3613,6 +3671,15 @@ public class APISettingsViewModel: ObservableObject {
             )
             if let snapshot {
                 collector.append("Discovered \(snapshot.models.options.count) Cursor model option(s)")
+                let reconciliationIssues = CursorAIModelCatalog.reconciliationIssues(comparedTo: snapshot.models)
+                if reconciliationIssues.isEmpty {
+                    collector.append("Release-gated Cursor model metadata matches the live catalog")
+                } else {
+                    collector.append("Release-gated Cursor model metadata has \(reconciliationIssues.count) live difference(s)")
+                    for issue in reconciliationIssues {
+                        collector.append("Cursor metadata difference: \(issue)")
+                    }
+                }
                 availableCursorModelOptions = cursorOptions
             } else {
                 collector.append("Cursor ACP preflight completed without dynamic model metadata; using Auto fallback")
@@ -3682,16 +3749,16 @@ public class APISettingsViewModel: ObservableObject {
         let message = error.localizedDescription
         let lowered = message.lowercased()
         if lowered.contains("not installed") || lowered.contains("no such file") || lowered.contains("command not found") || lowered.contains("not found") {
-            return "Cursor Agent CLI ACP server was not found. Install Cursor Agent CLI and ensure `cursor-agent acp` is available."
+            return "Cursor Agent CLI ACP server was not found. Install Cursor Agent CLI and ensure `cursor-agent acp` or the verified `agent acp` entrypoint is available."
         }
         if lowered.contains("permission denied") {
-            return "Permission denied. Ensure the `cursor-agent` executable is accessible."
+            return "Permission denied. Ensure the Cursor `cursor-agent` or `agent` executable is accessible."
         }
         if lowered.contains("unauthorized") || lowered.contains("not authenticated") || lowered.contains("login") {
             return "Cursor Agent CLI is not authenticated. Set `CURSOR_API_KEY`/`CURSOR_AUTH_TOKEN` or complete Cursor login."
         }
         if lowered.contains("does not advertise acp") || lowered.contains("acp support") {
-            return "Installed Cursor Agent CLI does not support ACP mode. Update Cursor Agent CLI and ensure `cursor-agent acp --help` works."
+            return "Installed Cursor Agent CLI does not support ACP mode. Update Cursor Agent CLI and ensure `cursor-agent acp --help` or `agent acp --help` identifies Cursor ACP."
         }
         return message
     }

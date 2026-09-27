@@ -21,7 +21,8 @@ final class CodexIntegratedAgentModeRunner {
         session: AgentTabSession,
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
-        fallbackContext: AgentTabSession.CodexFallbackSubmissionContext?
+        fallbackContext: AgentTabSession.CodexFallbackSubmissionContext?,
+        autoEffortSelection: AutoEffortTurnSelection? = nil
     ) async -> CodexAgentModeCoordinator.NativeSendOutcome {
         let ownership: AgentRunOwnership
         let createdOwnership: Bool
@@ -47,6 +48,7 @@ final class CodexIntegratedAgentModeRunner {
             #if DEBUG || EDIT_FLOW_PERF
                 EditFlowPerf.end(EditFlowPerf.Stage.MCPWindowToolCatalog.codexTurnMCPServerEnable, codexTurnMCPServerEnableState)
             #endif
+            let isPeriodic = session.oversight.pendingAutoWake?.isPeriodic == true
             let execution = await CodexIntegratedRunExecutionAdapter.execute {
                 guard mcpServerReady else {
                     return .failed(message: "MCP catalog registration failed before Agent launch.")
@@ -57,7 +59,8 @@ final class CodexIntegratedAgentModeRunner {
                     attachments: attachments,
                     fallbackContext: fallbackContext,
                     attachmentReservationID: attachmentReservationID,
-                    terminalizeRejectedSend: createdOwnership
+                    terminalizeRejectedSend: createdOwnership,
+                    autoEffortSelection: autoEffortSelection
                 )
                 // Explicit cancellation can terminalize the original run before its
                 // suspended send observes CancellationError. Preserve the caller-level
@@ -68,7 +71,7 @@ final class CodexIntegratedAgentModeRunner {
                 return outcome
             }
             let outcome = execution.nativeOutcome
-            hooks.providerInput.recordPendingHandoffSendOutcome(session, outcome.didSend)
+            if !isPeriodic { hooks.providerInput.recordPendingHandoffSendOutcome(session, outcome.didSend) }
             if execution.didStartProviderRun {
                 session.recordRunProgress(ownership: ownership, kind: .stageTransition, stage: .running)
             } else if createdOwnership, execution.shouldReleaseCreatedOwnership {

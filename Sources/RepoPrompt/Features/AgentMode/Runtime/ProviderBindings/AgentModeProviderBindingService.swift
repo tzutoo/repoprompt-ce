@@ -210,7 +210,7 @@ final class AgentModeProviderBindingService {
                 // pi launch settings are applied at process launch; live mid-session
                 // changes require a relaunch, same policy as Claude.
                 break
-            case .openCode:
+            case .openCode, .antigravity:
                 let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
                 guard let sessionModeID = runtime.acpSessionModeID,
                       session.runState.isActive,
@@ -243,11 +243,11 @@ final class AgentModeProviderBindingService {
                         updateActiveBindings(session)
                     }
                 }
-            case .grokBuild:
-                // Grok full access is a launch-time `--always-approve` flag; it applies to
-                // newly launched processes and never mutates a running controller. The next
-                // run builds a fresh controller because `isCompatibleWith` keys on the
-                // permission flag for Grok.
+            case .grokBuild, .devin:
+                // These providers take their permission level as a launch-time CLI flag
+                // (`--always-approve` / `--permission-mode`); it applies to newly launched
+                // processes and never mutates a running controller. The next run builds a
+                // fresh controller because `isCompatibleWith` keys on that flag.
                 break
             }
         }

@@ -166,11 +166,22 @@ extension AgentProviderPermissionProfile {
         }
     }
 
+    func devinPermissionLevel(
+        userConfigured: DevinAgentToolPreferences.PermissionLevel
+    ) -> DevinAgentToolPreferences.PermissionLevel {
+        switch self {
+        case .userConfigured: userConfigured
+        case .mcpSafeDefaults: .normal
+        case let .providerOverride(.devin(level)): level
+        case .providerOverride: .normal
+        }
+    }
+
     func acpSessionModeID(for agent: AgentProviderKind) -> String? {
         switch agent {
         case .openCode:
             openCodeSessionModeID
-        case .cursor, .grokBuild:
+        case .cursor, .grokBuild, .antigravity, .devin:
             nil
         case .piAgent:
             nil

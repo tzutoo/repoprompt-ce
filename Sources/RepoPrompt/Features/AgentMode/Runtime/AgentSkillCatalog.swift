@@ -423,7 +423,7 @@ final class AgentSkillCatalog {
                 precedenceRank: 7
             )
 
-        case .codexExec, .openCode, .cursor, .grokBuild, .piAgent:
+        case .codexExec, .openCode, .cursor, .grokBuild, .piAgent, .antigravity, .devin:
             // Codex, OpenCode, Cursor, and pi share the generic `.agents` namespace
             // (pi implements the same agentskills.io standard natively).
             appendWorkspaceRoots(

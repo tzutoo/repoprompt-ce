@@ -55,7 +55,8 @@ final class ClaudeIntegratedAgentModeRunner {
         initialUserMessage: String,
         initialMessageForRun: String,
         attachments: [AgentImageAttachment],
-        makeLease: (_ runID: UUID) -> MCPBootstrapLease
+        makeLease: (_ runID: UUID) -> MCPBootstrapLease,
+        autoEffortSelection: AutoEffortTurnSelection? = nil
     ) async {
         let attachmentReservationID = hooks.attachments.reserveAttachmentsForTurn(attachments, session)
 
@@ -97,6 +98,7 @@ final class ClaudeIntegratedAgentModeRunner {
         hooks.presentation.setAgentRunActive(session, true)
         hooks.bindingObservation.updateBindings(session)
 
+        let isPeriodic = session.oversight.pendingAutoWake?.isPeriodic == true
         session.agentTask = Task { [weak self, weak session] in
             guard let self, let session else { return }
             await withTaskCancellationHandler {
@@ -128,7 +130,11 @@ final class ClaudeIntegratedAgentModeRunner {
                         session: session,
                         text: initialMessageForRun,
                         attachments: attachments,
-                        intent: .runAttempt(ownership: ownership, runID: runID)
+                        intent: .runAttempt(ownership: ownership, runID: runID),
+                        // No event stream is owned until this send succeeds and the runner subscribes
+                        // below, so replacing a route-stale controller is safe at this boundary.
+                        allowsCatalogRouteControllerRecovery: true,
+                        autoEffortSelection: autoEffortSelection
                     )
                     let providerInitializationOutcome = switch sendOutcome {
                     case .sent:
@@ -146,7 +152,7 @@ final class ClaudeIntegratedAgentModeRunner {
                     switch sendOutcome {
                     case .sent:
                         didSendToProvider = true
-                        self.hooks.providerInput.recordPendingHandoffSendOutcome(session, true)
+                        if !isPeriodic { self.hooks.providerInput.recordPendingHandoffSendOutcome(session, true) }
                     case .failed:
                         nativeFailureMetadata = (errorText: nil, shouldShutdownSession: false)
                         throw NativeTerminalFailure()
@@ -190,7 +196,7 @@ final class ClaudeIntegratedAgentModeRunner {
                         runID: runID,
                         for: session
                     ) {
-                        self.hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
+                        if !isPeriodic { self.hooks.providerInput.recordPendingHandoffSendOutcome(session, false) }
                         let revision = await self.finalize(
                             session: session,
                             runID: runID,
@@ -213,7 +219,7 @@ final class ClaudeIntegratedAgentModeRunner {
                     case .failed: .failed
                     }
                     if !didSendToProvider {
-                        self.hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
+                        if !isPeriodic { self.hooks.providerInput.recordPendingHandoffSendOutcome(session, false) }
                     }
                     await self.finalize(
                         session: session,

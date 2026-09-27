@@ -362,7 +362,7 @@ enum ClaudeCompatibleModelCatalogAdapter {
             .kimi
         case .customClaudeCompatible:
             .custom
-        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .piAgent:
+        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .piAgent, .antigravity, .devin:
             nil
         }
     }
@@ -390,6 +390,7 @@ enum ClaudeCompatibleModelCatalogAdapter {
         AgentModel.claudeSonnet5.rawValue.lowercased(),
         AgentModel.claudeOpus.rawValue.lowercased(),
         AgentModel.claudeOpus1m.rawValue.lowercased(),
+        AgentModel.claudeOpus55.rawValue.lowercased(),
         AgentModel.claudeOpus5.rawValue.lowercased(),
         AgentModel.claudeOpus48.rawValue.lowercased(),
         AgentModel.claudeOpus47.rawValue.lowercased(),

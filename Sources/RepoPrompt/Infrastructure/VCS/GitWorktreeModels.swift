@@ -3,7 +3,7 @@ import Foundation
 
 // MARK: - Git Worktree Models
 
-public struct GitWorktreeRepositoryIdentity: Sendable, Equatable, Hashable {
+public struct GitWorktreeRepositoryIdentity: Codable, Sendable, Equatable, Hashable {
     public let repositoryID: String
     public let repoKey: String
     public let displayName: String
@@ -22,6 +22,30 @@ public struct GitWorktreeRepositoryIdentity: Sendable, Equatable, Hashable {
         self.displayName = displayName
         self.commonGitDir = commonGitDir
         self.mainWorktreeRoot = mainWorktreeRoot
+    }
+}
+
+/// Fresh identity resolved from the Git metadata at a worktree root.
+///
+/// The repository ID and key are derived from the common Git directory, while the worktree ID
+/// also incorporates the per-worktree Git directory (or the explicit main-worktree marker).
+/// Keeping those values together prevents a path-only resolution from becoming an authority.
+public struct GitWorktreeIdentitySnapshot: Codable, Sendable, Equatable, Hashable {
+    public let repository: GitWorktreeRepositoryIdentity
+    public let worktreeID: String
+    public let worktreeRootPath: String
+    public let isMain: Bool
+
+    public init(
+        repository: GitWorktreeRepositoryIdentity,
+        worktreeID: String,
+        worktreeRootPath: String,
+        isMain: Bool
+    ) {
+        self.repository = repository
+        self.worktreeID = worktreeID
+        self.worktreeRootPath = worktreeRootPath
+        self.isMain = isMain
     }
 }
 
@@ -196,6 +220,12 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
     public let mainWorktreeRoot: URL?
     public let knownWorktreeRoots: [URL]
     public let copyWorktreeIncludeFiles: Bool
+    /// Also copy untracked, non-ignored files selected by `.worktreeinclude`. Off by default;
+    /// ignored files remain the only files copied unless a caller explicitly opts in.
+    public let copyWorktreeIncludeUntrackedFiles: Bool
+    /// Materialize tracked files as APFS clones of a clean, same-tree source checkout when
+    /// every safety check passes; otherwise Git performs an ordinary checkout.
+    public let cloneTrackedCheckout: Bool
 
     public init(
         path: URL,
@@ -208,7 +238,9 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
         appManagedContainer: URL? = nil,
         mainWorktreeRoot: URL? = nil,
         knownWorktreeRoots: [URL] = [],
-        copyWorktreeIncludeFiles: Bool = false
+        copyWorktreeIncludeFiles: Bool = false,
+        copyWorktreeIncludeUntrackedFiles: Bool = false,
+        cloneTrackedCheckout: Bool = false
     ) {
         self.path = path
         self.branch = branch
@@ -221,21 +253,89 @@ public struct GitWorktreeCreateRequest: Sendable, Equatable {
         self.mainWorktreeRoot = mainWorktreeRoot
         self.knownWorktreeRoots = knownWorktreeRoots
         self.copyWorktreeIncludeFiles = copyWorktreeIncludeFiles
+        self.copyWorktreeIncludeUntrackedFiles = copyWorktreeIncludeUntrackedFiles
+        self.cloneTrackedCheckout = cloneTrackedCheckout
+    }
+}
+
+/// How the tracked files of a newly created worktree were materialized.
+public struct GitWorktreeCheckoutReport: Sendable, Equatable {
+    public enum Strategy: String, Sendable, Equatable {
+        /// `git worktree add` performed its normal checkout.
+        case ordinary
+        /// Tracked files are APFS clones of the source checkout, verified by an index refresh.
+        case cloned
+        /// Cloning failed after `git worktree add --no-checkout`; `git reset --hard` in the new
+        /// worktree produced an ordinary, verified-clean checkout instead.
+        case checkoutFallback
+    }
+
+    public let strategy: Strategy
+    /// Stable, path-free reason the clone fast path was not attempted (`ordinary` only).
+    public let ineligibilityReason: String?
+    /// Diagnostic reason the attempted clone was abandoned (`checkoutFallback` only).
+    public let fallbackReason: String?
+    public let clonedFileCount: Int
+    public let symbolicLinkCount: Int
+    public let clonedByteCount: Int64
+    /// Diagnostic phase durations: read-only eligibility probing, descriptor-based cloning,
+    /// and Git index build plus verification (or the checkout fallback).
+    public let eligibilityMilliseconds: Double?
+    public let materializationMilliseconds: Double?
+    public let verificationMilliseconds: Double?
+
+    public init(
+        strategy: Strategy,
+        ineligibilityReason: String? = nil,
+        fallbackReason: String? = nil,
+        clonedFileCount: Int = 0,
+        symbolicLinkCount: Int = 0,
+        clonedByteCount: Int64 = 0,
+        eligibilityMilliseconds: Double? = nil,
+        materializationMilliseconds: Double? = nil,
+        verificationMilliseconds: Double? = nil
+    ) {
+        self.strategy = strategy
+        self.ineligibilityReason = ineligibilityReason
+        self.fallbackReason = fallbackReason
+        self.clonedFileCount = clonedFileCount
+        self.symbolicLinkCount = symbolicLinkCount
+        self.clonedByteCount = clonedByteCount
+        self.eligibilityMilliseconds = eligibilityMilliseconds
+        self.materializationMilliseconds = materializationMilliseconds
+        self.verificationMilliseconds = verificationMilliseconds
+    }
+
+    func withEligibilityMilliseconds(_ milliseconds: Double) -> GitWorktreeCheckoutReport {
+        GitWorktreeCheckoutReport(
+            strategy: strategy,
+            ineligibilityReason: ineligibilityReason,
+            fallbackReason: fallbackReason,
+            clonedFileCount: clonedFileCount,
+            symbolicLinkCount: symbolicLinkCount,
+            clonedByteCount: clonedByteCount,
+            eligibilityMilliseconds: milliseconds,
+            materializationMilliseconds: materializationMilliseconds,
+            verificationMilliseconds: verificationMilliseconds
+        )
     }
 }
 
 public struct GitWorktreeCreateResult: Sendable, Equatable {
     public let descriptor: GitWorktreeDescriptor
     public let includeCopyResult: GitWorktreeIncludeCopyResult?
+    public let checkoutReport: GitWorktreeCheckoutReport?
     let initializationReceipt: GitWorktreeCreationReceipt?
     let initializationFallbackReason: WorkspaceRootSeedFallbackReason?
 
     public init(
         descriptor: GitWorktreeDescriptor,
-        includeCopyResult: GitWorktreeIncludeCopyResult? = nil
+        includeCopyResult: GitWorktreeIncludeCopyResult? = nil,
+        checkoutReport: GitWorktreeCheckoutReport? = nil
     ) {
         self.descriptor = descriptor
         self.includeCopyResult = includeCopyResult
+        self.checkoutReport = checkoutReport
         initializationReceipt = nil
         initializationFallbackReason = nil
     }
@@ -243,11 +343,13 @@ public struct GitWorktreeCreateResult: Sendable, Equatable {
     init(
         descriptor: GitWorktreeDescriptor,
         includeCopyResult: GitWorktreeIncludeCopyResult?,
+        checkoutReport: GitWorktreeCheckoutReport? = nil,
         initializationReceipt: GitWorktreeCreationReceipt?,
         initializationFallbackReason: WorkspaceRootSeedFallbackReason? = nil
     ) {
         self.descriptor = descriptor
         self.includeCopyResult = includeCopyResult
+        self.checkoutReport = checkoutReport
         self.initializationReceipt = initializationReceipt
         self.initializationFallbackReason = initializationFallbackReason
     }
@@ -259,19 +361,27 @@ public struct GitWorktreeIncludeCopyResult: Sendable, Equatable {
     public let copiedRelativePaths: [String]
     public let skippedSummaries: [String]
     public let errorSummaries: [String]
+    /// Copied files that were APFS clones (the rest used a byte-copy fallback).
+    public let clonedCount: Int
+    /// Copied files that were untracked but not ignored (explicit opt-in only).
+    public let copiedUntrackedCount: Int
 
     public init(
         copiedCount: Int,
         matchedCount: Int,
         copiedRelativePaths: [String] = [],
         skippedSummaries: [String] = [],
-        errorSummaries: [String] = []
+        errorSummaries: [String] = [],
+        clonedCount: Int = 0,
+        copiedUntrackedCount: Int = 0
     ) {
         self.copiedCount = copiedCount
         self.matchedCount = matchedCount
         self.copiedRelativePaths = copiedRelativePaths
         self.skippedSummaries = skippedSummaries
         self.errorSummaries = errorSummaries
+        self.clonedCount = clonedCount
+        self.copiedUntrackedCount = copiedUntrackedCount
     }
 
     public var warningText: String? {
@@ -364,6 +474,42 @@ enum GitWorktreeIdentity {
     private static func sha256Hex(_ text: String) -> String {
         let digest = SHA256.hash(data: Data(text.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Resolves repository and worktree identity directly from the current Git layout.
+///
+/// This deliberately performs an uncached metadata read so callers can revalidate a persisted
+/// binding after a path has been replaced. Ancestors are considered for bindings to a logical
+/// subdirectory inside a checkout; the returned path is always the actual checkout root.
+enum GitWorktreeIdentityResolver {
+    static func resolve(atWorkTreeRoot root: URL) -> GitWorktreeIdentitySnapshot? {
+        var candidate = root.standardizedFileURL
+        while true {
+            if let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: candidate) {
+                let isMain = !layout.isLinkedWorktree
+                let repository = GitWorktreeIdentity.repositoryIdentity(
+                    commonGitDir: layout.commonDir,
+                    mainWorktreeRoot: isMain ? layout.workTreeRoot : layout.knownMainWorktreeRoot
+                )
+                let worktreeID = GitWorktreeIdentity.worktreeID(
+                    repositoryID: repository.repositoryID,
+                    gitDir: isMain ? nil : layout.gitDir,
+                    isMain: isMain,
+                    path: layout.workTreeRoot
+                )
+                return GitWorktreeIdentitySnapshot(
+                    repository: repository,
+                    worktreeID: worktreeID,
+                    worktreeRootPath: layout.workTreeRoot.standardizedFileURL.path,
+                    isMain: isMain
+                )
+            }
+
+            let parent = candidate.deletingLastPathComponent().standardizedFileURL
+            guard parent.path != candidate.path else { return nil }
+            candidate = parent
+        }
     }
 }
 

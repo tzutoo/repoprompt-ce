@@ -1706,6 +1706,9 @@ class WorkspaceFilesViewModel: ObservableObject {
         // Slice presence and relative-path eligibility are independent of binding
         // authority. Apply them first so the expensive global binding snapshot is
         // requested only for tabs that can target at least one modified file.
+        let pathIndex = HiddenSessionSlicePathIndex(
+            relativePathsByFileID: modifiedFilesByID.mapValues { $0.standardizedRelativePath }
+        )
         let candidateTabs = workspace.composeTabs.compactMap { tab -> (
             tab: ComposeTabState,
             sessionID: UUID,
@@ -1715,14 +1718,7 @@ class WorkspaceFilesViewModel: ObservableObject {
             guard let sessionID = tab.activeAgentSessionID else { return nil }
             let slices = StoredSelectionPathNormalization.standardizedSlices(tab.selection.slices)
             guard !slices.isEmpty else { return nil }
-            let slicePaths = Array(slices.keys)
-            let candidateFileIDs = Set(modifiedFilesByID.compactMap { fileID, file -> UUID? in
-                let relativePath = file.standardizedRelativePath
-                guard slicePaths.contains(where: {
-                    $0 == relativePath || $0.hasSuffix("/\(relativePath)")
-                }) else { return nil }
-                return fileID
-            })
+            let candidateFileIDs = pathIndex.matchingFileIDs(for: Array(slices.keys))
             guard !candidateFileIDs.isEmpty else { return nil }
             return (tab, sessionID, slices, candidateFileIDs)
         }
@@ -8284,7 +8280,7 @@ class WorkspaceFilesViewModel: ObservableObject {
                 return visibleRootFolders.contains(where: { $0.id == root.id })
                     && canonicalRootPaths.contains(root.standardizedFullPath)
             }
-        case let .validatedSessionBoundWorkspace(canonicalRoots, physicalRoots):
+        case let .validatedSessionBoundWorkspace(canonicalRoots, physicalRoots, includesGitData):
             guard case let .valid(selector) = WorkspaceLookupRootSelectorValidator.validate(
                 canonicalRoots: canonicalRoots,
                 physicalRoots: physicalRoots
@@ -8292,6 +8288,10 @@ class WorkspaceFilesViewModel: ObservableObject {
             return rootFolders.filter { root in
                 selector.canonicalRootPathsByID[root.id] == root.standardizedFullPath
                     || selector.physicalRootPathsByID[root.id] == root.standardizedFullPath
+                    || (
+                        includesGitData && !canonicalRoots.isEmpty && physicalRoots.isEmpty
+                            && gitDataRootFolders().contains { $0.id == root.id }
+                    )
             }
         }
     }
@@ -10514,6 +10514,15 @@ extension WorkspaceFilesViewModel {
     struct SearchScopeParseResult {
         let spec: SearchPathFilterSpec
         let issues: [PathResolutionIssue]
+    }
+
+    /// Lexical load identity for configured workspace roots; not filesystem or symlink identity.
+    func workspaceRootIdentity(for input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\0"),
+              !trimmed.lowercased().hasPrefix("file://") else { return nil }
+        let normalized = normalizeUserInputPath(input)
+        return URL(fileURLWithPath: normalized, isDirectory: true).standardizedFileURL.path
     }
 
     func canonicalURL(for path: String, assumingDirectory: Bool = false) -> URL {

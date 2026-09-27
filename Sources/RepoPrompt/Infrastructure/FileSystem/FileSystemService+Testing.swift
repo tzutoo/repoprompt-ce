@@ -153,7 +153,7 @@ import Foundation
             _ events: [(absolutePath: String, flags: FSEventStreamEventFlags, eventId: FSEventStreamEventId)],
             scheduleDrain: Bool = true
         ) -> FileSystemWatcherIngressMailbox.Watermark? {
-            watcherIngressMailbox.startAccepting()
+            watcherIngressMailbox.startAccepting(for: watcherIngressGeneration)
             let payload = FSEventCallbackPayload(
                 entries: events.map { event in
                     FSEventCallbackEntry(path: event.absolutePath, flags: event.flags, id: event.eventId)
@@ -166,11 +166,24 @@ import Foundation
             } else {
                 nil
             }
-            return watcherIngressMailbox.accept(retainedPayload, lifecycleCorrelation: nil, scheduleDrain: drain)
+            return watcherIngressMailbox.accept(
+                retainedPayload,
+                ingressGeneration: watcherIngressGeneration,
+                lifecycleCorrelation: nil,
+                scheduleDrain: drain
+            )
         }
 
         func watcherIngressMailboxSnapshotForTesting() -> FileSystemWatcherIngressMailbox.Snapshot {
             watcherIngressMailbox.snapshotForTesting()
+        }
+
+        func watcherIngressGenerationForTesting() -> UInt64 {
+            watcherIngressGeneration
+        }
+
+        func fseventStreamGenerationForTesting() -> UInt64 {
+            fseventStreamGeneration
         }
 
         func watcherEarlyFilterSnapshotForTesting() -> FileSystemWatcherEarlyFilter.Snapshot {
@@ -208,6 +221,18 @@ import Foundation
             contentReadChunkHandler = handler
         }
 
+        func setContentPhysicalReadHandlerForTesting(
+            _ handler: (@Sendable () throws -> Void)?
+        ) {
+            contentPhysicalReadHandler = handler
+        }
+
+        func setContentReadCacheCommitHandlerForTesting(
+            _ handler: (@Sendable () async -> Void)?
+        ) {
+            contentReadCacheCommitHandler = handler
+        }
+
         func resetContentFingerprintRequestCountForTesting() {
             contentFingerprintRequestCountForTesting = 0
         }
@@ -228,6 +253,10 @@ import Foundation
 
         func cachedEncodingForTesting(relativePath: String) -> String.Encoding? {
             encodingMap[relativePath]
+        }
+
+        func advanceContentReadCacheRevisionForTesting() {
+            contentReadCacheRevision &+= 1
         }
 
         func isWatchingForChangesForTesting() -> Bool {

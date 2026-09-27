@@ -1,50 +1,14 @@
 import Foundation
 import OSLog
 
-struct WorkspaceRootSetKey: Hashable {
-    let normalizedPaths: [String]
-
-    var isEmpty: Bool {
-        normalizedPaths.isEmpty
-    }
-
-    init(paths: [String]) {
-        var canonicalByLowercasedPath: [String: String] = [:]
-        for rawPath in paths {
-            let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let expanded = (trimmed as NSString).expandingTildeInPath
-            let normalizedPath = URL(fileURLWithPath: expanded).standardizedFileURL.path
-            guard !normalizedPath.isEmpty else { continue }
-            let lowercasedPath = normalizedPath.lowercased()
-            if let existing = canonicalByLowercasedPath[lowercasedPath] {
-                canonicalByLowercasedPath[lowercasedPath] = min(existing, normalizedPath)
-            } else {
-                canonicalByLowercasedPath[lowercasedPath] = normalizedPath
-            }
-        }
-        normalizedPaths = canonicalByLowercasedPath.values.sorted {
-            let lhsKey = $0.lowercased()
-            let rhsKey = $1.lowercased()
-            if lhsKey != rhsKey {
-                return lhsKey < rhsKey
-            }
-            return $0 < $1
-        }
-    }
-
-    static func == (lhs: WorkspaceRootSetKey, rhs: WorkspaceRootSetKey) -> Bool {
-        lhs.normalizedPaths.map { $0.lowercased() } == rhs.normalizedPaths.map { $0.lowercased() }
-    }
-
-    func hash(into hasher: inout Hasher) {
-        for path in normalizedPaths {
-            hasher.combine(path.lowercased())
-        }
-    }
-}
-
 struct WorkspaceDuplicateGroupSummary: Identifiable, Equatable {
+    struct DuplicateWorkspaceRow: Identifiable, Equatable {
+        let id: Int
+        let workspaceID: UUID
+        let name: String
+        let windowIDs: [Int]
+    }
+
     let id: String
     let normalizedRepoPaths: [String]
     let canonicalWorkspaceID: UUID
@@ -52,6 +16,19 @@ struct WorkspaceDuplicateGroupSummary: Identifiable, Equatable {
     let duplicateWorkspaceIDs: [UUID]
     let duplicateWorkspaceNames: [String]
     let windowIDsByWorkspaceID: [UUID: [Int]]
+
+    /// A value snapshot for display. Ordinal IDs keep repeated recovered workspace IDs distinct.
+    var duplicateWorkspaceRows: [DuplicateWorkspaceRow] {
+        zip(duplicateWorkspaceIDs, duplicateWorkspaceNames).enumerated().map { entry in
+            let (workspaceID, name) = entry.element
+            return DuplicateWorkspaceRow(
+                id: entry.offset,
+                workspaceID: workspaceID,
+                name: name,
+                windowIDs: windowIDsByWorkspaceID[workspaceID] ?? []
+            )
+        }
+    }
 }
 
 struct WorkspaceDuplicateCleanupSkippedItem: Equatable {
@@ -163,6 +140,10 @@ struct StoredSelection: Codable, Equatable, Hashable {
         self.codemapAutoEnabled = codemapAutoEnabled
     }
 
+    var isEmptyForSelectedFileTree: Bool {
+        selectedPaths.isEmpty && manualCodemapPaths.isEmpty && slices.isEmpty
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
@@ -246,6 +227,8 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
     var name: String
     var lastModified: Date
     var isPinned: Bool
+    /// Explicit order among pinned Agent sessions. nil preserves legacy activity sorting.
+    var pinnedOrder: Int?
     var activeChatSessionID: UUID?
     var activeAgentSessionID: UUID?
 
@@ -264,6 +247,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         name: String = "T1",
         lastModified: Date = Date(),
         isPinned: Bool = false,
+        pinnedOrder: Int? = nil,
         activeChatSessionID: UUID? = nil,
         activeAgentSessionID: UUID? = nil,
         selection: StoredSelection = .init(),
@@ -278,6 +262,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         self.name = name
         self.lastModified = lastModified
         self.isPinned = isPinned
+        self.pinnedOrder = pinnedOrder
         self.activeChatSessionID = activeChatSessionID
         self.activeAgentSessionID = activeAgentSessionID
         self.selection = selection
@@ -295,6 +280,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "T1"
         lastModified = try c.decodeIfPresent(Date.self, forKey: .lastModified) ?? Date()
         isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        pinnedOrder = try? c.decode(Int.self, forKey: .pinnedOrder)
         activeChatSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeChatSessionID)
         activeAgentSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeAgentSessionID)
         selection = (try? c.decodeIfPresent(StoredSelection.self, forKey: .selection)) ?? .init()
@@ -312,6 +298,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         try c.encode(name, forKey: .name)
         try c.encode(lastModified, forKey: .lastModified)
         try c.encode(isPinned, forKey: .isPinned)
+        try c.encodeIfPresent(pinnedOrder, forKey: .pinnedOrder)
         try c.encodeIfPresent(activeChatSessionID, forKey: .activeChatSessionID)
         try c.encodeIfPresent(activeAgentSessionID, forKey: .activeAgentSessionID)
         try c.encode(selection, forKey: .selection)
@@ -328,6 +315,7 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         case name
         case lastModified
         case isPinned
+        case pinnedOrder
         case activeChatSessionID
         case activeAgentSessionID
         case selection
@@ -350,6 +338,9 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
 
     var isSystemWorkspace: Bool
     var isHiddenInMenus: Bool
+    /// Library membership is independent of persistence: automation can retain history without
+    /// occupying the user workspace list. nil preserves legacy classification until chosen.
+    var isSavedWorkspace: Bool?
     /// The canonical workspace this recoverable duplicate was consolidated into.
     ///
     /// Distinct from `isHiddenInMenus`, which is a user-controlled visibility preference. A
@@ -418,6 +409,7 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
         customStoragePath: URL? = nil,
         ephemeralFlag: Bool? = nil,
         isHiddenInMenus: Bool = false,
+        isSavedWorkspace: Bool? = nil,
         consolidatedIntoWorkspaceID: UUID? = nil,
         copyPresetId: UUID? = nil,
         copyCustomizations: CopyCustomizations? = nil,
@@ -442,6 +434,7 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
         self.customStoragePath = customStoragePath
         self.ephemeralFlag = ephemeralFlag
         self.isHiddenInMenus = isHiddenInMenus
+        self.isSavedWorkspace = isSavedWorkspace
         self.consolidatedIntoWorkspaceID = consolidatedIntoWorkspaceID
         self.copyPresetId = copyPresetId
         self.copyCustomizations = copyCustomizations
@@ -460,17 +453,21 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
 
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
         schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? 1
-        dateModified = (try? c.decode(Date.self, forKey: .dateModified)) ?? Date()
+        let persistedDateModified = try? c.decode(Date.self, forKey: .dateModified)
+        dateModified = persistedDateModified ?? Date()
         customStoragePath = (try? c.decode(URL.self, forKey: .customStoragePath))
         isSystemWorkspace = (try? c.decode(Bool.self, forKey: .isSystemWorkspace)) ?? false
         isHiddenInMenus = (try? c.decode(Bool.self, forKey: .isHiddenInMenus)) ?? false
+        isSavedWorkspace = try? c.decodeIfPresent(Bool.self, forKey: .isSavedWorkspace)
         consolidatedIntoWorkspaceID = try? c.decodeIfPresent(UUID.self, forKey: .consolidatedIntoWorkspaceID)
         ephemeralFlag = (try? c.decode(Bool?.self, forKey: .ephemeralFlag)) ?? nil
         name = (try? c.decode(String.self, forKey: .name)) ?? "Untitled Workspace"
         repoPaths = (try? c.decode([String].self, forKey: .repoPaths)) ?? []
         presets = (try? c.decode([WorkspacePreset].self, forKey: .presets)) ?? []
         activePresetID = (try? c.decode(UUID.self, forKey: .activePresetID))
-        lastUsed = (try? c.decode(Date.self, forKey: .lastUsed)) ?? Date()
+        lastUsed = (try? c.decode(Date.self, forKey: .lastUsed))
+            ?? persistedDateModified
+            ?? .distantPast
         customPath = (try? c.decode(String.self, forKey: .customPath))
         currentPromptText = (try? c.decode(String.self, forKey: .currentPromptText))
         lastSearchQuery = (try? c.decode(String.self, forKey: .lastSearchQuery))
@@ -498,6 +495,7 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(customStoragePath, forKey: .customStoragePath)
         try c.encode(isSystemWorkspace, forKey: .isSystemWorkspace)
         try c.encode(isHiddenInMenus, forKey: .isHiddenInMenus)
+        try c.encodeIfPresent(isSavedWorkspace, forKey: .isSavedWorkspace)
         try c.encodeIfPresent(consolidatedIntoWorkspaceID, forKey: .consolidatedIntoWorkspaceID)
         try c.encode(name, forKey: .name)
         try c.encode(repoPaths, forKey: .repoPaths)
@@ -531,6 +529,7 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
             lhs.lastSearchQuery == rhs.lastSearchQuery &&
             lhs.selectedMetaPromptIDs == rhs.selectedMetaPromptIDs &&
             lhs.isHiddenInMenus == rhs.isHiddenInMenus &&
+            lhs.isSavedWorkspace == rhs.isSavedWorkspace &&
             lhs.consolidatedIntoWorkspaceID == rhs.consolidatedIntoWorkspaceID &&
             lhs.isSystemWorkspace == rhs.isSystemWorkspace &&
             lhs.customStoragePath == rhs.customStoragePath &&
@@ -550,6 +549,7 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
         case customStoragePath
         case isSystemWorkspace
         case isHiddenInMenus
+        case isSavedWorkspace
         case consolidatedIntoWorkspaceID
         case name
         case repoPaths
@@ -571,6 +571,21 @@ struct WorkspaceModel: Codable, Identifiable, Equatable {
 }
 
 extension WorkspaceModel {
+    /// Legacy managed scratch roots are grouped for presentation only. No document is migrated
+    /// or deleted from this heuristic, and an explicit library choice always takes precedence.
+    var isTemporaryWorkspace: Bool {
+        if isEphemeral { return true }
+        if let isSavedWorkspace { return !isSavedWorkspace }
+        return !repoPaths.isEmpty && repoPaths.allSatisfy { rawPath in
+            let path = URL(fileURLWithPath: (rawPath as NSString).expandingTildeInPath).standardizedFileURL.path
+            let components = URL(fileURLWithPath: path).pathComponents
+            return path.hasPrefix("/tmp/") || path.hasPrefix("/private/tmp/")
+                || path.hasPrefix(FileManager.default.temporaryDirectory.standardizedFileURL.path + "/")
+                || components.contains(".repoprompt-worktrees")
+                || zip(components, components.dropFirst()).contains { $0 == ".codex" && $1 == "worktrees" }
+        }
+    }
+
     /// Indicates whether this workspace should not be persisted to disk
     var isEphemeral: Bool {
         get { ephemeralFlag ?? false }
@@ -580,6 +595,10 @@ extension WorkspaceModel {
     @discardableResult
     mutating func normalizeComposeTabInvariants() -> Bool {
         var mutated = false
+        #if DEBUG
+            let interval = WorkspaceProjectionDecodeDiagnostics.beginNormalization()
+            defer { interval?.finish(mutated: mutated) }
+        #endif
 
         if composeTabs.isEmpty {
             let tab = ComposeTabState(
