@@ -1350,51 +1350,43 @@ public enum AIModel: Equatable, Hashable {
     }
 
     static func modelsForProvider(_ provider: AIProviderType) -> [AIModel] {
-        let models: [AIModel]
-        switch provider {
+        let models: [AIModel] = switch provider {
         case .anthropic:
-            models = Array(modelGroups[ProviderIndex.anthropic])
+            Array(modelGroups[ProviderIndex.anthropic])
         case .openAI:
-            models = Array(modelGroups[ProviderIndex.openAI])
+            Array(modelGroups[ProviderIndex.openAI])
         case .gemini:
-            models = Array(modelGroups[ProviderIndex.gemini])
+            Array(modelGroups[ProviderIndex.gemini])
         case .openRouter:
-            models = Array(modelGroups[ProviderIndex.openRouter])
+            Array(modelGroups[ProviderIndex.openRouter])
         case .deepseek:
-            models = Array(modelGroups[ProviderIndex.deepseek])
+            Array(modelGroups[ProviderIndex.deepseek])
         case .ollama:
-            models = [.ollama]
+            [.ollama]
         case .azure:
-            models = Array(modelGroups[ProviderIndex.azure])
+            Array(modelGroups[ProviderIndex.azure])
         case .customProvider:
-            var customModels: [AIModel] = []
-            if let config = try? CustomProviderConfiguration.load() {
-                customModels.append(.customProvider(name: config.name, provider: "custom", model: config.defaultModel))
-                if let userModel = config.userPreferredModel, !userModel.isEmpty {
-                    customModels.append(.customProviderUser(name: userModel))
-                }
-            }
-            models = customModels
+            (try? CustomProviderConfiguration.load())?.pickerModels() ?? []
         case .fireworks: // <-- Add Fireworks case
-            models = Array(modelGroups[ProviderIndex.fireworks])
+            Array(modelGroups[ProviderIndex.fireworks])
         case .grok: // <-- Add Grok case
-            models = Array(modelGroups[ProviderIndex.grok])
+            Array(modelGroups[ProviderIndex.grok])
         case .groq: // <-- Add Groq case
-            models = Array(modelGroups[ProviderIndex.groq])
+            Array(modelGroups[ProviderIndex.groq])
         case .zAI:
-            models = Array(modelGroups[ProviderIndex.zAI])
+            Array(modelGroups[ProviderIndex.zAI])
         case .claudeCode:
-            models = ClaudeCodeAIModelCatalog.modelsForPicker()
+            ClaudeCodeAIModelCatalog.modelsForPicker()
         case .codex:
-            models = codexModelsForPicker()
+            codexModelsForPicker()
         case .openCode:
-            models = ACPAIModelCatalog.openCodeModelsFromStore()
+            ACPAIModelCatalog.openCodeModelsFromStore()
         case .cursor:
-            models = ACPAIModelCatalog.cursorModelsFromStore()
+            ACPAIModelCatalog.cursorModelsFromStore()
         case .grokBuild:
-            models = ACPAIModelCatalog.grokBuildModelsFromStore()
+            ACPAIModelCatalog.grokBuildModelsFromStore()
         case .devin:
-            models = ACPAIModelCatalog.devinModelsFromStore()
+            ACPAIModelCatalog.devinModelsFromStore()
         }
 
         // Filter out models that are not yet available based on their release date

@@ -58,6 +58,60 @@ struct CustomProviderConfiguration: Codable {
         userPreferredModel?.isEmpty == false ? userPreferredModel! : defaultModel
     }
 
+    /// Oracle / chat picker entries for this provider.
+    ///
+    /// Enabled models are listed explicitly. A Preferred Model ID is listed as a
+    /// user override. If neither is present, the saved default model is still
+    /// offered so a validated provider is selectable without a second enable step.
+    func pickerModels() -> [AIModel] {
+        var models: [AIModel] = []
+        var seenRawValues = Set<String>()
+
+        func append(_ model: AIModel) {
+            guard seenRawValues.insert(model.rawValue).inserted else { return }
+            models.append(model)
+        }
+
+        for modelID in enabledModels where !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            append(.customProvider(name: modelID, provider: name, model: modelID))
+        }
+
+        let preferred = userPreferredModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !preferred.isEmpty {
+            append(.customProviderUser(name: preferred))
+        }
+
+        let fallback = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fallback.isEmpty, fallback != preferred, !enabledModels.contains(fallback) {
+            append(.customProvider(name: fallback, provider: name, model: fallback))
+        }
+
+        return models
+    }
+
+    static func enabledModelsAfterValidation(
+        previouslyEnabled: Set<String>,
+        fetchedModels: [String],
+        userPreferredModel: String,
+        defaultModel: String
+    ) -> Set<String> {
+        var retained = previouslyEnabled
+        if !fetchedModels.isEmpty {
+            retained = retained.filter { fetchedModels.contains($0) }
+        }
+
+        let preferred = userPreferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !preferred.isEmpty {
+            retained.remove(preferred)
+        } else if retained.isEmpty {
+            let fallback = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !fallback.isEmpty {
+                retained.insert(fallback)
+            }
+        }
+        return retained
+    }
+
     static func load() throws -> CustomProviderConfiguration {
         guard let data = UserDefaults.standard.data(forKey: "CustomProviderConfig") else {
             throw AIProviderError.providerNotConfigured

@@ -1944,12 +1944,7 @@ public class APISettingsViewModel: ObservableObject {
         if isCustomProviderValid,
            let config = try? CustomProviderConfiguration.load()
         {
-            modelSet.formUnion(config.enabledModels.map {
-                .customProvider(name: $0, provider: config.name, model: $0)
-            })
-            if let userModel = config.userPreferredModel, !userModel.isEmpty {
-                modelSet.insert(.customProviderUser(name: userModel))
-            }
+            modelSet.formUnion(config.pickerModels())
         }
 
         // ── Local Ollama provider ──────────────────────────────────────────────
@@ -2699,15 +2694,14 @@ public class APISettingsViewModel: ObservableObject {
         }
 
         // 4️⃣ Build configuration ---------------------------------------------
-        // Keep only enabled models which still exist (plus the user-override if any)
-        var retainedEnabled = previouslyEnabled
-        if !fetchedModels.isEmpty {
-            retainedEnabled = retainedEnabled.filter { fetchedModels.contains($0) }
-        }
-        // Ensure the user-preferred model is *not* duplicated in enabledModels
-        if !userModel.isEmpty {
-            retainedEnabled.remove(userModel) // remove if present
-        }
+        // Keep enabled models that still exist; if none remain and there is no
+        // preferred override, seed the validated default so Oracle/chat can use it.
+        let retainedEnabled = CustomProviderConfiguration.enabledModelsAfterValidation(
+            previouslyEnabled: previouslyEnabled,
+            fetchedModels: fetchedModels,
+            userPreferredModel: userModel,
+            defaultModel: defaultModelToSave
+        )
 
         let config = try CustomProviderConfiguration(
             url: baseURL,

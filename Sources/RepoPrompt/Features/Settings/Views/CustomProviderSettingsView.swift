@@ -54,7 +54,7 @@ struct CustomProviderSettingsView: View {
                 .frame(width: 24, height: 24, alignment: .center) // Fixed width for status icon
             }
 
-            Text("Configure a custom provider with an OpenAI-compatible API. Enter the **Provider URL** (e.g., `https://api.yourprovider.com/v1`).\n\nIf model listing is supported, models will appear after validation. Otherwise, specify a **Preferred Model ID**.").font(.caption)
+            Text("Configure a custom provider with an OpenAI-compatible API. Enter the **Provider URL** (e.g., `https://api.yourprovider.com/v1`).\n\nAfter Validate & Save, the preferred or default model is available in Oracle and Built-in Chat. If the provider lists models, enable additional ones below.").font(.caption)
 
             TextField("Provider URL", text: $viewModel.customProviderURL)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -147,7 +147,7 @@ struct CustomProviderSettingsView: View {
     private var modelListSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Available Models").font(.headline)
-            Text("Models reported by your provider. Enable the models you want to use.").font(.caption)
+            Text("Models reported by your provider. The validated default/preferred model is already usable; enable more models here to add them to the pickers.").font(.caption)
 
             TextField("Search models...", text: $searchText)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
