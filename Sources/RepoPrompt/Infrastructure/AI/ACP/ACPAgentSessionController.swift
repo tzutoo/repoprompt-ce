@@ -1190,6 +1190,84 @@ actor ACPAgentSessionController {
         )
     }
 
+    /// Auto-approval never falls back to a session-wide or arbitrary ACP option.
+    /// A missing genuine one-time option leaves the request pending for the manual path.
+    func respondToPermissionRequestOnceForOverseer(
+        id: String,
+        authorize: @MainActor @Sendable () async -> Bool
+    ) async -> Bool {
+        guard await authorize(),
+              let pending = pendingPermissionRequests[id],
+              let optionID = ACPPermissionOptionPolicy.overseerOneTimeAllowOptionID(
+                  options: pending.options.map { (optionID: $0.optionID, kind: $0.kind) },
+                  providerID: provider.providerID
+              )
+        else { return false }
+        do {
+            try sendPermissionSelectionResponse(id: pending.rpcID, optionID: optionID)
+            pendingPermissionRequests.removeValue(forKey: id)
+            return true
+        } catch {
+            log("Failed to submit Overseer ACP one-time approval: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    enum OverseerPermissionResponseResult: Equatable {
+        case submitted
+        /// The request vanished or authorization failed at the final check. Nothing was sent.
+        case notSubmitted
+        /// No genuine one-time option exists for the requested decision. Nothing was sent.
+        case noOneTimeOption
+        case failed
+    }
+
+    /// Explicit observer answer under **Answer prompts**, strictly scoped to this one request.
+    ///
+    /// Accept selects only a genuine one-time allow option; decline selects only a one-time reject
+    /// and otherwise reports `cancelled`, never a persistent reject; cancel reports `cancelled`.
+    /// Session-wide decisions are refused. `authorize` is the final suspension point before sending.
+    func respondToPermissionRequestForOverseer(
+        id: String,
+        decision: AgentApprovalDecision,
+        authorize: @MainActor @Sendable () async -> Bool
+    ) async -> OverseerPermissionResponseResult {
+        guard let initial = pendingPermissionRequests[id] else { return .notSubmitted }
+        let options = initial.options.map { (optionID: $0.optionID, kind: $0.kind) }
+        let selectedOptionID: String?
+        switch decision {
+        case .accept:
+            guard let optionID = ACPPermissionOptionPolicy.overseerOneTimeAllowOptionID(
+                options: options,
+                providerID: provider.providerID
+            ) else { return .noOneTimeOption }
+            selectedOptionID = optionID
+        case .decline:
+            selectedOptionID = ACPPermissionOptionPolicy.overseerOneTimeRejectOptionID(options: options)
+        case .cancel:
+            selectedOptionID = nil
+        case .acceptForSession, .acceptWithExecpolicyAmendment:
+            return .noOneTimeOption
+        }
+        guard await authorize(), let pending = pendingPermissionRequests[id] else { return .notSubmitted }
+        do {
+            if let selectedOptionID {
+                try sendPermissionSelectionResponse(id: pending.rpcID, optionID: selectedOptionID)
+            } else {
+                try sendJSONLine([
+                    "jsonrpc": "2.0",
+                    "id": pending.rpcID.jsonValue,
+                    "result": ["outcome": ["outcome": "cancelled"]]
+                ])
+            }
+            pendingPermissionRequests.removeValue(forKey: id)
+            return .submitted
+        } catch {
+            log("Failed to submit Overseer ACP permission response: \(error.localizedDescription)")
+            return .failed
+        }
+    }
+
     func respondToPermissionRequest(
         id: String,
         decision: AgentApprovalDecision
@@ -1581,6 +1659,16 @@ actor ACPAgentSessionController {
         return result
     }
 
+    /// The caller must first route server requests and exhaust owned-request correlation.
+    /// Known maintenance replies are ignored regardless of their payload or protocol version.
+    nonisolated static func isRecognizedUnmatchedResponse(
+        _ json: [String: Any],
+        provider: any ACPAgentProvider
+    ) -> Bool {
+        guard let id = json["id"] as? String, !json.keys.contains("method") else { return false }
+        return provider.recognizesUnmatchedResponseID(id)
+    }
+
     private func handleJSONLine(_ lineData: Data) {
         guard let trimmed = trimmedASCIIWhitespace(lineData), !trimmed.isEmpty else { return }
         let rawLine = String(data: trimmed, encoding: .utf8) ?? "<non-utf8>"
@@ -1623,6 +1711,10 @@ actor ACPAgentSessionController {
                 } else {
                     pendingRequest.continuation.resume(throwing: ControllerError.protocolViolation("Missing result/error for request \(id.displayValue)"))
                 }
+                return
+            }
+            if Self.isRecognizedUnmatchedResponse(json, provider: provider) {
+                log("Ignored provider-recognized unmatched ACP response provider=\(provider.providerID.rawValue) id=\(id.displayValue).")
                 return
             }
             diagnose(.unmatchedResponse(id: id.displayValue, line: rawLine))
