@@ -1982,7 +1982,7 @@ final class ClaudeAgentModeCoordinator {
         _ attachments: [AgentImageAttachment],
         selectedModelRaw: String
     ) throws -> [NativeAgentRuntimeImage] {
-        if !PiModelRegistry.shared.modelAcceptsImages(rawModel: selectedModelRaw) {
+        if !PiModelRegistry.modelAcceptsImages(rawModel: selectedModelRaw) {
             let name = selectedModelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
             let label = name.isEmpty || name == AgentModel.defaultModel.rawValue
                 ? "the current pi model"

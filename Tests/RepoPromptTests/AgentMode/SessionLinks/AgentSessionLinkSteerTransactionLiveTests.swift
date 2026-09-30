@@ -594,7 +594,7 @@ private actor SteerRecordingNativeController: NativeAgentRuntimeControlling {
 
     func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
 
-    func sendUserMessage(_ message: String) async throws -> UUID {
+    func sendUserMessage(_ message: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         log.record(message)
         return UUID()
     }

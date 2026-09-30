@@ -121,6 +121,7 @@ final class AgentSessionLinkRunnerHarness {
             workspacePathProvider: { _ in workspacePath },
             codexCoordinator: host.test_codexCoordinator,
             claudeCoordinator: host.claudeCoordinator,
+            piCoordinator: host.piCoordinator,
             shouldManageCodexTooling: false,
             providerRuntimePermissionResolver: { [bindingService = host.providerBindingService] agent, profile in
                 bindingService.runtimePermission(for: agent, profile: profile)

@@ -2430,7 +2430,7 @@ actor MonitorFakeNativeController: NativeAgentRuntimeControlling {
 
     func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
 
-    func sendUserMessage(_ text: String) async throws -> UUID {
+    func sendUserMessage(_ text: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         sentMessages.append(text)
         return UUID()
     }

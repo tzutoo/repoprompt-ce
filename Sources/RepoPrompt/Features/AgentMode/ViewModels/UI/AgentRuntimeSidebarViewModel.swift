@@ -62,7 +62,7 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             case .openCode, .cursor, .antigravity: return 200_000
             case .grokBuild: return 500_000 // grok 4.5/4.6 advertise totalContextTokens 500000
             case .piAgent:
-                return PiModelRegistry.shared.contextWindow(forRaw: selectedModelRaw ?? "") ?? 200_000
+                return PiModelRegistry.contextWindow(forRaw: selectedModelRaw ?? "") ?? 200_000
             case .codexExec, .devin, .none: return 200_000
             }
         }

@@ -377,7 +377,7 @@ enum AgentModelCatalog {
         }
         if agentKind == .piAgent {
             let fallback = staticOption(.defaultModel, for: .piAgent)
-            if let discoveredOptions = PiModelRegistry.shared.resolvedOptions(),
+            if let discoveredOptions = PiModelRegistry.resolvedOptions(),
                !discoveredOptions.isEmpty
             {
                 return discoveredOptions
@@ -448,7 +448,7 @@ enum AgentModelCatalog {
             if normalized.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) == .orderedSame {
                 return true
             }
-            return PiModelRegistry.shared.contains(rawModel: normalized)
+            return PiModelRegistry.contains(rawModel: normalized)
         }
         if agentKind == .antigravity || agentKind == .devin {
             return resolvedACPDiscoveredModels(for: agentKind)?.contains(rawModel: normalized) == true

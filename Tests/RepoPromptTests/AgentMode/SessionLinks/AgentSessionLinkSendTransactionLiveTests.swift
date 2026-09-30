@@ -791,7 +791,7 @@ private actor LiveSendStubNativeController: NativeAgentRuntimeControlling {
 
     func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
 
-    func sendUserMessage(_: String) async throws -> UUID {
+    func sendUserMessage(_: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         UUID()
     }
 

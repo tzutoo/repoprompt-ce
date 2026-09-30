@@ -5,11 +5,11 @@ import XCTest
 final class PiModelRegistryTests: XCTestCase {
     override func setUp() {
         super.setUp()
-        PiModelRegistry.shared.clear()
+        PiModelRegistry.clear()
     }
 
     override func tearDown() {
-        PiModelRegistry.shared.clear()
+        PiModelRegistry.clear()
         super.tearDown()
     }
 
@@ -24,25 +24,25 @@ final class PiModelRegistryTests: XCTestCase {
     }
 
     func testUpdateDedupesSortsAndReportsChanges() {
-        XCTAssertTrue(PiModelRegistry.shared.update(records: [
+        XCTAssertTrue(PiModelRegistry.update(records: [
             record("glm-5.3", name: "GLM 5.3", provider: "zai", contextWindow: 200_000),
             record("GLM-5.3", name: "duplicate", provider: "zai"),
             record("qwen3-235b", name: "Qwen3 235B", provider: "openrouter", contextWindow: 262_144)
         ]))
         // Same content again: no change.
-        XCTAssertFalse(PiModelRegistry.shared.update(records: [
+        XCTAssertFalse(PiModelRegistry.update(records: [
             record("qwen3-235b", name: "Qwen3 235B", provider: "openrouter", contextWindow: 262_144),
             record("glm-5.3", name: "GLM 5.3", provider: "zai", contextWindow: 200_000)
         ]))
         // Provider-major, id-minor ordering: openrouter sorts before zai.
-        XCTAssertEqual(PiModelRegistry.shared.resolvedRecords().map(\.id), ["qwen3-235b", "glm-5.3"])
+        XCTAssertEqual(PiModelRegistry.resolvedRecords().map(\.id), ["qwen3-235b", "glm-5.3"])
     }
 
     func testResolvedOptionsPlaceDefaultFirst() throws {
-        PiModelRegistry.shared.update(records: [
+        PiModelRegistry.update(records: [
             record("glm-5.3", name: "GLM 5.3", provider: "zai", reasoning: true, contextWindow: 200_000)
         ])
-        let options = try XCTUnwrap(PiModelRegistry.shared.resolvedOptions())
+        let options = try XCTUnwrap(PiModelRegistry.resolvedOptions())
         XCTAssertEqual(options.count, 2)
         XCTAssertTrue(options[0].isPlaceholderDefault)
         XCTAssertEqual(options[0].rawValue, AgentModel.defaultModel.rawValue)
@@ -52,22 +52,22 @@ final class PiModelRegistryTests: XCTestCase {
     }
 
     func testResolvedOptionsNilWhenEmpty() {
-        XCTAssertNil(PiModelRegistry.shared.resolvedOptions())
+        XCTAssertNil(PiModelRegistry.resolvedOptions())
     }
 
     func testContainsIsCaseInsensitiveAndContextWindowLookup() {
-        PiModelRegistry.shared.update(records: [
+        PiModelRegistry.update(records: [
             record("glm-5.3", contextWindow: 200_000)
         ])
-        XCTAssertTrue(PiModelRegistry.shared.contains(rawModel: "GLM-5.3"))
-        XCTAssertTrue(PiModelRegistry.shared.contains(rawModel: "zai/GLM-5.3"))
-        XCTAssertFalse(PiModelRegistry.shared.contains(rawModel: "other"))
-        XCTAssertEqual(PiModelRegistry.shared.contextWindow(forRaw: "GLM-5.3"), 200_000)
-        XCTAssertNil(PiModelRegistry.shared.contextWindow(forRaw: "missing"))
+        XCTAssertTrue(PiModelRegistry.contains(rawModel: "GLM-5.3"))
+        XCTAssertTrue(PiModelRegistry.contains(rawModel: "zai/GLM-5.3"))
+        XCTAssertFalse(PiModelRegistry.contains(rawModel: "other"))
+        XCTAssertEqual(PiModelRegistry.contextWindow(forRaw: "GLM-5.3"), 200_000)
+        XCTAssertNil(PiModelRegistry.contextWindow(forRaw: "missing"))
     }
 
     func testCatalogUsesDiscoveredOptionsAndValidates() {
-        PiModelRegistry.shared.update(records: [
+        PiModelRegistry.update(records: [
             record("glm-5.3", name: "GLM 5.3", provider: "zai")
         ])
         let availability = AgentModelCatalog.AvailabilityContext(piAvailable: true)
@@ -93,21 +93,21 @@ final class PiModelRegistryTests: XCTestCase {
     }
 
     func testDedupeKeepsSameIdFromDifferentProviders() {
-        XCTAssertTrue(PiModelRegistry.shared.update(records: [
+        XCTAssertTrue(PiModelRegistry.update(records: [
             record("grok", name: "Grok", provider: "local"),
             record("grok", name: "Grok", provider: "xai")
         ]))
         XCTAssertEqual(
-            PiModelRegistry.shared.resolvedRecords().map(\.catalogRawValue),
+            PiModelRegistry.resolvedRecords().map(\.catalogRawValue),
             ["local/grok", "xai/grok"]
         )
-        XCTAssertEqual(PiModelRegistry.shared.record(matchingRaw: "grok")?.provider, "local")
-        XCTAssertEqual(PiModelRegistry.shared.record(matchingRaw: "local/grok")?.provider, "local")
+        XCTAssertEqual(PiModelRegistry.record(matchingRaw: "grok")?.provider, "local")
+        XCTAssertEqual(PiModelRegistry.record(matchingRaw: "local/grok")?.provider, "local")
     }
 
     func testModelAcceptsImagesUsesInputTypes() {
-        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: AgentModel.defaultModel.rawValue))
-        PiModelRegistry.shared.update(records: [
+        XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: AgentModel.defaultModel.rawValue))
+        PiModelRegistry.update(records: [
             PiModelRegistry.ModelRecord(
                 id: "text-only",
                 name: "Text",
@@ -125,8 +125,8 @@ final class PiModelRegistryTests: XCTestCase {
                 inputTypes: ["text", "image"]
             )
         ])
-        XCTAssertFalse(PiModelRegistry.shared.modelAcceptsImages(rawModel: "text-only"))
-        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: "vision"))
-        XCTAssertTrue(PiModelRegistry.shared.modelAcceptsImages(rawModel: "unknown-model"))
+        XCTAssertFalse(PiModelRegistry.modelAcceptsImages(rawModel: "text-only"))
+        XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: "vision"))
+        XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: "unknown-model"))
     }
 }

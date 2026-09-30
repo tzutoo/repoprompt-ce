@@ -578,7 +578,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     /// `undefined/<id>` and fails the turn.
     private func resolvePiModelSelection(_ rawModel: String) throws -> PiProviderRuntimeBridge.ModelSelection {
         let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let record = PiModelRegistry.shared.record(matchingRaw: trimmed),
+        if let record = PiModelRegistry.record(matchingRaw: trimmed),
            !record.provider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             return PiProviderRuntimeBridge.ModelSelection(
