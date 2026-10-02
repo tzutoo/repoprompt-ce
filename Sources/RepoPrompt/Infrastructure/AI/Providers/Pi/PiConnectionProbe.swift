@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptProcess
 
 /// One-shot connectivity probe for the pi coding agent used by the Settings
 /// connect flow. A managed `pi --mode rpc --no-session` process verifies the

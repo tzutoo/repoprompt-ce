@@ -65,6 +65,7 @@ package enum MCPClientToolPolicyCatalog {
     package static let agentModeGenericGrantedCapabilities: Set<MCPToolCapability> = [
         .userInteraction,
         .agentReasoningControl,
+        .agentSelfControl,
         .statusPublication,
         .agentConversationSend,
         .conversationLog,
@@ -72,6 +73,7 @@ package enum MCPClientToolPolicyCatalog {
 
     package static let agentModeNativeGrantedCapabilities: Set<MCPToolCapability> = [
         .userInteraction,
+        .agentSelfControl,
         .statusPublication,
         .agentConversationSend,
         .conversationLog,
@@ -92,6 +94,7 @@ package enum MCPClientToolPolicyCatalog {
         .agentConversationSend,
         .conversationLog,
         .agentSessionLinkControl,
+        .agentSelfControl,
     ]
 
     package static let classifications: [MCPClientToolPolicyProfile: MCPClientToolPolicyClassification] = [

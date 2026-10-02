@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptSecureStorage
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import XCTest
@@ -365,7 +366,7 @@ final class AgentSessionLinkSteerTransactionLiveTests: XCTestCase {
             }
         )
 
-        XCTAssertEqual(outcome, .blocked(.endpointInvalidated))
+        XCTAssertEqual(outcome, .blocked(.endpointPostTarget))
         XCTAssertTrue(fixture.session.items.isEmpty)
         XCTAssertTrue(fixture.session.pendingClaudeSteeringInstructions.isEmpty)
     }
@@ -433,6 +434,7 @@ final class AgentSessionLinkSteerAdmissionTests: XCTestCase {
         )
         // Running but between states.
         let betweenStates: [(inout AgentSessionLinkDeliveryReadiness.Snapshot) -> Void] = [
+            { $0.stopInProgress = true },
             { $0.terminalCommitInProgress = true },
             { $0.isComposerSubmissionInFlight = true },
             { $0.isPreparingInitialWorktree = true },
@@ -454,7 +456,7 @@ final class AgentSessionLinkSteerAdmissionTests: XCTestCase {
             Admission.evaluate(readiness: running, runStateIsActive: true, pendingPromptExists: false, route: nil),
             .blocked(.steerUnavailable)
         )
-        for route: AgentSessionLinkManagedSteerRoute in [.codex, .claudeInterrupt, .waitingInstruction] {
+        for route: AgentSessionLinkManagedSteerRoute in [.codex, .claudeInterrupt, .acpQueued, .waitingInstruction] {
             XCTAssertEqual(
                 Admission.evaluate(readiness: running, runStateIsActive: true, pendingPromptExists: false, route: route),
                 .steer(route)
@@ -556,6 +558,7 @@ final class SteerProviderMessageLog: @unchecked Sendable {
 
 /// Minimal native runtime that records every user message it is handed and touches nothing else.
 private actor SteerRecordingNativeController: NativeAgentRuntimeControlling {
+    private var configuration = SessionLinkNativeConfigurationFixture()
     private let log: SteerProviderMessageLog
     private let stream: AsyncStream<NativeAgentRuntimeEvent>
 
@@ -585,14 +588,27 @@ private actor SteerRecordingNativeController: NativeAgentRuntimeControlling {
         effortLevel _: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride _: String?
     ) async throws -> NativeAgentRuntimeSessionRef {
-        NativeAgentRuntimeSessionRef(sessionID: "managed-steer-stub")
+        configuration.replaceProcess()
+        return NativeAgentRuntimeSessionRef(sessionID: "managed-steer-stub")
     }
 
     func currentSessionRef() -> NativeAgentRuntimeSessionRef {
         NativeAgentRuntimeSessionRef(sessionID: "managed-steer-stub")
     }
 
-    func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {}
+    func applyModelAndEffort(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws {
+        _ = configuration.apply()
+    }
+
+    func applyModelAndEffortWithProof(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
+        configuration.apply()
+    }
+
+    func sendUserMessage(_ message: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+        try configuration.validate(proof)
+        log.record(message)
+        return UUID()
+    }
 
     func sendUserMessage(_ message: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         log.record(message)
@@ -603,6 +619,9 @@ private actor SteerRecordingNativeController: NativeAgentRuntimeControlling {
         .noTurnInFlight
     }
 
-    func shutdown() {}
+    func shutdown() {
+        configuration.replaceProcess()
+    }
+
     func respondToPermissionRequest(id _: String, decision _: AgentApprovalDecision) {}
 }

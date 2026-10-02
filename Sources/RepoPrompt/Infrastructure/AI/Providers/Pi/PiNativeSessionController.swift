@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptProcess
 
 /// Interactive Agent Mode controller for the pi coding agent's RPC mode.
 ///
@@ -124,6 +125,11 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var lastStopReason: String?
     private var toolInvocationIDs: [String: UUID] = [:]
     private var shutDown = false
+    /// Lifetime token for configuration receipts. pi has no Claude-compatible flag-settings
+    /// generation pipeline, so a fresh lifetime per launched process is the whole
+    /// stale-receipt fence: a proof minted for a previous process cannot certify a later turn.
+    private var configurationLifetime = UUID()
+    private var appliedConfigurationProof: NativeAgentRuntimeConfigurationProof?
 
     init(options: Options, runID: UUID = UUID()) {
         self.options = options
@@ -215,6 +221,27 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         guard hasActiveSession else {
             throw NativeAgentRuntimeControllerError.processNotRunning
         }
+        try await performModelAndEffortApplication(model: model, effortLevel: effortLevel)
+    }
+
+    /// Proof-bearing application. pi applies model/effort synchronously over RPC, so a
+    /// successful application mints the receipt directly; there is no deferred flag-settings
+    /// pipeline whose result could land after a newer intent.
+    func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
+        guard hasActiveSession else {
+            throw NativeAgentRuntimeControllerError.processNotRunning
+        }
+        try await performModelAndEffortApplication(model: model, effortLevel: effortLevel)
+        let proof = NativeAgentRuntimeConfigurationProof(
+            lifetime: configurationLifetime,
+            intentGeneration: 0,
+            requestGeneration: 0
+        )
+        appliedConfigurationProof = proof
+        return .applied(proof)
+    }
+
+    private func performModelAndEffortApplication(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws {
         if let model, !model.isEmpty {
             let resolved = try resolvePiModelSelection(model)
             let setModel = PiProviderRuntimeBridge.RPCCommand.setModel(
@@ -236,6 +263,16 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
                 throw ControllerError.commandFailed(response.errorMessage ?? "set_thinking_level failed")
             }
         }
+    }
+
+    /// Proof-bearing send. pi mints its receipt during the same dispatch, so a receipt that
+    /// no longer matches is either stale (previous process/application) or foreign; reject it
+    /// rather than deliver a turn the coordinator believes was certified.
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        guard appliedConfigurationProof == configuration else {
+            throw NativeAgentRuntimeControllerError.configurationNotCurrent
+        }
+        return try await sendUserMessage(text, images: images)
     }
 
     func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
@@ -282,6 +319,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     func shutdown() async {
         guard !shutDown else { return }
         shutDown = true
+        appliedConfigurationProof = nil
         shutdownPendingResponses()
         clearRegisteredExpectedAgentPID()
         if let stdinHandle {
@@ -378,6 +416,10 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             throw ControllerError.invalidExecutable(error.localizedDescription)
         }
         self.process = process
+        // A new process is a new configuration lifetime; a receipt minted for the
+        // previous process must not certify a turn on this one.
+        configurationLifetime = UUID()
+        appliedConfigurationProof = nil
         stdinHandle = stdinPipe.fileHandleForWriting
         if let expectedPIDMCPClientName = options.expectedPIDMCPClientName, process.isRunning {
             let pid = process.processIdentifier

@@ -21,6 +21,12 @@ actor ClaudeCompatibleNativeSessionAdapter: NativeAgentRuntimeControlling {
         controller = controllerFactory()
     }
 
+    #if DEBUG
+        func test_processController() -> ClaudeNativeProcessSessionController? {
+            controller as? ClaudeNativeProcessSessionController
+        }
+    #endif
+
     var hasActiveSession: Bool {
         get async { await controller.hasActiveSession }
     }
@@ -63,8 +69,28 @@ actor ClaudeCompatibleNativeSessionAdapter: NativeAgentRuntimeControlling {
         try await controller.applyModelAndEffort(model: model, effortLevel: effortLevel)
     }
 
+    func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
+        try await controller.applyModelAndEffortWithProof(model: model, effortLevel: effortLevel)
+    }
+
+    func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?, replacingFailure: NativeAgentRuntimeConfigurationFailure) async throws -> NativeAgentRuntimeConfigurationApplication {
+        try await controller.applyModelAndEffortWithProof(model: model, effortLevel: effortLevel, replacingFailure: replacingFailure)
+    }
+
+    func applyModelAndEffortForTurn(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?, replacingFailure: NativeAgentRuntimeConfigurationFailure?) async throws -> NativeAgentRuntimeTurnConfigurationOutcome {
+        try await controller.applyModelAndEffortForTurn(model: model, effortLevel: effortLevel, replacingFailure: replacingFailure)
+    }
+
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        try await controller.sendUserMessage(text, configuration: configuration, images: images)
+    }
+
     func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
         try await controller.sendUserMessage(text, images: images)
+    }
+
+    func sendUserMessage(_ text: String) async throws -> UUID {
+        try await controller.sendUserMessage(text)
     }
 
     func interruptTurn(reason: String) async -> NativeAgentRuntimeInterruptOutcome {

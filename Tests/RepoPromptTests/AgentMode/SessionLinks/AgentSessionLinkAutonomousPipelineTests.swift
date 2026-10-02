@@ -486,7 +486,8 @@ final class AgentSessionLinkAutonomousPipelineTests: XCTestCase {
                 runID: runID,
                 routeToken: routeToken,
                 projectionRevision: runCatalogRevision,
-                hasAgentSessionLink: true
+                hasAgentSessionLink: true,
+                hasAnyActiveLink: true
             ),
             to: endpoint
         )
@@ -550,6 +551,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
                 displayName: candidate.displayName,
                 providerDisplayName: candidate.providerDisplayName,
                 status: .idle,
+                board: .empty,
                 idleForSend: false,
                 pendingInteractionKind: nil,
                 latestVisibleAssistantPreview: nil,
@@ -723,6 +725,13 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         )
     }
 
+    func agentSessionLinkStartStopFence(for candidate: AgentSessionLinkEndpointCandidate) -> AgentRunStartStopFence? {
+        guard let viewModel = viewModelsByWindowID[candidate.windowID],
+              let session = viewModel.agentSessionLinkLiveSession(matching: candidate)
+        else { return nil }
+        return AgentRunStartStopFence(session: session)
+    }
+
     func agentSessionLinkPerformSend(
         to candidate: AgentSessionLinkEndpointCandidate,
         request: AgentSessionLinkSendRequest,
@@ -733,6 +742,23 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
             return .blocked(.endpointInvalidated)
         }
         return await viewModel.agentSessionLinkPerformSend(
+            to: candidate,
+            request: request,
+            liveness: liveness,
+            commitAuthorization: commitAuthorization
+        )
+    }
+
+    func agentSessionLinkPerformCompact(
+        to candidate: AgentSessionLinkEndpointCandidate,
+        request: AgentSessionLinkCompactRequest,
+        liveness: @escaping AgentSessionLinkSendLivenessProbe,
+        commitAuthorization: @MainActor () async -> AgentSessionLinkSendCommitOutcome
+    ) async -> AgentSessionLinkSendTransactionOutcome {
+        guard let viewModel = viewModelsByWindowID[candidate.windowID] else {
+            return .blocked(.endpointInvalidated)
+        }
+        return await viewModel.agentSessionLinkPerformCompact(
             to: candidate,
             request: request,
             liveness: liveness,
@@ -762,6 +788,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
 /// Minimal native runtime stub: the pipeline only needs a delivered send to reach its provider
 /// handoff, so nothing here touches a process, a socket, or the filesystem.
 private actor AutonomousPipelineStubNativeController: NativeAgentRuntimeControlling {
+    private var configuration = SessionLinkNativeConfigurationFixture()
     private let stream: AsyncStream<NativeAgentRuntimeEvent>
 
     init() {
@@ -789,7 +816,8 @@ private actor AutonomousPipelineStubNativeController: NativeAgentRuntimeControll
         effortLevel _: NativeAgentRuntimeEffortLevel?,
         systemPromptOverride _: String?
     ) async throws -> NativeAgentRuntimeSessionRef {
-        NativeAgentRuntimeSessionRef(sessionID: "autonomous-pipeline-stub")
+        configuration.replaceProcess()
+        return NativeAgentRuntimeSessionRef(sessionID: "autonomous-pipeline-stub")
     }
 
     func currentSessionRef() -> NativeAgentRuntimeSessionRef {
@@ -799,7 +827,18 @@ private actor AutonomousPipelineStubNativeController: NativeAgentRuntimeControll
     func applyModelAndEffort(
         model _: String?,
         effortLevel _: NativeAgentRuntimeEffortLevel?
-    ) async throws {}
+    ) async throws {
+        _ = configuration.apply()
+    }
+
+    func applyModelAndEffortWithProof(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
+        configuration.apply()
+    }
+
+    func sendUserMessage(_: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+        try configuration.validate(proof)
+        return UUID()
+    }
 
     func sendUserMessage(_: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         UUID()
@@ -809,7 +848,10 @@ private actor AutonomousPipelineStubNativeController: NativeAgentRuntimeControll
         .noTurnInFlight
     }
 
-    func shutdown() {}
+    func shutdown() {
+        configuration.replaceProcess()
+    }
+
     func respondToPermissionRequest(id _: String, decision _: AgentApprovalDecision) {}
 }
 

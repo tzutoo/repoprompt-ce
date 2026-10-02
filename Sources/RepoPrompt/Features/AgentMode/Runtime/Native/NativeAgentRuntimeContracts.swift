@@ -22,9 +22,20 @@ protocol NativeAgentRuntimeControlling: Actor {
     ) async throws -> NativeAgentRuntimeSessionRef
     func currentSessionRef() async -> NativeAgentRuntimeSessionRef
     func applyModelAndEffort(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws
-    /// Sends a user turn. `images` is ignored by runtimes that have no native image
-    /// prompt field; pi maps them onto RPC `prompt.images`.
+    /// Unlike the legacy live-update helper, this proves the complete requested configuration.
+    func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication
+    /// Begins fallback only if the failed application is still current, consuming its intent.
+    func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?, replacingFailure: NativeAgentRuntimeConfigurationFailure) async throws -> NativeAgentRuntimeConfigurationApplication
+    /// Turn-scoped Auto application; fallback consumes only a still-current failure token.
+    func applyModelAndEffortForTurn(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?, replacingFailure: NativeAgentRuntimeConfigurationFailure?) async throws -> NativeAgentRuntimeTurnConfigurationOutcome
+    /// Sends a user turn that must prove the applied configuration first. `images` is ignored
+    /// by runtimes that have no native image prompt field; pi maps them onto RPC `prompt.images`.
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID
+    /// Sends a user turn with no configuration proof. Used by maintenance commands and as the
+    /// primitive underlying `sendUserMessage(_:)`. `images` semantics match the proof-bearing send.
     func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID
+    /// Maintenance commands intentionally do not require an ordinary-turn configuration proof.
+    func sendUserMessage(_ text: String) async throws -> UUID
     /// Sends a reasoned interrupt request to the provider runtime.
     /// - Parameter reason: "interrupt" for steering (graceful), "cancel" for forceful stop.
     func interruptTurn(reason: String) async -> NativeAgentRuntimeInterruptOutcome
@@ -34,6 +45,29 @@ protocol NativeAgentRuntimeControlling: Actor {
 }
 
 extension NativeAgentRuntimeControlling {
+    /// Fail closed for runtimes that have not implemented application proof. In particular,
+    /// an old no-op fake must not accidentally certify provider application.
+    func applyModelAndEffortWithProof(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
+        .notReady
+    }
+
+    /// A runtime without atomic failure-token validation must not recertify an older turn.
+    func applyModelAndEffortWithProof(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?, replacingFailure _: NativeAgentRuntimeConfigurationFailure) async throws -> NativeAgentRuntimeConfigurationApplication {
+        .superseded
+    }
+
+    /// Runtimes must implement failure-token ownership to support conditional fallback.
+    /// A legacy Void update alone cannot authorize restoring a failed turn's configuration.
+    func applyModelAndEffortForTurn(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?, replacingFailure: NativeAgentRuntimeConfigurationFailure?) async throws -> NativeAgentRuntimeTurnConfigurationOutcome {
+        guard replacingFailure == nil else { return .superseded }
+        try await applyModelAndEffort(model: model, effortLevel: effortLevel)
+        return .applied
+    }
+
+    func sendUserMessage(_: String, configuration _: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+        throw NativeAgentRuntimeControllerError.configurationNotCurrent
+    }
+
     func cleanupConversation(_ handle: ProviderConversationCleanupHandle, action: ProviderConversationCleanupAction) async -> ProviderConversationCleanupOutcome {
         .unsupported(message: "Native runtime has no local API for \(action.rawValue) cleanup of conversations.")
     }
@@ -153,6 +187,9 @@ enum NativeAgentRuntimeControllerError: Error, LocalizedError {
     case inputWriteFailed(String)
     case controlRequestTimedOut(requestID: String)
     case liveModelSwitchRequiresRestart
+    case configurationNotCurrent
+    /// Cancellation observed at the proof-bearing send entry, before any user-message write.
+    case cancelledBeforeWrite
 
     var errorDescription: String? {
         switch self {
@@ -168,6 +205,10 @@ enum NativeAgentRuntimeControllerError: Error, LocalizedError {
             "Native runtime control request timed out: \(requestID)"
         case .liveModelSwitchRequiresRestart:
             "Changing to the selected model requires restarting the agent because its launch environment changes."
+        case .configurationNotCurrent:
+            "Native runtime model configuration is not current. No message was sent; retry the turn."
+        case .cancelledBeforeWrite:
+            "Native dispatch was cancelled before writing. No message was sent."
         }
     }
 }

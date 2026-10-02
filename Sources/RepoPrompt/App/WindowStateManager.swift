@@ -239,6 +239,7 @@ final class WorkspaceActivityCoordinator {
     private var workspaceManagersByOwnerID: [UUID: WeakWorkspaceManager] = [:]
     private var activationWorkspaceIDByLeaseID: [UUID: UUID] = [:]
     private var deletionLeaseIDByWorkspaceID: [UUID: UUID] = [:]
+    private var laneRetirementClaimIDByWorkspaceID: [UUID: UUID] = [:]
     private let confirmedDeletionTimeout: Duration
 
     init(confirmedDeletionTimeout: Duration = .seconds(15)) {
@@ -254,7 +255,9 @@ final class WorkspaceActivityCoordinator {
     }
 
     func beginActivation(workspaceID: UUID) -> ActivationLease? {
-        guard deletionLeaseIDByWorkspaceID[workspaceID] == nil else { return nil }
+        guard deletionLeaseIDByWorkspaceID[workspaceID] == nil,
+              laneRetirementClaimIDByWorkspaceID[workspaceID] == nil
+        else { return nil }
         let lease = ActivationLease(id: UUID(), workspaceID: workspaceID)
         activationWorkspaceIDByLeaseID[lease.id] = workspaceID
         return lease
@@ -263,6 +266,21 @@ final class WorkspaceActivityCoordinator {
     func endActivation(_ lease: ActivationLease) {
         guard activationWorkspaceIDByLeaseID[lease.id] == lease.workspaceID else { return }
         activationWorkspaceIDByLeaseID.removeValue(forKey: lease.id)
+    }
+
+    func claimLaneRetirement(workspaceID: UUID) -> UUID? {
+        guard deletionLeaseIDByWorkspaceID[workspaceID] == nil,
+              laneRetirementClaimIDByWorkspaceID[workspaceID] == nil,
+              !activationWorkspaceIDByLeaseID.values.contains(workspaceID)
+        else { return nil }
+        let claimID = UUID()
+        laneRetirementClaimIDByWorkspaceID[workspaceID] = claimID
+        return claimID
+    }
+
+    func releaseLaneRetirement(workspaceID: UUID, claimID: UUID) {
+        guard laneRetirementClaimIDByWorkspaceID[workspaceID] == claimID else { return }
+        laneRetirementClaimIDByWorkspaceID.removeValue(forKey: workspaceID)
     }
 
     func claimDeletion(workspaceIDs: Set<UUID>) -> DeletionClaim {
@@ -282,6 +300,8 @@ final class WorkspaceActivityCoordinator {
                 blockedReasonsByWorkspaceID[workspaceID] = "Workspace is being activated in another window."
             } else if deletionLeaseIDByWorkspaceID[workspaceID] != nil {
                 blockedReasonsByWorkspaceID[workspaceID] = "Workspace deletion is already in progress."
+            } else if laneRetirementClaimIDByWorkspaceID[workspaceID] != nil {
+                blockedReasonsByWorkspaceID[workspaceID] = "A lane is being retired in this workspace."
             } else {
                 deletionLeaseIDByWorkspaceID[workspaceID] = leaseID
                 claimedWorkspaceIDs.insert(workspaceID)
@@ -314,6 +334,8 @@ final class WorkspaceActivityCoordinator {
         for workspaceID in workspaceIDs {
             if deletionLeaseIDByWorkspaceID[workspaceID] != nil {
                 failures[workspaceID] = "Workspace deletion is already in progress."
+            } else if laneRetirementClaimIDByWorkspaceID[workspaceID] != nil {
+                failures[workspaceID] = "A lane is being retired in this workspace."
             } else {
                 deletionLeaseIDByWorkspaceID[workspaceID] = leaseID
                 claimed.insert(workspaceID)
@@ -538,7 +560,24 @@ class WindowStatesManager: ObservableObject {
     // ──────────────────────────────────────────────────────────────
 
     /// All active windows in the order they were created
-    @Published var allWindows: [WindowState] = []
+    @Published var allWindows: [WindowState] = [] {
+        didSet {
+            modelRoutingWindowIndexes = Dictionary(
+                allWindows.enumerated().map { ($1.windowID, $0) },
+                uniquingKeysWith: { _, _ in -1 }
+            )
+        }
+    }
+
+    private var modelRoutingWindowIndexes: [Int: Int] = [:]
+
+    /// Read-only exact lookup for configuration-only routing. Never falls back to discovery.
+    func modelRoutingWindow(withID id: Int) -> WindowState? {
+        guard !isTerminating, let index = modelRoutingWindowIndexes[id],
+              allWindows.indices.contains(index), allWindows[index].windowID == id,
+              !allWindows[index].isClosing else { return nil }
+        return allWindows[index]
+    }
 
     /// Any incoming URLs that arrived before a window was ready
     @Published var pendingURLs: [URL] = []
@@ -632,7 +671,7 @@ class WindowStatesManager: ObservableObject {
         let mode = AppLaunchConfiguration.current.agentSessionOversightPersistenceMode(
             autoRestoreWorkspacesEnabled: autoRestoreWorkspacesEnabled
         )
-        let store = AgentSessionOversightIntentStore.production(mode: mode)
+        let store = AgentSessionOversightIntentStore.production(mode: mode, restorePerfRecorder: AppWorkspaceRestorePerfRecorder())
         Task { @MainActor in
             await AgentSessionLinkRuntimeBridge.shared.bootstrapIntentStore(store)
         }
@@ -1025,9 +1064,11 @@ class WindowStatesManager: ObservableObject {
         // If we have pending URLs that arrived *before* any windows,
         // route them through the app router so scoped routes are parsed before
         // choosing a target window. Drain once and preserve ordering.
+        // Only drain when non-empty: assigning the @Published array publishes objectWillChange even
+        // for an empty removeAll, which would invalidate every manager observer a second time.
         let urlsToRoute = pendingURLs
-        pendingURLs.removeAll()
         if !urlsToRoute.isEmpty {
+            pendingURLs.removeAll()
             Task { @MainActor in
                 for url in urlsToRoute {
                     await AppDeepLinkRouter.shared.route(url: url, preferredLegacyWindow: state)

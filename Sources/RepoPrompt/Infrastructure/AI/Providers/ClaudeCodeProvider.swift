@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptProcess
 
 struct ClaudeCodeCLIModelSelection: Equatable {
     let modelArgument: String?
@@ -96,13 +97,15 @@ final class ClaudeCodeProvider: AIProvider {
     private let initialBackoff: TimeInterval = 1.0
     private let maxBackoff: TimeInterval = 8.0
 
+    /// An injected runner owns process configuration; otherwise the normal CLI configuration is built.
     init(
         workingDirectory: String? = nil,
         enableDebugLogging: Bool = false,
         defaultRequestTimeout: TimeInterval? = nil,
         testRequestTimeout: TimeInterval? = nil,
         maxRetries: Int? = nil,
-        logCollector: CLIProcessLogCollector? = nil
+        logCollector: CLIProcessLogCollector? = nil,
+        runner: CLIProcessRunner? = nil
     ) {
         var config = CLIProcessConfiguration(
             workingDirectory: workingDirectory,
@@ -112,7 +115,7 @@ final class ClaudeCodeProvider: AIProvider {
         config.enableDebugLogging = enableDebugLogging
         config.logCollector = logCollector
         config.ensureAdditionalPaths(CLIPathHints.claudeCode)
-        runner = CLIProcessRunner(config: config)
+        self.runner = runner ?? CLIProcessRunner(config: config)
         decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
 
@@ -170,7 +173,8 @@ final class ClaudeCodeProvider: AIProvider {
                     outputMode: .auto(.json),
                     timeout: options.timeout,
                     additionalEnvironment: options.additionalEnvironment,
-                    additionalRemovedKeys: options.removedEnvironmentKeys
+                    additionalRemovedKeys: options.removedEnvironmentKeys,
+                    cancelChildOnTaskCancellation: true
                 )
             } catch {
                 throw mapProcessError(error)

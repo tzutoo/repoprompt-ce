@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptFoundation
+import RepoPromptProcess
 
 /// Headless pi provider for Context Builder discovery and other one-shot runs.
 ///

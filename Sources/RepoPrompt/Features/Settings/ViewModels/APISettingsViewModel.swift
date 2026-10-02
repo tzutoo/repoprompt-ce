@@ -1,4 +1,6 @@
 import Combine
+import RepoPromptProcess
+import RepoPromptSecureStorage
 import SwiftUI
 
 #if DEBUG
@@ -2022,11 +2024,11 @@ public class APISettingsViewModel: ObservableObject {
             case .anthropic:
                 anthropicApiKey = trimmedKey
                 isAnthropicKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.claude4Sonnet, reason: "api_settings.validate_key.default_seed.anthropic")
+                seedPreferredComposeModelIfMissing(AIModel.claudeSonnet55, reason: "api_settings.validate_key.default_seed.anthropic")
             case .openAI:
                 openAIApiKey = trimmedKey
                 isOpenAIKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.gpt54Mini, reason: "api_settings.validate_key.default_seed.openai")
+                seedPreferredComposeModelIfMissing(AIModel.gpt6Luna, reason: "api_settings.validate_key.default_seed.openai")
             case .gemini:
                 geminiApiKey = trimmedKey
                 isGeminiKeyValid = true
@@ -2037,7 +2039,7 @@ public class APISettingsViewModel: ObservableObject {
             case .openRouter:
                 openRouterApiKey = trimmedKey
                 isOpenRouterKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.openrouterClaude4Sonnet, reason: "api_settings.validate_key.default_seed.openrouter")
+                seedPreferredComposeModelIfMissing(AIModel.openrouterClaudeSonnet55, reason: "api_settings.validate_key.default_seed.openrouter")
             case .azure:
                 azureBaseURL = ""
                 azureApiKey = ""
@@ -3376,7 +3378,7 @@ public class APISettingsViewModel: ObservableObject {
         applyCodexConnectionPhase(.testingAppServer)
 
         // Use an owned non-agent Codex client so health-check failures cannot poison chat or polling.
-        let provider = CodexCLIProvider(logCollector: collector)
+        let provider = CodexCLIProvider(logCollector: collector, perfRecorder: AIProviderFactory.perfRecorder)
         collector.append("Created Codex CLI provider for health check")
 
         do {
