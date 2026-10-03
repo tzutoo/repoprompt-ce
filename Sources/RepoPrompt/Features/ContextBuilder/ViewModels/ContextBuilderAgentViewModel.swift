@@ -1926,7 +1926,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     @MainActor
     func resolveMCPRunAuthority(
         identity: WorkspaceSelectionIdentity,
-        nestedTabContext: MCPServerViewModel.TabContextSnapshot,
+        nestedTabContext: MCPTabContextSnapshot,
         workspaceContext: ContextBuilderWorkspaceContext?,
         responseType: String?,
         oraclePreset: String?
@@ -2246,7 +2246,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                   let tab = manager.composeTab(with: tabID)
             else { throw ContextBuilderWorkspaceContextError.missingWorkspace }
             let identity = WorkspaceSelectionIdentity(workspaceID: workspace.id, tabID: tabID)
-            var nested = MCPServerViewModel.TabContextSnapshot(
+            var nested = MCPTabContextSnapshot(
                 tabID: tabID,
                 windowID: mcpServer.windowID,
                 workspaceID: workspace.id,
