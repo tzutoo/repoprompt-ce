@@ -313,6 +313,9 @@ final actor ClaudeNativeProcessSessionController {
             }
         #endif
 
+        if process == nil {
+            try ProviderProcessLaunchPolicy.check()
+        }
         ensureEventsStreamReady()
         isShuttingDown = false
         ensureRawEventLogFileReadyIfNeeded(sessionIDHint: existingSessionID ?? sessionID)
@@ -618,6 +621,7 @@ final actor ClaudeNativeProcessSessionController {
         effortLevel: ClaudeCodeEffortLevel?
     ) async throws {
         guard process == nil else { return }
+        try ProviderProcessLaunchPolicy.check()
 
         configurationLifetime = UUID()
         appliedConfigurationProof = nil
@@ -653,7 +657,8 @@ final actor ClaudeNativeProcessSessionController {
             command: resolvedCommand,
             arguments: arguments,
             environment: environment,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            purpose: .provider
         )
         writeRawEventLogRecord(
             kind: "process.spawned",
