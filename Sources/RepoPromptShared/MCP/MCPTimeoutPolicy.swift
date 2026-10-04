@@ -190,6 +190,17 @@ public enum MCPTimeoutPolicy {
         )
     }
 
+    /// Live MCP call deadline injected into pi-mcp-adapter.
+    ///
+    /// The adapter has one `requestTimeoutMs` for initialize and every `tools/call`, including
+    /// `agent_run` waits. A shorter value (historically 15s) closes the stdio bridge mid-wait.
+    /// This covers the longest supported subagent wait, session setup, and delivery margin —
+    /// the same client-side floor `rpce-cli` uses, plus setup allowance.
+    public static var piMCPAdapterRequestTimeoutMilliseconds: Int {
+        let seconds = cliImplicitLifecycleCompatibilityGuardSeconds + agentLifecycleSetupAllowanceSeconds
+        return Int((seconds * 1000).rounded(.up))
+    }
+
     public static func isSupportedSubagentDefaultWaitSeconds(_ seconds: Int) -> Bool {
         supportedSubagentDefaultWaitSeconds.contains(seconds)
     }

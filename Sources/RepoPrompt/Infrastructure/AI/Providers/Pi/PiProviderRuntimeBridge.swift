@@ -1,5 +1,6 @@
 import Foundation
 import RepoPromptPiProvider
+import RepoPromptShared
 
 /// Single core import point for the `RepoPromptPiProvider` package, mirroring
 /// `ClaudeCompatibleProviderRuntimeBridge`. Files outside this bridge must not
@@ -67,5 +68,20 @@ enum PiProviderRuntimeBridge {
     /// the adapter from `settings.json` packages.
     static func managedExtensionPolicy(adapterVersion: String) -> ExtensionPolicy {
         .pinnedAdapterWithDiscoveredUserGlobalExtensions(version: adapterVersion)
+    }
+
+    /// Ephemeral `--mcp-config` entry for the RepoPrompt CE server in a managed pi launch.
+    /// Eager connect satisfies pre-prompt routing; the request timeout must cover subagent waits.
+    static func managedRepoPromptMCPServerConfiguration(
+        _ server: RepoPromptMCPServerConfiguration
+    ) -> MCPServerConfiguration {
+        MCPServerConfiguration(
+            command: server.command,
+            arguments: server.args,
+            environment: server.environmentDictionary,
+            lifecycle: .eager,
+            requestTimeoutMilliseconds: MCPTimeoutPolicy.piMCPAdapterRequestTimeoutMilliseconds,
+            directTools: .all
+        )
     }
 }

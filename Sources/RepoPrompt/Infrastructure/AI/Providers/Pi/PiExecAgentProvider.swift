@@ -290,13 +290,8 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt
         let document = PiProviderRuntimeBridge.MCPAdapterConfigurationDocument(
             servers: [
-                serverConfiguration.name: PiProviderRuntimeBridge.MCPServerConfiguration(
-                    command: serverConfiguration.command,
-                    arguments: serverConfiguration.args,
-                    environment: serverConfiguration.environmentDictionary,
-                    lifecycle: .eager,
-                    requestTimeoutMilliseconds: 15000,
-                    directTools: .all
+                serverConfiguration.name: PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(
+                    serverConfiguration
                 )
             ]
         )

@@ -1,5 +1,6 @@
 import Foundation
 @testable import RepoPromptApp
+import RepoPromptShared
 import XCTest
 
 final class PiProviderIdentityAndBindingTests: XCTestCase {
@@ -75,5 +76,27 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
             AgentModelCatalog.selectableAgents(availability: .none).contains(.piAgent)
         )
         XCTAssertTrue(AgentModelCatalog.supportedCLIProviderAgents.contains(.piAgent))
+    }
+
+    func testManagedPiMCPConfigCoversSubagentLifecycleWaits() {
+        let server = RepoPromptMCPServerConfiguration.repoPrompt
+        let configuration = PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(server)
+        let timeoutMilliseconds = configuration.requestTimeoutMilliseconds
+
+        XCTAssertEqual(configuration.lifecycle, .eager)
+        XCTAssertEqual(
+            timeoutMilliseconds,
+            MCPTimeoutPolicy.piMCPAdapterRequestTimeoutMilliseconds
+        )
+        XCTAssertNotEqual(timeoutMilliseconds, 15000)
+        XCTAssertGreaterThanOrEqual(
+            timeoutMilliseconds ?? 0,
+            Int(
+                (
+                    MCPTimeoutPolicy.cliImplicitLifecycleCompatibilityGuardSeconds
+                        + MCPTimeoutPolicy.agentLifecycleSetupAllowanceSeconds
+                ) * 1000
+            )
+        )
     }
 }

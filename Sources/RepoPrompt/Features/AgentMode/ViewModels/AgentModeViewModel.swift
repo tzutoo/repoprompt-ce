@@ -3127,13 +3127,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ = windowID
         let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt
         let mcpServers = [
-            serverConfiguration.name: PiProviderRuntimeBridge.MCPServerConfiguration(
-                command: serverConfiguration.command,
-                arguments: serverConfiguration.args,
-                environment: serverConfiguration.environmentDictionary,
-                lifecycle: .eager,
-                requestTimeoutMilliseconds: 15000,
-                directTools: .all
+            serverConfiguration.name: PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(
+                serverConfiguration
             )
         ]
         return PiNativeSessionController(

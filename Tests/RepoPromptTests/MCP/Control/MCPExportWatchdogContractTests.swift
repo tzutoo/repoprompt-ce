@@ -16,6 +16,8 @@ import XCTest
             XCTAssertEqual(MCPTimeoutPolicy.promptExportTotalEnvelopeSeconds, 300)
             XCTAssertEqual(MCPTimeoutPolicy.cliDefaultToolCallTimeoutSeconds, 300)
             XCTAssertEqual(MCPTimeoutPolicy.cliImplicitLifecycleCompatibilityGuardSeconds, 3630)
+            XCTAssertEqual(MCPTimeoutPolicy.agentLifecycleSetupAllowanceSeconds, 180)
+            XCTAssertEqual(MCPTimeoutPolicy.piMCPAdapterRequestTimeoutMilliseconds, 3_810_000)
             XCTAssertEqual(
                 MCPTimeoutPolicy.promptExportAdmissionHeadroomSeconds
                     + MCPTimeoutPolicy.promptExportExecutionDeadlineSeconds
