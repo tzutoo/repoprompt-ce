@@ -1,5 +1,5 @@
 {
-  "description": "Build-modularization ratchet baselines. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
+  "description": "Fork/upstream reconciliation at upstream/main e2535e29. Measured merged tree: app lines 606281 (upstream baseline 603133 plus fork-only app code), tests_testable_import_app_files 331, tests_sleep_calls 66. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
   "ratcheted": [
     "app_files_over_5000_lines",
     "app_files_over_2000_lines",
@@ -17,18 +17,18 @@
   ],
   "metrics": {
     "app_components": 69,
-    "app_files_over_2000_lines": 53,
+    "app_files_over_2000_lines": 47,
     "app_files_over_5000_lines": 16,
     "app_largest_cycle_components": 64,
-    "app_share_permille": 863,
-    "app_shared_accessor_uses": 1237,
-    "app_static_shared_declarations": 94,
-    "app_target_swift_files": 1144,
-    "app_target_swift_lines": 654879,
-    "app_userdefaults_standard_uses": 246,
-    "app_wrong_way_file_edges": 1084,
-    "first_party_swift_lines": 758600,
-    "tests_sleep_calls": 65,
-    "tests_testable_import_app_files": 339
+    "app_share_permille": 792,
+    "app_shared_accessor_uses": 1203,
+    "app_static_shared_declarations": 89,
+    "app_target_swift_files": 1063,
+    "app_target_swift_lines": 606281,
+    "app_userdefaults_standard_uses": 241,
+    "app_wrong_way_file_edges": 974,
+    "first_party_swift_lines": 765030,
+    "tests_sleep_calls": 66,
+    "tests_testable_import_app_files": 331
   }
 }

@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import RepoPromptDomainRuntime
+import RepoPromptFileSystem
 import RepoPromptShared
 
 /// Centralised helpers for installing the RepoPrompt MCP server
@@ -34,36 +36,7 @@ enum MCPIntegrationHelper {
     }
 
     static let repoPromptMCPServerName = RepoPromptMCPServerConfiguration.defaultServerName
-    static let repoPromptToolNames: Set<String> = [
-        "ask_user",
-        "ask_user_question",
-        "get_file_tree",
-        "file_search",
-        "read_file",
-        "get_code_structure",
-        "apply_edits",
-        "file_actions",
-
-        "manage_selection",
-        "prompt",
-        "workspace_context",
-        "ask_oracle",
-        "oracle_send",
-        "oracle_utils",
-        "oracle_chat_log",
-        "history",
-        "git",
-        "bind_context",
-        "manage_workspaces",
-        "context_builder",
-        "share_thoughts",
-        "wait_for_next_user_instruction",
-        "agent_explore",
-        "agent_run",
-        "agent_manage",
-        "set_status",
-        "app_settings"
-    ]
+    static let repoPromptToolNames: Set<String> = Set(MCPDomainToolCatalog.orderedToolNames).union(["ask_user_question"])
 
     // MARK: - Command Install Mode
 
@@ -172,15 +145,17 @@ enum MCPIntegrationHelper {
     }
 
     private static func stripExplicitRepoPromptPrefix(from rawName: String) -> (normalized: String, explicit: Bool) {
-        let server = repoPromptMCPServerName.lowercased()
-        let explicitPrefixes = [
-            "mcp__\(server)__",
-            "mcp_\(server)__",
-            "\(server)__",
-            "\(server)_"
-        ]
-        for prefix in explicitPrefixes where rawName.hasPrefix(prefix) {
-            return (String(rawName.dropFirst(prefix.count)), true)
+        for name in [repoPromptMCPServerName, RepoPromptMCPServerConfiguration.grokBuildRuntimeServerName] {
+            let server = name.lowercased()
+            let explicitPrefixes = [
+                "mcp__\(server)__",
+                "mcp_\(server)__",
+                "\(server)__",
+                "\(server)_"
+            ]
+            for prefix in explicitPrefixes where rawName.hasPrefix(prefix) {
+                return (String(rawName.dropFirst(prefix.count)), true)
+            }
         }
         return (rawName, false)
     }
