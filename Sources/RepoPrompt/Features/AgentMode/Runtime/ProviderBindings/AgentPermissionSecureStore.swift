@@ -13,6 +13,7 @@ enum AgentPermissionSecureDomain: String, CaseIterable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case pi
 
     var secureStorageAccount: SecureStorageAccount {
         switch self {
@@ -32,6 +33,8 @@ enum AgentPermissionSecureDomain: String, CaseIterable, Hashable {
             .agentPermissionAntigravityDocument
         case .devin:
             .agentPermissionDevinDocument
+        case .pi:
+            .agentPermissionPiDocument
         }
     }
 
@@ -316,6 +319,35 @@ struct SecureGrokBuildPermissionDocument: Codable, Equatable {
     }
 }
 
+struct SecurePiPermissionDocument: Codable, Equatable {
+    static let currentSchemaVersion = 1
+
+    var schemaVersion: Int
+    var updatedAt: Date
+    var permissionLevelRaw: String?
+
+    init(
+        schemaVersion: Int = currentSchemaVersion,
+        updatedAt: Date = Date(),
+        permissionLevelRaw: String? = PiAgentToolPreferences.PermissionLevel.mcpOnly.rawValue
+    ) {
+        self.schemaVersion = schemaVersion
+        self.updatedAt = updatedAt
+        self.permissionLevelRaw = permissionLevelRaw
+    }
+
+    static func failClosedDocument(now: Date = Date()) -> SecurePiPermissionDocument {
+        SecurePiPermissionDocument(
+            updatedAt: now,
+            permissionLevelRaw: PiAgentToolPreferences.PermissionLevel.mcpOnly.rawValue
+        )
+    }
+
+    func permissionLevel() -> PiAgentToolPreferences.PermissionLevel {
+        PiAgentToolPreferences.PermissionLevel(rawValue: permissionLevelRaw ?? "") ?? .mcpOnly
+    }
+}
+
 struct SecureDevinPermissionDocument: Codable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -389,6 +421,7 @@ final class AgentPermissionSecureStore {
     private var grokBuildCache: SecureGrokBuildPermissionDocument?
     private var antigravityCache: SecureAntigravityPermissionDocument?
     private var devinCache: SecureDevinPermissionDocument?
+    private var piCache: SecurePiPermissionDocument?
     private var diagnosticsByDomain: [AgentPermissionSecureDomain: AgentPermissionStorageDiagnostic] = [:]
     private let permissionDecisionAccessMode: KeychainAccessMode = .nonInteractive(reason: .permissionDecision)
 
@@ -439,6 +472,7 @@ final class AgentPermissionSecureStore {
             grokBuildCache = nil
             antigravityCache = nil
             devinCache = nil
+            piCache = nil
         }
     }
 
@@ -488,6 +522,10 @@ final class AgentPermissionSecureStore {
             var devin = SecureDevinPermissionDocument.failClosedDocument(now: resetDate)
             _ = normalizeDevin(&devin)
             record(.devin, resetLocked(devin, domain: .devin, cache: &devinCache, deferred: &effects))
+
+            var pi = SecurePiPermissionDocument.failClosedDocument(now: resetDate)
+            _ = normalizePi(&pi)
+            record(.pi, resetLocked(pi, domain: .pi, cache: &piCache, deferred: &effects))
 
             return AgentPermissionStorageResetResult(
                 succeededDomains: succeededDomains,
@@ -551,6 +589,12 @@ final class AgentPermissionSecureStore {
     func devinPermissions() -> SecureDevinPermissionDocument {
         withLockAndDeferredSideEffects { effects in
             loadDevinPermissionsLocked(deferred: &effects)
+        }
+    }
+
+    func piPermissions() -> SecurePiPermissionDocument {
+        withLockAndDeferredSideEffects { effects in
+            loadPiPermissionsLocked(deferred: &effects)
         }
     }
 
@@ -671,6 +715,24 @@ final class AgentPermissionSecureStore {
     }
 
     @discardableResult
+    func updatePiPermissions(_ mutation: (inout SecurePiPermissionDocument) -> Void) -> Bool {
+        withLockAndDeferredSideEffects { effects in
+            var document = loadPiPermissionsLocked(deferred: &effects)
+            mutation(&document)
+            normalizePi(&document)
+            document.updatedAt = now()
+            return saveLocked(document, domain: .pi, cache: &piCache, deferred: &effects)
+        }
+    }
+
+    @discardableResult
+    func setPiPermissionLevel(_ level: PiAgentToolPreferences.PermissionLevel) -> Bool {
+        updatePiPermissions { document in
+            document.permissionLevelRaw = level.rawValue
+        }
+    }
+
+    @discardableResult
     func setAntigravityPermissionLevel(_ level: AntigravityAgentToolPreferences.PermissionLevel) -> Bool {
         updateAntigravityPermissions { document in
             document.permissionLevelRaw = level.rawValue
@@ -754,6 +816,16 @@ final class AgentPermissionSecureStore {
             cache: &grokBuildCache,
             failClosedDocument: SecureGrokBuildPermissionDocument.failClosedDocument(now: now()),
             normalize: normalizeGrokBuild,
+            deferred: &effects
+        )
+    }
+
+    private func loadPiPermissionsLocked(deferred effects: inout DeferredSideEffects) -> SecurePiPermissionDocument {
+        loadLocked(
+            domain: .pi,
+            cache: &piCache,
+            failClosedDocument: SecurePiPermissionDocument.failClosedDocument(now: now()),
+            normalize: normalizePi,
             deferred: &effects
         )
     }
@@ -1100,6 +1172,21 @@ final class AgentPermissionSecureStore {
     }
 
     @discardableResult
+    private func normalizePi(_ document: inout SecurePiPermissionDocument) -> Bool {
+        var changed = false
+        if document.schemaVersion != SecurePiPermissionDocument.currentSchemaVersion {
+            document.schemaVersion = SecurePiPermissionDocument.currentSchemaVersion
+            changed = true
+        }
+        let level = PiAgentToolPreferences.PermissionLevel(rawValue: document.permissionLevelRaw ?? "") ?? .mcpOnly
+        if document.permissionLevelRaw != level.rawValue {
+            document.permissionLevelRaw = level.rawValue
+            changed = true
+        }
+        return changed
+    }
+
+    @discardableResult
     private func normalizeGrokBuild(_ document: inout SecureGrokBuildPermissionDocument) -> Bool {
         var changed = false
         if document.schemaVersion != SecureGrokBuildPermissionDocument.currentSchemaVersion {
@@ -1210,6 +1297,8 @@ final class AgentPermissionSecureStore {
             SecureAntigravityPermissionDocument.failClosedDocument(now: now())
         case .devin:
             SecureDevinPermissionDocument.failClosedDocument(now: now())
+        case .pi:
+            SecurePiPermissionDocument.failClosedDocument(now: now())
         }
     }
 

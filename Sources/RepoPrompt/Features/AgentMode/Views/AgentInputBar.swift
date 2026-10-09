@@ -1054,7 +1054,7 @@ struct AgentComposerView: View, Equatable {
 
     @ViewBuilder
     private var reasoningEffortPicker: some View {
-        if props.selectedAgent == .codexExec {
+        if props.selectedAgent == .codexExec || props.selectedAgent.usesPiNativeRuntime {
             let efforts = actions.reasoningEffortOptionsForCurrentSelection()
             Menu {
                 ForEach(efforts, id: \.rawValue) { effort in
@@ -1084,7 +1084,11 @@ struct AgentComposerView: View, Equatable {
             .menuStyle(.borderlessButton)
             .disabled(efforts.isEmpty || modelControlsDisabled)
             .opacity(modelControlsDisabled ? 0.55 : 1.0)
-            .hoverTooltip(modelControlsDisabled ? modelControlsDisabledTooltip : "Codex reasoning effort")
+            .hoverTooltip(
+                modelControlsDisabled
+                    ? modelControlsDisabledTooltip
+                    : (props.selectedAgent.usesPiNativeRuntime ? "pi thinking level" : "Codex reasoning effort")
+            )
             .fixedSize()
         }
     }

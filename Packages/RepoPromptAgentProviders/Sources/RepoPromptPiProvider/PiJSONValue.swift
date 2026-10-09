@@ -119,4 +119,33 @@ public enum PiJSONValue: Sendable, Equatable, Codable {
         guard let arrayValue, arrayValue.indices.contains(index) else { return nil }
         return arrayValue[index]
     }
+
+    /// Compact JSON object/array suitable for embedding in generated TypeScript.
+    public func encodedJSONString() throws -> String {
+        let object: Any = jsonObject()
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
+            throw PiProviderError.framing(detail: "failed encoding JSON value")
+        }
+        return text
+    }
+
+    private func jsonObject() -> Any {
+        switch self {
+        case .null:
+            NSNull()
+        case let .bool(value):
+            value
+        case let .integer(value):
+            value
+        case let .double(value):
+            value
+        case let .string(value):
+            value
+        case let .array(value):
+            value.map { $0.jsonObject() }
+        case let .object(value):
+            value.mapValues { $0.jsonObject() }
+        }
+    }
 }

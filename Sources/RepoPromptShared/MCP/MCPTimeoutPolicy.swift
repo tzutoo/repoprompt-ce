@@ -190,15 +190,19 @@ public enum MCPTimeoutPolicy {
         )
     }
 
-    /// Live MCP call deadline injected into pi-mcp-adapter.
+    /// Live MCP call deadline injected into pi's built-in MCP client (`timeout` seconds).
     ///
-    /// The adapter has one `requestTimeoutMs` for initialize and every `tools/call`, including
-    /// `agent_run` waits. A shorter value (historically 15s) closes the stdio bridge mid-wait.
-    /// This covers the longest supported subagent wait, session setup, and delivery margin —
-    /// the same client-side floor `rpce-cli` uses, plus setup allowance.
+    /// Built-in MCP uses one per-server timeout for initialize and every `tools/call`, including
+    /// `agent_run` waits. A shorter value closes the stdio bridge mid-wait. This covers the
+    /// longest supported subagent wait, session setup, and delivery margin — the same client-side
+    /// floor `rpce-cli` uses, plus setup allowance.
+    public static var piBuiltinMCPRequestTimeoutSeconds: Int {
+        Int((cliImplicitLifecycleCompatibilityGuardSeconds + agentLifecycleSetupAllowanceSeconds).rounded(.up))
+    }
+
+    /// Millisecond form of `piBuiltinMCPRequestTimeoutSeconds` for contract tests.
     public static var piMCPAdapterRequestTimeoutMilliseconds: Int {
-        let seconds = cliImplicitLifecycleCompatibilityGuardSeconds + agentLifecycleSetupAllowanceSeconds
-        return Int((seconds * 1000).rounded(.up))
+        piBuiltinMCPRequestTimeoutSeconds * 1000
     }
 
     public static func isSupportedSubagentDefaultWaitSeconds(_ seconds: Int) -> Bool {

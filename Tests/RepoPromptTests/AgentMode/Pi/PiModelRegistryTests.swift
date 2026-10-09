@@ -105,6 +105,42 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertEqual(PiModelRegistry.record(matchingRaw: "local/grok")?.provider, "local")
     }
 
+    func testThinkingLevelsMapToCodexEffortChip() {
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: AgentModel.defaultModel.rawValue).map(\.rawValue),
+            ["none", "minimal", "low", "medium", "high"]
+        )
+        PiModelRegistry.update(records: [
+            PiModelRegistry.ModelRecord(
+                id: "glm-5.3",
+                name: "GLM 5.3",
+                provider: "zai",
+                reasoning: true,
+                contextWindow: 200_000,
+                thinkingLevels: ["off", "low", "high", "max"]
+            ),
+            PiModelRegistry.ModelRecord(
+                id: "text-only",
+                name: "Text",
+                provider: "zai",
+                reasoning: false,
+                contextWindow: 128_000
+            )
+        ])
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: "zai/glm-5.3").map(\.rawValue),
+            ["none", "low", "high", "max"]
+        )
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: "text-only").map(\.rawValue),
+            ["none"]
+        )
+        XCTAssertEqual(PiModelRegistry.piThinkingLevelRaw(fromCodexEffort: CodexReasoningEffort.none), "off")
+        XCTAssertEqual(PiModelRegistry.piThinkingLevelRaw(fromCodexEffort: .minimal), "minimal")
+        XCTAssertEqual(PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: "off"), nil)
+        XCTAssertEqual(PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: "high"), .high)
+    }
+
     func testModelAcceptsImagesUsesInputTypes() {
         XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: AgentModel.defaultModel.rawValue))
         PiModelRegistry.update(records: [

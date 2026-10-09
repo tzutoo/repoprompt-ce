@@ -654,12 +654,12 @@ private actor WorktreeTeardownNativeController: NativeAgentRuntimeControlling {
         try await delegate.applyModelAndEffortWithProof(model: model, effortLevel: effortLevel)
     }
 
-    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
-        try await delegate.sendUserMessage(text, configuration: configuration)
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        try await delegate.sendUserMessage(text, configuration: configuration, images: images)
     }
 
-    func sendUserMessage(_ text: String) async throws -> UUID {
-        try await delegate.sendUserMessage(text)
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
+        try await delegate.sendUserMessage(text, images: images)
     }
 
     func interruptTurn(reason _: String) async -> NativeAgentRuntimeInterruptOutcome {

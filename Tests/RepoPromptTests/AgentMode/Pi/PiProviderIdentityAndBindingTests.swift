@@ -1,20 +1,21 @@
 import Foundation
 @testable import RepoPromptApp
+import RepoPromptSettingsCore
 import RepoPromptShared
 import XCTest
 
 final class PiProviderIdentityAndBindingTests: XCTestCase {
-    func testMCPClientIdentityResolvesPiMCPAdapterFamily() {
+    func testMCPClientIdentityResolvesBuiltinPiFamily() {
+        XCTAssertEqual(MCPClientIdentity.canonicalFamilyID("pi"), "pi")
+        XCTAssertTrue(MCPClientIdentity.matches("pi", AgentProviderKind.piAgent.mcpClientNameHint))
+        XCTAssertEqual(MCPClientIdentity.storageKey("pi"), "pi")
+        XCTAssertFalse(MCPClientIdentity.sameFamily("pi", "grok-shell-RepoPromptCE"))
+        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi"))
+        // Retired adapter identity stays a distinct family so leftover entries do not
+        // collapse onto the built-in client name.
         XCTAssertEqual(MCPClientIdentity.canonicalFamilyID("pi-mcp-RepoPromptCE"), "pi-mcp")
-        XCTAssertEqual(MCPClientIdentity.canonicalFamilyID("pi-mcp"), "pi-mcp")
-        XCTAssertTrue(MCPClientIdentity.matches("pi-mcp-RepoPromptCE", AgentProviderKind.piAgent.mcpClientNameHint))
-        // Separator boundary: `pi-mcpx` must not match the family.
-        XCTAssertNil(MCPClientIdentity.canonicalFamilyID("pi-mcpx"))
-        // Storage keys canonicalize the exact registered client name.
-        XCTAssertEqual(MCPClientIdentity.storageKey("pi-mcp-RepoPromptCE"), "pi-mcp")
-        XCTAssertFalse(MCPClientIdentity.sameFamily("pi-mcp-RepoPromptCE", "grok-shell-RepoPromptCE"))
-        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi-mcp-RepoPromptCE"))
-        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi-mcp"))
+        XCTAssertFalse(MCPClientIdentity.sameFamily("pi", "pi-mcp-RepoPromptCE"))
+        XCTAssertFalse(ServerController.isBuiltInAlwaysAllowedClient("pi-mcp"))
         XCTAssertFalse(ServerController.isBuiltInAlwaysAllowedClient("pi-mcpx"))
     }
 
@@ -22,7 +23,7 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertEqual(AgentProviderKind.piAgent.commandName, "pi")
         XCTAssertEqual(AgentProviderKind.piAgent.displayName, "pi")
         XCTAssertEqual(AgentProviderKind.piAgent.runtimeKind, "pi_rpc")
-        XCTAssertEqual(AgentProviderKind.piAgent.mcpClientNameHint, "pi-mcp-RepoPromptCE")
+        XCTAssertEqual(AgentProviderKind.piAgent.mcpClientNameHint, "pi")
         XCTAssertNil(AgentProviderKind.piAgent.acpProviderID)
         XCTAssertNil(AgentProviderKind.piAgent.claudeRuntimeVariant)
         XCTAssertTrue(AgentProviderKind.piAgent.usesPiNativeRuntime)
@@ -78,24 +79,55 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertTrue(AgentModelCatalog.supportedCLIProviderAgents.contains(.piAgent))
     }
 
+    @MainActor
+    func testCodexNormalizationPreservesPiThinkingSelection() {
+        let coordinator = CodexAgentModeCoordinator(
+            windowID: 1,
+            runtimeWorkspacePathsProvider: { _ in .uniform("/tmp") },
+            codexControllerFactory: { _, _, _, _, _, _, _, _ in
+                fatalError("unused")
+            },
+            connectionPolicyInstaller: { _, _, _, _, _, _, _, _, _, _, _, _, _ in },
+            shouldManageCodexTooling: false,
+            codexHookApprovalSettings: GlobalSettingsStore.shared
+        )
+        let piSession = AgentTabSession(tabID: UUID())
+        piSession.selectedAgent = .piAgent
+        piSession.selectedModelRaw = "local/free"
+        piSession.selectedReasoningEffortRaw = "high"
+        coordinator.normalizeCodexSelectionForSession(piSession, preservingExplicitEffort: true)
+        XCTAssertEqual(piSession.selectedReasoningEffortRaw, "high")
+        coordinator.normalizeCodexSelectionForSession(piSession, preservingExplicitEffort: false)
+        XCTAssertEqual(piSession.selectedReasoningEffortRaw, "high")
+
+        let claudeSession = AgentTabSession(tabID: UUID())
+        claudeSession.selectedAgent = .claudeCode
+        claudeSession.selectedReasoningEffortRaw = "high"
+        coordinator.normalizeCodexSelectionForSession(claudeSession, preservingExplicitEffort: true)
+        XCTAssertNil(claudeSession.selectedReasoningEffortRaw)
+    }
+
+    func testSelfCompactAndControlCommandsAdmitPi() {
+        XCTAssertTrue(AgentProviderKind.piAgent.usesPiNativeRuntime)
+        XCTAssertFalse(AgentProviderControlCommand.acpRuntimeAdvertisesNativeCommands(.piAgent))
+    }
+
     func testManagedPiMCPConfigCoversSubagentLifecycleWaits() {
         let server = RepoPromptMCPServerConfiguration.repoPrompt
         let configuration = PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(server)
-        let timeoutMilliseconds = configuration.requestTimeoutMilliseconds
-
-        XCTAssertEqual(configuration.lifecycle, .eager)
+        XCTAssertEqual(configuration.exposure, .direct)
         XCTAssertEqual(
-            timeoutMilliseconds,
-            MCPTimeoutPolicy.piMCPAdapterRequestTimeoutMilliseconds
+            configuration.timeoutSeconds,
+            MCPTimeoutPolicy.piBuiltinMCPRequestTimeoutSeconds
         )
-        XCTAssertNotEqual(timeoutMilliseconds, 15000)
+        XCTAssertNotEqual(configuration.timeoutSeconds, 15)
         XCTAssertGreaterThanOrEqual(
-            timeoutMilliseconds ?? 0,
+            configuration.timeoutSeconds ?? 0,
             Int(
                 (
                     MCPTimeoutPolicy.cliImplicitLifecycleCompatibilityGuardSeconds
                         + MCPTimeoutPolicy.agentLifecycleSetupAllowanceSeconds
-                ) * 1000
+                ).rounded(.up)
             )
         )
     }

@@ -6,9 +6,9 @@ import RepoPromptShared
 /// `ClaudeCompatibleProviderRuntimeBridge`. Files outside this bridge must not
 /// `import RepoPromptPiProvider`; they reference the aliases declared here.
 ///
-/// The package owns the pi RPC codec, model-catalog DTOs, the ephemeral
-/// pi-mcp-adapter `--mcp-config` document, and managed-launch argument
-/// construction. Core owns process control, persistence, and Agent Mode wiring.
+/// The package owns the pi RPC codec, model-catalog DTOs, launch arguments, and
+/// the ephemeral built-in MCP injector (`pi.registerMcpServer`). Core owns
+/// process control, persistence, and Agent Mode wiring.
 enum PiProviderRuntimeBridge {
     // MARK: - Type aliases (package DTO surface used by core)
 
@@ -37,11 +37,11 @@ enum PiProviderRuntimeBridge {
     typealias SessionStats = PiSessionStats
     typealias SessionEntryList = PiSessionEntryList
 
-    typealias MCPAdapterConfigurationDocument = PiMCPAdapterConfigurationDocument
-    typealias MCPServerConfiguration = PiMCPServerConfiguration
-    typealias MCPServerLifecycle = PiMCPServerLifecycle
-    typealias MCPDirectTools = PiMCPDirectTools
-    typealias MCPAdapterClientIdentity = PiMCPAdapterClientIdentity
+    typealias MCPServerConfiguration = PiBuiltinMCPServerConfiguration
+    typealias MCPExposure = PiBuiltinMCPExposure
+    typealias MCPClientIdentity = PiBuiltinMCPClientIdentity
+    typealias MCPInjector = PiBuiltinMCPInjector
+    typealias ApprovalGate = PiApprovalGate
     typealias ExtensionUIRequest = PiExtensionUIRequest
     typealias AssistantMessageDelta = PiAssistantMessageDelta
     typealias AgentMessage = PiAgentMessage
@@ -49,29 +49,23 @@ enum PiProviderRuntimeBridge {
 
     // MARK: - Pure helpers
 
-    /// The MCP client name pi-mcp-adapter presents for a given server name
-    /// (`pi-mcp-RepoPromptCE` for the default CE server).
-    static func mcpClientName(forServer serverName: String) -> String {
-        PiMCPAdapterClientIdentity.clientName(forServer: serverName)
-    }
+    /// MCP initialize name presented by pi's built-in client.
+    static let mcpClientName = PiBuiltinMCPClientIdentity.clientName
 
-    /// Maps a neutral effort level onto pi's thinking-level vocabulary. The
-    /// neutral set (`low`…`max`) is a subset of pi's (`off`…`max`), so the raw
-    /// value transfers directly.
+    /// Maps a Claude-shaped native effort onto pi's thinking-level vocabulary.
+    /// `off` / `minimal` are Pi-only and applied through `applyThinkingLevel`.
     static func thinkingLevel(for effort: NativeAgentRuntimeEffortLevel) -> String {
         effort.rawValue
     }
 
-    /// `--no-extensions` plus user-global `~/.pi/agent/extensions` and the pinned
-    /// pi-mcp-adapter. Keeps custom catalogs (for example a `local` OpenAI-compatible
-    /// provider) aligned with the Settings connect probe without double-loading
-    /// the adapter from `settings.json` packages.
-    static func managedExtensionPolicy(adapterVersion: String) -> ExtensionPolicy {
-        .pinnedAdapterWithDiscoveredUserGlobalExtensions(version: adapterVersion)
+    /// `--no-extensions -e builtin:mcp`, user-global `~/.pi/agent/extensions`, and an
+    /// optional injector that registers the RepoPrompt server for this process only.
+    static func managedExtensionPolicy(injectorPath: String? = nil, gatePath: String? = nil) -> ExtensionPolicy {
+        .builtinMCPWithDiscoveredUserGlobalExtensions(injectorPath: injectorPath, gatePath: gatePath)
     }
 
-    /// Ephemeral `--mcp-config` entry for the RepoPrompt CE server in a managed pi launch.
-    /// Eager connect satisfies pre-prompt routing; the request timeout must cover subagent waits.
+    /// Built-in MCP registration for the RepoPrompt CE server. `direct` exposure
+    /// makes the first prompt wait for the connection; timeout covers subagent waits.
     static func managedRepoPromptMCPServerConfiguration(
         _ server: RepoPromptMCPServerConfiguration
     ) -> MCPServerConfiguration {
@@ -79,9 +73,9 @@ enum PiProviderRuntimeBridge {
             command: server.command,
             arguments: server.args,
             environment: server.environmentDictionary,
-            lifecycle: .eager,
-            requestTimeoutMilliseconds: MCPTimeoutPolicy.piMCPAdapterRequestTimeoutMilliseconds,
-            directTools: .all
+            timeoutSeconds: MCPTimeoutPolicy.piBuiltinMCPRequestTimeoutSeconds,
+            exposure: .direct,
+            description: "RepoPrompt CE tools"
         )
     }
 }

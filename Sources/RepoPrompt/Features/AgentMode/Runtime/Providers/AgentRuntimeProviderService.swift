@@ -63,11 +63,10 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     /// family-only hint would never bind the run's frozen tab context. The canonical
     /// `grok-shell` family in `MCPClientIdentity` still covers family-level matching.
     static let grokBuildMCPClientID = "grok-shell-\(RepoPromptMCPServerConfiguration.grokBuildRuntimeServerName)"
-    /// pi-mcp-adapter presents `pi-mcp-<injected server name>` (e.g. `pi-mcp-RepoPromptCE`)
-    /// to MCP servers. Like Grok Build, run-scoped tab-context store keys are raw client
-    /// names, so the hint must equal that exact registered name; the canonical
-    /// `pi-mcp` family in `MCPClientIdentity` covers family-level matching.
-    static let piMCPClientID = "pi-mcp-\(RepoPromptMCPServerConfiguration.defaultServerName)"
+    /// pi's built-in MCP client presents `pi` to MCP servers (`new McpClient({ name: "pi" })`).
+    /// Run-scoped tab-context store keys are raw client names, so the hint must equal that
+    /// exact registered name.
+    static let piMCPClientID = "pi"
 
     var commandName: String {
         switch self {
@@ -215,7 +214,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         case .grokBuild:
             return "xAI Grok Build ACP agent. Uses Grok Build's ACP runtime (`grok agent stdio`) and injects RepoPrompt MCP tools through ACP session configuration."
         case .piAgent:
-            return "The pi coding agent (pi.dev) through its RPC mode with deterministic managed launches. RepoPrompt tools are injected via the pi-mcp-adapter extension."
+            return "The pi coding agent (pi.dev) through its RPC mode with deterministic managed launches. RepoPrompt tools are injected via pi's built-in MCP (`pi.registerMcpServer`)."
         case .devin:
             return "Installed Devin ACP agent for Agent Mode, Context Builder, and delegated runs. RepoPrompt injects its MCP tools through an isolated configuration overlay."
         case .claudeCodeGLM:
@@ -382,7 +381,7 @@ final class AgentRuntimeProviderService {
                 modelString: modelString,
                 enableDebugLogging: Self.enableDebugLogging,
                 workspacePath: workspacePath,
-                toolProfile: .mcpOnly
+                toolProfile: PiAgentToolPreferences.permissionLevel().launchToolProfile
             )
             if Self.enableDebugLogging {
                 Self.logger.debug("Created PiExecAgentProvider")

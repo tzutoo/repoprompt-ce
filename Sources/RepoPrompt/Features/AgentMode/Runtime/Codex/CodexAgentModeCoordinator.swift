@@ -2207,6 +2207,12 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         preservingExplicitEffort: Bool
     ) {
         guard session.selectedAgent == .codexExec else {
+            // Pi reuses the Codex-shaped effort chip and stores thinking on
+            // `selectedReasoningEffortRaw`. Clearing it here made the dropdown
+            // appear while every pick immediately bounced back to Default/None.
+            if session.selectedAgent.usesPiNativeRuntime {
+                return
+            }
             session.selectedReasoningEffortRaw = nil
             if session.tabID == viewModel?.currentTabID {
                 viewModel?.applyCodexSelectionToBindings(

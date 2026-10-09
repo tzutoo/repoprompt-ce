@@ -411,7 +411,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     var selectedReasoningEffortDisplayName: String {
-        codexCoordinator.selectedReasoningEffortDisplayName(raw: selectedReasoningEffortRaw)
+        if selectedAgent.usesPiNativeRuntime {
+            let raw = selectedReasoningEffortRaw
+            if let effort = CodexReasoningEffort.parse(raw) {
+                return effort.displayName
+            }
+            return PiModelRegistry.displayName(forThinkingLevelRaw: raw)
+        }
+        return codexCoordinator.selectedReasoningEffortDisplayName(raw: selectedReasoningEffortRaw)
     }
 
     var isProviderPickerLockedForCurrentTab: Bool {
@@ -1792,10 +1799,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     func selectReasoningEffort(_ effort: CodexReasoningEffort?) {
         selectedReasoningEffortRaw = effort?.rawValue
+        if selectedAgent.usesPiNativeRuntime, let session = activeSession {
+            piCoordinator.scheduleApplyCurrentClaudeModelAndEffortIfPossible(
+                for: session,
+                reason: "pi_thinking_changed"
+            )
+        }
     }
 
     func reasoningEffortOptionsForCurrentSelection() -> [CodexReasoningEffort] {
-        codexCoordinator.reasoningEffortOptions(
+        if selectedAgent.usesPiNativeRuntime {
+            return PiModelRegistry.reasoningEffortOptions(forRaw: selectedModelRaw)
+        }
+        return codexCoordinator.reasoningEffortOptions(
             forModelRaw: selectedModelRaw,
             agentKind: selectedAgent,
             precomputedOptions: cachedCollapsedCodexOptions.isEmpty ? nil : cachedCollapsedCodexOptions
@@ -3165,8 +3181,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     /// coordinator's Claude-shaped launch settings are ignored beyond the
     /// workspace path: pi tool surface comes from `PiAgentToolPreferences`
     /// (launch-time policy, like Claude's environment settings), and the
-    /// RepoPrompt MCP server is injected through the ephemeral `--mcp-config`
-    /// document with an eager lifecycle so routing completes pre-prompt.
+    /// RepoPrompt MCP server is injected through pi's built-in MCP
+    /// (`registerMcpServer` with `exposure: direct`) so routing completes pre-prompt.
     static func makePiNativeController(
         runID: UUID,
         tabID: UUID,
@@ -3187,6 +3203,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 mcpServers: mcpServers,
                 expectedPIDMCPClientName: AgentProviderKind.piMCPClientID,
                 toolProfile: PiAgentToolPreferences.permissionLevel().launchToolProfile,
+                loadsApprovalGate: PiAgentToolPreferences.permissionLevel() == .fullAccess,
                 enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
             ),
             runID: runID
@@ -9716,8 +9733,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ = refreshMCPPermissionProfileIfNeeded(for: session)
         // Codex normalization clears reasoning effort for every non-Codex provider.
         // Native MCP effort is a separate session pin and must survive configuration, including
-        // explicit overseer lane selections for compatible native agents.
-        if !session.selectedAgent.usesClaudeNativeRuntime {
+        // explicit overseer lane selections for compatible native agents. Pi stores thinking on
+        // the same field and must also keep an explicit pin.
+        if !session.selectedAgent.usesClaudeNativeRuntime,
+           !session.selectedAgent.usesPiNativeRuntime
+        {
             codexCoordinator.normalizeCodexSelectionForSession(
                 session,
                 preservingExplicitEffort: reasoningEffortRaw != nil

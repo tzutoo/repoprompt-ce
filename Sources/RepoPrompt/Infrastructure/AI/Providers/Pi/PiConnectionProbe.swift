@@ -3,15 +3,14 @@ import RepoPromptProcess
 
 /// One-shot connectivity probe for the pi coding agent used by the Settings
 /// connect flow. A managed `pi --mode rpc --no-session` process verifies the
-/// binary, RPC liveness, and pi-mcp-adapter presence (the adapter registers
-/// the `/mcp` extension command), and captures a model snapshot for the
-/// Agent Mode catalog. Launch flags match interactive/headless Agent Mode so
-/// user-global custom catalogs remain visible.
+/// binary, RPC liveness, and built-in MCP (`/mcp` from `builtin:mcp`), and
+/// captures a model snapshot for the Agent Mode catalog. Launch flags match
+/// interactive/headless Agent Mode so user-global custom catalogs remain visible.
 enum PiConnectionProbe {
     struct Result: Equatable {
         let sessionId: String?
         let modelSummary: String?
-        let adapterDetected: Bool
+        let builtinMCPDetected: Bool
         let availableModelCount: Int
         let models: [PiProviderRuntimeBridge.ModelDescriptor]
     }
@@ -19,7 +18,7 @@ enum PiConnectionProbe {
     enum ProbeError: Error, LocalizedError, Equatable {
         case piNotInstalled
         case rpcInitializationFailed(String)
-        case adapterMissing
+        case builtinMCPMissing
         case timedOut(seconds: Int)
 
         var errorDescription: String? {
@@ -28,8 +27,8 @@ enum PiConnectionProbe {
                 "The pi CLI was not found. Install it under a user-owned npm prefix (`npm i -g @earendil-works/pi-coding-agent`)."
             case let .rpcInitializationFailed(detail):
                 "pi RPC did not respond: \(detail)"
-            case .adapterMissing:
-                "pi-mcp-adapter is not installed. Run `pi install npm:pi-mcp-adapter` so RepoPrompt MCP tools can be injected."
+            case .builtinMCPMissing:
+                "pi's built-in MCP command was not available. Update pi to 1.1.0 or newer so RepoPrompt can inject MCP tools without pi-mcp-adapter."
             case let .timedOut(seconds):
                 "pi RPC probe timed out after \(seconds)s."
             }
@@ -61,9 +60,7 @@ enum PiConnectionProbe {
         let launchOptions = PiProviderRuntimeBridge.LaunchOptions(
             mode: .rpc,
             session: .ephemeral,
-            extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
-                adapterVersion: "2.32.1"
-            )
+            extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy()
         )
         let process = Process()
         process.executableURL = URL(fileURLWithPath: resolved)
@@ -132,7 +129,7 @@ enum PiConnectionProbe {
         stdin: FileHandle,
         channel: FileHandleChunkChannel
     ) async throws -> Result {
-        // Phase 1: RPC liveness + adapter presence. Do not batch get_available_models
+        // Phase 1: RPC liveness + built-in MCP. Do not batch get_available_models
         // with these — on current pi builds that multi-request burst never completes
         // models while state/commands succeed, and the probe then reports a false
         // "get_state did not complete" after the stream ends or times out.
@@ -142,7 +139,7 @@ enum PiConnectionProbe {
         try stdin.write(contentsOf: PiProviderRuntimeBridge.RPCWire.encodeRequestLine(.getCommands, id: commandsID))
 
         var state: PiProviderRuntimeBridge.SessionState?
-        var adapterDetected = false
+        var builtinMCPDetected = false
         var pending = Set([stateID, commandsID])
         var accumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
 
@@ -158,9 +155,8 @@ enum PiConnectionProbe {
                         state = response.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
                     case commandsID:
                         if let commands = response.data?["commands"]?.arrayValue {
-                            adapterDetected = commands.contains {
-                                let name = $0["name"]?.stringValue
-                                return name == "mcp" || name == "pi-mcp"
+                            builtinMCPDetected = commands.contains {
+                                $0["name"]?.stringValue == "mcp"
                             }
                         }
                     default:
@@ -173,8 +169,8 @@ enum PiConnectionProbe {
         guard let state else {
             throw ProbeError.rpcInitializationFailed("get_state did not complete")
         }
-        guard adapterDetected else {
-            throw ProbeError.adapterMissing
+        guard builtinMCPDetected else {
+            throw ProbeError.builtinMCPMissing
         }
 
         // Phase 2: catalog snapshot. Best-effort — connect already succeeded.
@@ -206,7 +202,7 @@ enum PiConnectionProbe {
         return Result(
             sessionId: state.sessionId,
             modelSummary: modelSummary,
-            adapterDetected: adapterDetected,
+            builtinMCPDetected: builtinMCPDetected,
             availableModelCount: models.count,
             models: models
         )

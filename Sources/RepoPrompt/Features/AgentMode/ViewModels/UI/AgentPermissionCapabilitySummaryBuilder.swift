@@ -199,7 +199,7 @@ struct AgentPermissionCapabilitySummaryBuilder {
                 isAvailable: isAvailable,
                 fileMutation: "Launch tools: \(level.displayName)",
                 shell: level == .fullAccess ? "pi bash tool enabled" : "pi bash tool disabled",
-                externalMCP: "RepoPrompt MCP via pi-mcp-adapter",
+                externalMCP: "RepoPrompt MCP via pi built-in MCP",
                 search: "Managed by pi CLI",
                 approvalModeDescription: "Tool surface: \(level.displayName)",
                 warnings: warnings

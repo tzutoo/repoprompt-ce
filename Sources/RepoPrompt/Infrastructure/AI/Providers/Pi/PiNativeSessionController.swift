@@ -5,14 +5,13 @@ import RepoPromptProcess
 ///
 /// Owns a `pi --mode rpc` subprocess: strict LF JSONL framing, id-correlated
 /// command/response round trips, and translation of pi events into the neutral
-/// `NativeAgentRuntimeControlling` contract. MCP injection flows through the
-/// ephemeral pi-mcp-adapter `--mcp-config` document (see
-/// `docs/architecture/provider-plugins.md` and the pi integration survey).
+/// `NativeAgentRuntimeControlling` contract. MCP injection uses pi's built-in
+/// MCP via `--no-extensions -e builtin:mcp` plus an ephemeral
+/// `pi.registerMcpServer` extension (never `mcp.json`, never pi-mcp-adapter).
 ///
 /// v1 boundaries (documented, deliberate):
-/// - pi core has no permission requests; extension UI dialogs are auto-cancelled
-///   with a lifecycle note. Per-call approval lands with the pinned gate
-///   extension follow-up.
+/// - Full Access loads an ephemeral `tool_call` gate; `confirm` dialogs become
+///   Agent Mode approval cards. Probe launches still auto-cancel.
 /// - `runtimeInit` carries the pi session identity; the Claude-compatible
 ///   initialize snapshot stays `nil`.
 actor PiNativeSessionController: NativeAgentRuntimeControlling {
@@ -25,17 +24,17 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         /// Optional validator invoked with the resolved executable before launch
         /// (Agent Mode supplies `ExecutableFileIdentity` trusted-path checks).
         var processValidator: (@Sendable (URL) throws -> Void)?
-        /// Ephemeral `--mcp-config` server entries for the RepoPrompt MCP server.
+        /// Ephemeral built-in MCP server entries for the RepoPrompt MCP server.
         var mcpServers: [String: PiProviderRuntimeBridge.MCPServerConfiguration]
-        /// MCP client name the pi-mcp-adapter presents (`pi-mcp-RepoPromptCE`).
+        /// MCP client name pi's built-in client presents (`pi`).
         /// When set, the launched process PID is registered as the expected agent
         /// PID for the run-scoped pending connection policy, mirroring the Claude
         /// controller's registration.
         var expectedPIDMCPClientName: String?
-        /// Version pin for the deterministic extension profile.
-        var pinnedAdapterVersion: String
         /// Tool surface for the managed launch.
         var toolProfile: PiProviderRuntimeBridge.ToolProfile
+        /// Load the Full Access `tool_call` confirm gate. Off for MCP-only / read-only.
+        var loadsApprovalGate: Bool
         /// Suppress `-na`/`-nc` determinism flags (tests with fake binaries).
         var suppressDeterminismFlags: Bool
         var enableDebugLogging: Bool
@@ -48,8 +47,8 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             processValidator: (@Sendable (URL) throws -> Void)? = nil,
             mcpServers: [String: PiProviderRuntimeBridge.MCPServerConfiguration] = [:],
             expectedPIDMCPClientName: String? = nil,
-            pinnedAdapterVersion: String = "2.32.1",
             toolProfile: PiProviderRuntimeBridge.ToolProfile = .standard,
+            loadsApprovalGate: Bool = false,
             suppressDeterminismFlags: Bool = false,
             enableDebugLogging: Bool = false,
             stateRequestTimeout: TimeInterval = 20,
@@ -60,8 +59,8 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             self.processValidator = processValidator
             self.mcpServers = mcpServers
             self.expectedPIDMCPClientName = expectedPIDMCPClientName
-            self.pinnedAdapterVersion = pinnedAdapterVersion
             self.toolProfile = toolProfile
+            self.loadsApprovalGate = loadsApprovalGate
             self.suppressDeterminismFlags = suppressDeterminismFlags
             self.enableDebugLogging = enableDebugLogging
             self.stateRequestTimeout = stateRequestTimeout
@@ -113,7 +112,8 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var registeredExpectedAgentPID: pid_t?
     private var pendingResponses: [String: (Result<PiProviderRuntimeBridge.RPCResponse, Error>) -> Void] = [:]
     private var nextRequestSequence = 0
-    private var ephemeralMCPConfigURL: URL?
+    private var ephemeralMCPInjectorURL: URL?
+    private var ephemeralApprovalGateURL: URL?
 
     private var eventStreamContinuation: AsyncStream<NativeAgentRuntimeEvent>.Continuation?
     private var eventStream: AsyncStream<NativeAgentRuntimeEvent>?
@@ -123,6 +123,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     private var streamingAssistantText = false
     private var lastTurnUsage: (input: Int, output: Int, cost: Double)?
     private var lastStopReason: String?
+    private var lastContextUsage: (used: Int?, window: Int)?
     private var toolInvocationIDs: [String: UUID] = [:]
     private var shutDown = false
     /// Lifetime token for configuration receipts. pi has no Claude-compatible flag-settings
@@ -204,11 +205,15 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         )))
         // Apply picker model over RPC after the process is alive. Passing
         // --provider/--model on argv can make pi exit before RPC starts when the
-        // selected family is unauthenticated.
+        // selected family is unauthenticated. Claude-shaped effortLevel is ignored
+        // here: pi thinking includes `off`/`minimal`, which the coordinator applies
+        // through `applyThinkingLevel` / proof-bearing apply.
         if let model, !model.isEmpty, model != AgentModel.defaultModel.rawValue {
-            try await applyModelAndEffort(model: model, effortLevel: effortLevel)
-        } else if effortLevel != nil {
-            try await applyModelAndEffort(model: nil, effortLevel: effortLevel)
+            try await applyModelAndEffort(model: model, effortLevel: nil)
+        }
+        _ = effortLevel
+        Task { [weak self] in
+            await self?.refreshAvailableModelsBestEffort()
         }
         return NativeAgentRuntimeSessionRef(sessionID: currentSessionIDValue)
     }
@@ -256,13 +261,51 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             }
         }
         if let effortLevel {
-            let response = try await roundTrip(.setThinkingLevel(
-                level: PiProviderRuntimeBridge.thinkingLevel(for: effortLevel)
-            ))
-            guard response.success else {
-                throw ControllerError.commandFailed(response.errorMessage ?? "set_thinking_level failed")
-            }
+            try await applyThinkingLevel(PiProviderRuntimeBridge.thinkingLevel(for: effortLevel))
         }
+    }
+
+    /// Pi-only thinking vocabulary includes `off` and `minimal`, which are not
+    /// `NativeAgentRuntimeEffortLevel` cases. Call this when the picker selected those.
+    func applyThinkingLevel(_ level: String) async throws {
+        guard hasActiveSession else {
+            throw NativeAgentRuntimeControllerError.processNotRunning
+        }
+        let trimmed = level.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return }
+        let response = try await roundTrip(.setThinkingLevel(level: trimmed))
+        guard response.success else {
+            throw ControllerError.commandFailed(response.errorMessage ?? "set_thinking_level failed")
+        }
+    }
+
+    /// First-party pi compact. Unlike Claude/Codex, this is an RPC command, not a
+    /// `/compact` user turn. A successful response synthesizes a completed native
+    /// turn so Agent Mode's self-compact state machine can finish.
+    func compactSession(customInstructions: String? = nil) async throws -> UUID {
+        guard hasActiveSession else {
+            throw NativeAgentRuntimeControllerError.processNotRunning
+        }
+        let turnID = UUID()
+        pendingTurnIDBuffer.append(turnID)
+        turnInFlight = true
+        lastTurnUsage = nil
+        lastStopReason = nil
+        let response = try await roundTrip(
+            .compact(customInstructions: customInstructions),
+            timeout: max(options.commandTimeout, 60)
+        )
+        guard response.success else {
+            pendingTurnIDBuffer.removeAll { $0 == turnID }
+            turnInFlight = false
+            throw ControllerError.commandFailed(response.errorMessage ?? "compact failed")
+        }
+        if let usage = response.data?["usage"].flatMap(PiProviderRuntimeBridge.TokenUsage.init(json:)) {
+            lastTurnUsage = (usage.input, usage.output, usage.cost?.total ?? 0)
+        }
+        lastStopReason = "compact"
+        completePendingTurn()
+        return turnID
     }
 
     /// Proof-bearing send. pi mints its receipt during the same dispatch, so a receipt that
@@ -338,18 +381,33 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             process.terminate()
         }
         process = nil
-        if let ephemeralMCPConfigURL {
-            try? FileManager.default.removeItem(at: ephemeralMCPConfigURL)
+        if let ephemeralMCPInjectorURL {
+            try? FileManager.default.removeItem(at: ephemeralMCPInjectorURL)
         }
-        ephemeralMCPConfigURL = nil
+        ephemeralMCPInjectorURL = nil
+        if let ephemeralApprovalGateURL {
+            try? FileManager.default.removeItem(at: ephemeralApprovalGateURL)
+        }
+        ephemeralApprovalGateURL = nil
         eventStreamContinuation?.finish()
         eventStreamContinuation = nil
         eventStream = nil
     }
 
     func respondToPermissionRequest(id: String, decision: AgentApprovalDecision) async {
-        // pi core raises no permission requests; extension dialogs are
-        // auto-cancelled in `handleExtensionUIRequest`.
+        let confirmed: Bool? = switch decision {
+        case .accept, .acceptForSession, .acceptWithExecpolicyAmendment:
+            true
+        case .decline:
+            false
+        case .cancel:
+            nil
+        }
+        if let confirmed {
+            try? writeCommand(.extensionUIResponseConfirmed(id: id, confirmed: confirmed))
+        } else {
+            try? writeCommand(.extensionUIResponseCancelled(id: id))
+        }
     }
 
     // MARK: - Process launch
@@ -362,9 +420,13 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     ) async throws {
         let environment = await launchEnvironment
         let executableURL = try resolveExecutable(environment: environment)
-        var mcpConfigPath: String?
+        var injectorPath: String?
         if !options.mcpServers.isEmpty {
-            mcpConfigPath = try writeEphemeralMCPConfiguration()
+            injectorPath = try writeEphemeralMCPInjector()
+        }
+        var gatePath: String?
+        if options.loadsApprovalGate {
+            gatePath = try writeEphemeralApprovalGate()
         }
         var additionalArguments: [String] = []
         if let systemPromptOverride, !systemPromptOverride.isEmpty {
@@ -376,9 +438,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             session: existingSessionID.map(PiProviderRuntimeBridge.SessionSelection.resume) ?? .persistent,
             toolProfile: options.toolProfile,
             extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
-                adapterVersion: options.pinnedAdapterVersion
+                injectorPath: injectorPath,
+                gatePath: gatePath
             ),
-            mcpConfigPath: mcpConfigPath,
             suppressProjectResources: !options.suppressDeterminismFlags,
             suppressContextFiles: !options.suppressDeterminismFlags,
             quietStartupNetwork: !options.suppressDeterminismFlags,
@@ -523,13 +585,31 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         return url
     }
 
-    private func writeEphemeralMCPConfiguration() throws -> String {
-        let document = PiProviderRuntimeBridge.MCPAdapterConfigurationDocument(servers: options.mcpServers)
+    private func writeEphemeralMCPInjector() throws -> String {
+        guard let first = options.mcpServers.first else {
+            throw ControllerError.mcpConfigurationWriteFailed("no MCP servers to inject")
+        }
+        do {
+            let source = try PiProviderRuntimeBridge.MCPInjector.extensionSource(
+                serverName: first.key,
+                configuration: first.value
+            )
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rpce-pi-mcp-\(runID.uuidString).ts")
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            ephemeralMCPInjectorURL = url
+            return url.path
+        } catch {
+            throw ControllerError.mcpConfigurationWriteFailed(error.localizedDescription)
+        }
+    }
+
+    private func writeEphemeralApprovalGate() throws -> String {
         do {
             let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("rpce-pi-mcp-\(runID.uuidString).json")
-            try document.encodedDocument().write(to: url, options: .atomic)
-            ephemeralMCPConfigURL = url
+                .appendingPathComponent("rpce-pi-gate-\(runID.uuidString).ts")
+            try PiProviderRuntimeBridge.ApprovalGate.extensionSource().write(to: url, atomically: true, encoding: .utf8)
+            ephemeralApprovalGateURL = url
             return url.path
         } catch {
             throw ControllerError.mcpConfigurationWriteFailed(error.localizedDescription)
@@ -688,12 +768,17 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             turnInFlight = true
             lastTurnUsage = nil
             lastStopReason = nil
+            lastContextUsage = nil
         case .agentEnd:
             // A single low-level run may still be followed by retries, compaction,
             // or queued continuations; only agent_settled is the session boundary.
             break
         case .agentSettled:
-            completePendingTurn()
+            // Round-trip from a nested task so the stdout consumer can keep
+            // reading the get_session_stats response.
+            Task { [weak self] in
+                await self?.refreshSessionStatsThenCompletePendingTurn()
+            }
         case .turnStart:
             break
         case let .turnEnd(message, _):
@@ -804,17 +889,66 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
     }
 
-    /// v1: dialog methods are cancelled (the extension observes `undefined`/
-    /// `false`, matching a dismissed dialog) and surfaced as lifecycle notes.
-    /// Fire-and-forget methods are logged only. Revisit with the pinned
-    /// repoprompt-gate extension follow-up.
     private func handleExtensionUIRequest(_ request: PiProviderRuntimeBridge.ExtensionUIRequest) {
-        guard request.isDialog else { return }
-        try? writeCommand(.extensionUIResponseCancelled(id: request.id))
-        emit(.stream(AIStreamResult(
-            type: "lifecycle",
-            text: "cancelled pi extension dialog \(request.method.rawValue): \(request.title ?? "")"
-        )))
+        switch request.method {
+        case .confirm:
+            let title = request.title ?? "Allow pi tool?"
+            let message = request.message ?? ""
+            let kind: AgentApprovalKind = title.lowercased().contains("bash") || message.lowercased().contains("shell")
+                ? .commandExecution
+                : .fileChange
+            emit(.approvalRequest(AgentApprovalRequest(
+                requestID: .piExtensionUI(request.id),
+                method: "extension_ui_confirm",
+                kind: kind,
+                threadID: currentSessionIDValue ?? "",
+                turnID: pendingTurnIDBuffer.first.map(\.uuidString) ?? "",
+                itemID: request.id,
+                reason: message.isEmpty ? title : message,
+                command: nil,
+                cwd: options.workingDirectory?.path,
+                details: [
+                    AgentApprovalDetail(id: UUID(), label: "Pi", value: title)
+                ]
+            )))
+        case .select, .input, .editor:
+            try? writeCommand(.extensionUIResponseCancelled(id: request.id))
+            emit(.stream(AIStreamResult(
+                type: "lifecycle",
+                text: "cancelled pi extension dialog \(request.method.rawValue): \(request.title ?? "")"
+            )))
+        case .notify, .setStatus, .setWidget, .setTitle, .setEditorText:
+            break
+        }
+    }
+
+    private func refreshAvailableModelsBestEffort() async {
+        guard let response = try? await roundTrip(.getAvailableModels),
+              response.success
+        else { return }
+        let modelValues = response.data?["models"]?.arrayValue ?? []
+        let descriptors = modelValues.compactMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:))
+        _ = PiModelRegistry.update(records: PiModelRegistry.records(from: descriptors))
+    }
+
+    private func refreshSessionStatsThenCompletePendingTurn() async {
+        await refreshSessionStatsBestEffort()
+        completePendingTurn()
+    }
+
+    private func refreshSessionStatsBestEffort() async {
+        guard let response = try? await roundTrip(.getSessionStats),
+              response.success,
+              let stats = response.data.flatMap(PiProviderRuntimeBridge.SessionStats.init(json:))
+        else { return }
+        if let usage = stats.usage {
+            lastTurnUsage = (usage.input, usage.output, usage.cost?.total ?? stats.cost)
+        } else if stats.cost > 0 {
+            lastTurnUsage = (lastTurnUsage?.input ?? 0, lastTurnUsage?.output ?? 0, stats.cost)
+        }
+        if let context = stats.contextUsage, context.contextWindow > 0 {
+            lastContextUsage = (context.tokens, context.contextWindow)
+        }
     }
 
     private func completePendingTurn() {
@@ -831,6 +965,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         let usage = lastTurnUsage
         let stopReason = lastStopReason
+        let context = lastContextUsage
         emit(.stream(AIStreamResult(
             type: "message_stop",
             text: nil,
@@ -838,7 +973,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             completionTokens: usage?.output,
             cost: usage?.cost,
             providerSessionID: currentSessionIDValue,
-            stopReason: stopReason
+            stopReason: stopReason,
+            modelContextWindow: context?.window,
+            contextUsedTokens: context?.used
         )))
         emit(.turnCompleted(turnID: turnID, status: status))
     }

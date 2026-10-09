@@ -374,7 +374,22 @@ final class ClaudeAgentModeCoordinator {
         let model = effectiveClaudeModel(for: session)
         let effortLevel = currentClaudeEffortLevel(for: session)
         do {
-            try await controller.applyModelAndEffort(model: model, effortLevel: effortLevel)
+            if session.selectedAgent.usesPiNativeRuntime,
+               let piController = controller as? PiNativeSessionController
+            {
+                let thinkingRaw = PiModelRegistry.piThinkingLevelRaw(
+                    fromCodexEffort: CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)
+                )
+                try await piController.applyModelAndEffort(
+                    model: model,
+                    effortLevel: PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: thinkingRaw)
+                )
+                if thinkingRaw == "off" || thinkingRaw == "minimal" {
+                    try await piController.applyThinkingLevel(thinkingRaw)
+                }
+            } else {
+                try await controller.applyModelAndEffort(model: model, effortLevel: effortLevel)
+            }
             if session.claudeController.map(ObjectIdentifier.init) == ObjectIdentifier(controller) {
                 appliedAutoEffortByTabID.removeValue(forKey: session.tabID)
             }
@@ -1301,6 +1316,11 @@ final class ClaudeAgentModeCoordinator {
             let selectedModelRaw = session.selectedModelRaw
             let selectedModel = effectiveClaudeModel(for: session)
             let manualEffort = currentClaudeEffortLevel(for: session)
+            let selectedPiThinkingRaw = session.selectedAgent.usesPiNativeRuntime
+                ? PiModelRegistry.piThinkingLevelRaw(
+                    fromCodexEffort: CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)
+                )
+                : nil
             func configurationIsCurrent() -> Bool {
                 !Task.isCancelled
                     && intentIsCurrent(intent, for: session)
@@ -1308,7 +1328,13 @@ final class ClaudeAgentModeCoordinator {
                     && session.selectedAgent == selectedProvider
                     && session.selectedModelRaw == selectedModelRaw
                     && effectiveClaudeModel(for: session) == selectedModel
-                    && currentClaudeEffortLevel(for: session) == manualEffort
+                    && (
+                        session.selectedAgent.usesPiNativeRuntime
+                            ? PiModelRegistry.piThinkingLevelRaw(
+                                fromCodexEffort: CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)
+                            ) == selectedPiThinkingRaw
+                            : currentClaudeEffortLevel(for: session) == manualEffort
+                    )
             }
             let autoEffort: ClaudeCodeEffortLevel? = {
                 guard let autoEffortSelection,
@@ -1342,12 +1368,25 @@ final class ClaudeAgentModeCoordinator {
             var configurationProof: NativeAgentRuntimeConfigurationProof?
             if !isMaintenance {
                 var appliedAutoEffort = autoEffort
-                let application: NativeAgentRuntimeConfigurationApplication
+                var application: NativeAgentRuntimeConfigurationApplication
                 do {
-                    application = try await controller.applyModelAndEffortWithProof(
-                        model: selectedModel,
-                        effortLevel: autoEffort ?? manualEffort
-                    )
+                    if session.selectedAgent.usesPiNativeRuntime,
+                       let piController = controller as? PiNativeSessionController
+                    {
+                        let thinkingRaw = selectedPiThinkingRaw ?? "off"
+                        application = try await piController.applyModelAndEffortWithProof(
+                            model: selectedModel,
+                            effortLevel: PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: thinkingRaw)
+                        )
+                        if thinkingRaw == "off" || thinkingRaw == "minimal" {
+                            try await piController.applyThinkingLevel(thinkingRaw)
+                        }
+                    } else {
+                        application = try await controller.applyModelAndEffortWithProof(
+                            model: selectedModel,
+                            effortLevel: autoEffort ?? manualEffort
+                        )
+                    }
                 } catch {
                     // Only optional Auto may fall back, and only for the same still-current model.
                     // Application failure is not a missing conversation or fresh-start recovery.
@@ -1472,7 +1511,14 @@ final class ClaudeAgentModeCoordinator {
                     return .superseded
                 }
                 do {
-                    let turnID = try await controller.sendUserMessage(providerControlCommand.providerText)
+                    let turnID: UUID = if session.selectedAgent.usesPiNativeRuntime,
+                                          providerControlCommand.kind == .compact,
+                                          let piController = controller as? PiNativeSessionController
+                    {
+                        try await piController.compactSession()
+                    } else {
+                        try await controller.sendUserMessage(providerControlCommand.providerText)
+                    }
                     guard intentIsCurrent(intent, for: session),
                           sessionOwnsClaudeController(controller, for: session)
                     else {
@@ -1804,9 +1850,15 @@ final class ClaudeAgentModeCoordinator {
         decision: AgentApprovalDecision
     ) {
         guard let request = session.pendingApproval,
-              let controller = session.claudeController,
-              case let .claudeControl(requestID) = request.requestID
+              let controller = session.claudeController
         else {
+            return
+        }
+        let requestID: String
+        switch request.requestID {
+        case let .claudeControl(id), let .piExtensionUI(id):
+            requestID = id
+        case .codex, .acp:
             return
         }
         session.pendingApproval = nil

@@ -2930,7 +2930,7 @@ struct CLIProvidersSettingsView: View {
     private var piCard: some View {
         providerCard(
             title: "pi",
-            subtitle: "Uses the pi coding agent's RPC mode for Agent Mode. RepoPrompt MCP tools are injected through the pi-mcp-adapter extension with deterministic pinned launches.",
+            subtitle: "Uses the pi coding agent's RPC mode for Agent Mode. RepoPrompt MCP tools are injected through pi's built-in MCP for that process only.",
             infoURL: "https://pi.dev",
             isConnected: viewModel.isPiConnected,
             isExpanded: $isPiExpanded
@@ -2985,7 +2985,7 @@ struct CLIProvidersSettingsView: View {
                                 .foregroundColor(.red)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Text("Install with `npm i -g @earendil-works/pi-coding-agent` and `pi install npm:pi-mcp-adapter`. Authenticate with `/login` inside pi.")
+                            Text("Install with `npm i -g @earendil-works/pi-coding-agent` (1.1.0 or newer). Authenticate with `/login` inside pi.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }

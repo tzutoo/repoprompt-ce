@@ -4,7 +4,7 @@ Current as of 2026-09-19. This document is contributor-facing: use it when you a
 
 ## Scope and goals
 
-RepoPrompt CE keeps a small, provider-neutral runtime contract in the app and pushes provider-specific protocol/codec/runtime logic into Swift package products under `Packages/RepoPromptAgentProviders/`. The first plugin product is `RepoPromptClaudeCompatibleProvider` (Claude Code, GLM/Zai, Kimi, custom Claude-compatible). The second is `RepoPromptPiProvider` (pi coding agent RPC/JSON codec, launch args, and MCP adapter config DTOs). The seam preserves:
+RepoPrompt CE keeps a small, provider-neutral runtime contract in the app and pushes provider-specific protocol/codec/runtime logic into Swift package products under `Packages/RepoPromptAgentProviders/`. The first plugin product is `RepoPromptClaudeCompatibleProvider` (Claude Code, GLM/Zai, Kimi, custom Claude-compatible). The second is `RepoPromptPiProvider` (pi coding agent RPC/JSON codec, launch args, and built-in MCP injector DTOs). The seam preserves:
 
 - public `AgentProviderKind` raw values;
 - `AgentProviderBindingID.claude` settings/permission grouping;
@@ -324,7 +324,7 @@ Add the relevant focused suite before any catalog/codec change, and snapshot mod
 - `Package.swift` — root manifest and product wiring.
 - `Packages/RepoPromptAgentProviders/Package.swift` — provider package manifest.
 - `Packages/RepoPromptAgentProviders/Sources/RepoPromptClaudeCompatibleProvider/` — plugin DTOs, codec, translator, prompt delivery, environment builder, catalog, headless arg builder, launch-env resolver.
-- `Packages/RepoPromptAgentProviders/Sources/RepoPromptPiProvider/` — pi RPC/JSON codec, launch options, model-catalog DTOs, and ephemeral pi-mcp-adapter `--mcp-config` document. Managed launches use `--no-extensions` plus discovered `~/.pi/agent/extensions` sources and a version-pinned `pi-mcp-adapter`, so user-global custom catalogs stay available without double-loading the adapter from `settings.json` packages.
+- `Packages/RepoPromptAgentProviders/Sources/RepoPromptPiProvider/` — pi RPC/JSON codec, launch options, model-catalog DTOs, and ephemeral built-in MCP injector (`pi.registerMcpServer`). Managed launches use `--no-extensions -e builtin:mcp` plus discovered `~/.pi/agent/extensions` sources, so user-global custom catalogs stay available without loading pi-mcp-adapter (which would replace built-in MCP).
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/ClaudeCode/ClaudeCompatibleProviderRuntimeBridge.swift` — single Claude-compatible package import point.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/PiProviderRuntimeBridge.swift` — single pi package import point.
 - `Sources/RepoPrompt/Infrastructure/AI/Providers/Pi/` — core process control (`PiNativeSessionController`, `PiExecAgentProvider`) and Settings connect probe.

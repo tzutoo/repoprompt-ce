@@ -13,6 +13,22 @@ final class PiExecAgentProviderTests: XCTestCase {
         XCTAssertTrue(provider is PiExecAgentProvider)
     }
 
+    func testFactoryHonorsLaunchToolProfile() {
+        let previous = PiAgentToolPreferences.permissionLevel()
+        defer { PiAgentToolPreferences.setPermissionLevel(previous) }
+        PiAgentToolPreferences.setPermissionLevel(.readOnly)
+        _ = AgentRuntimeProviderService.shared.makeProvider(
+            for: .piAgent,
+            modelString: "default",
+            runType: .discover,
+            workspacePath: "/tmp"
+        )
+        XCTAssertEqual(
+            PiAgentToolPreferences.permissionLevel().launchToolProfile,
+            .readOnly
+        )
+    }
+
     func testJSONEventMappingStreamsContentAndCompletion() {
         var sessionID: String?
         let sessionLine = Data(#"{"type":"session","id":"headless-session-1"}"#.utf8)

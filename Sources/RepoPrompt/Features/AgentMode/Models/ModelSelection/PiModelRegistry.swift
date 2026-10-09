@@ -19,6 +19,8 @@ enum PiModelRegistry {
         let reasoning: Bool
         let contextWindow: Int
         let inputTypes: [String]
+        /// pi `thinkingLevelMap` effective levels (`off`…`max`) in canonical order.
+        let thinkingLevels: [String]
 
         init(
             id: String,
@@ -26,7 +28,8 @@ enum PiModelRegistry {
             provider: String,
             reasoning: Bool,
             contextWindow: Int,
-            inputTypes: [String] = ["text"]
+            inputTypes: [String] = ["text"],
+            thinkingLevels: [String] = []
         ) {
             self.id = id
             self.name = name
@@ -34,6 +37,7 @@ enum PiModelRegistry {
             self.reasoning = reasoning
             self.contextWindow = contextWindow
             self.inputTypes = inputTypes
+            self.thinkingLevels = thinkingLevels
         }
 
         init(from decoder: Decoder) throws {
@@ -44,6 +48,7 @@ enum PiModelRegistry {
             reasoning = try container.decode(Bool.self, forKey: .reasoning)
             contextWindow = try container.decode(Int.self, forKey: .contextWindow)
             inputTypes = try container.decodeIfPresent([String].self, forKey: .inputTypes) ?? ["text"]
+            thinkingLevels = try container.decodeIfPresent([String].self, forKey: .thinkingLevels) ?? []
         }
 
         /// Stable picker value. Prefix with `provider/` so later `set_model` keeps
@@ -67,6 +72,20 @@ enum PiModelRegistry {
     @discardableResult
     static func update(records: [ModelRecord]) -> Bool {
         store.update(records: records)
+    }
+
+    static func records(from descriptors: [PiProviderRuntimeBridge.ModelDescriptor]) -> [ModelRecord] {
+        descriptors.map { model in
+            ModelRecord(
+                id: model.id,
+                name: model.name,
+                provider: model.provider,
+                reasoning: model.reasoning,
+                contextWindow: model.contextWindow,
+                inputTypes: model.inputTypes,
+                thinkingLevels: model.effectiveThinkingLevels().map(\.rawValue)
+            )
+        }
     }
 
     /// Discovered records, Default placeholder excluded.
@@ -93,6 +112,88 @@ enum PiModelRegistry {
         }
         return records.first {
             $0.id.caseInsensitiveCompare(normalized) == .orderedSame
+        }
+    }
+
+    /// Thinking levels advertised for the selected model, in canonical pi order.
+    /// Default / unknown models expose the standard `off`…`high` set so the picker
+    /// is usable before a connect snapshot arrives.
+    static func thinkingLevels(forRaw rawModel: String) -> [PiProviderRuntimeBridge.ThinkingLevel] {
+        let normalized = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty || normalized == AgentModel.defaultModel.rawValue {
+            return Self.defaultThinkingLevels
+        }
+        guard let record = record(matchingRaw: normalized) else {
+            return Self.defaultThinkingLevels
+        }
+        if !record.reasoning {
+            return [.off]
+        }
+        let decoded = record.thinkingLevels.compactMap(PiProviderRuntimeBridge.ThinkingLevel.init(rawValue:))
+        return decoded.isEmpty ? Self.defaultThinkingLevels : decoded
+    }
+
+    /// Codex-shaped effort options for the Agent Mode chip. pi `off` maps to
+    /// `CodexReasoningEffort.none`; `ultra` is never advertised.
+    static func reasoningEffortOptions(forRaw rawModel: String) -> [CodexReasoningEffort] {
+        thinkingLevels(forRaw: rawModel).map(codexEffort(for:))
+    }
+
+    static func displayName(forThinkingLevelRaw raw: String?) -> String {
+        let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if normalized.isEmpty {
+            return CodexReasoningEffort.none.displayName
+        }
+        if let effort = CodexReasoningEffort.parse(normalized == "off" ? "none" : normalized) {
+            return effort.displayName
+        }
+        return raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? CodexReasoningEffort.none.displayName
+    }
+
+    static func piThinkingLevelRaw(fromCodexEffort effort: CodexReasoningEffort?) -> String {
+        guard let effort else { return "off" }
+        switch effort {
+        case .none:
+            return "off"
+        case .minimal:
+            return "minimal"
+        case .low:
+            return "low"
+        case .medium:
+            return "medium"
+        case .high:
+            return "high"
+        case .xhigh:
+            return "xhigh"
+        case .max, .ultra:
+            return "max"
+        }
+    }
+
+    static func nativeEffortLevel(fromThinkingLevelRaw raw: String?) -> NativeAgentRuntimeEffortLevel? {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "low": .low
+        case "medium": .medium
+        case "high": .high
+        case "xhigh", "x-high": .xhigh
+        case "max": .max
+        default: nil
+        }
+    }
+
+    private static let defaultThinkingLevels: [PiProviderRuntimeBridge.ThinkingLevel] = [
+        .off, .minimal, .low, .medium, .high
+    ]
+
+    private static func codexEffort(for level: PiProviderRuntimeBridge.ThinkingLevel) -> CodexReasoningEffort {
+        switch level {
+        case .off: CodexReasoningEffort.none
+        case .minimal: .minimal
+        case .low: .low
+        case .medium: .medium
+        case .high: .high
+        case .xhigh: .xhigh
+        case .max: .max
         }
     }
 

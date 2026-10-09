@@ -3953,7 +3953,7 @@ public class APISettingsViewModel: ObservableObject {
 
         collector.append("Refreshing login-shell environment cache")
         await CLIEnvironmentCache.shared.invalidate()
-        collector.append("Starting pi RPC probe (binary + RPC + pi-mcp-adapter preflight)")
+        collector.append("Starting pi RPC probe (binary + RPC + built-in MCP preflight)")
 
         do {
             let result = try await PiConnectionProbe.probe()
@@ -3961,18 +3961,9 @@ public class APISettingsViewModel: ObservableObject {
             if let modelSummary = result.modelSummary {
                 collector.append("Default model: \(modelSummary)")
             }
-            collector.append("pi-mcp-adapter detected (MCP command registered)")
+            collector.append("pi built-in MCP detected (/mcp command registered)")
             collector.append("\(result.availableModelCount) model(s) reported by get_available_models")
-            PiModelRegistry.update(records: result.models.map { model in
-                PiModelRegistry.ModelRecord(
-                    id: model.id,
-                    name: model.name,
-                    provider: model.provider,
-                    reasoning: model.reasoning,
-                    contextWindow: model.contextWindow,
-                    inputTypes: model.inputTypes
-                )
-            })
+            PiModelRegistry.update(records: PiModelRegistry.records(from: result.models))
             let piOptions = AgentModelCatalog.options(
                 for: .piAgent,
                 availability: AgentModelCatalog.AvailabilityContext(piAvailable: true)

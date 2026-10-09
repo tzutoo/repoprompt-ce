@@ -8,7 +8,9 @@ extension AgentModeViewModel {
             claudeContextUsageEstimator
         case .openCode, .cursor, .grokBuild, .antigravity, .devin:
             acpContextUsageEstimator
-        case .codexExec, .piAgent:
+        case .piAgent:
+            claudeContextUsageEstimator
+        case .codexExec:
             nil
         }
     }

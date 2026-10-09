@@ -1,0 +1,31 @@
+{
+  "floorVersion": "1.1.0",
+  "clientName": "pi",
+  "commands": [
+    "prompt",
+    "set_model",
+    "set_thinking_level",
+    "compact",
+    "get_state",
+    "get_available_models",
+    "get_session_stats",
+    "abort",
+    "clear_queue",
+    "extension_ui_response"
+  ],
+  "events": [
+    "agent_settled",
+    "message_update",
+    "tool_execution_start",
+    "tool_execution_update",
+    "tool_execution_end",
+    "extension_ui_request",
+    "compaction_start",
+    "compaction_end"
+  ],
+  "injector": {
+    "registerMcpServer": true,
+    "exposure": "direct",
+    "timeoutUnit": "seconds"
+  }
+}
