@@ -45,11 +45,21 @@ struct AgentHandoffPopover: View {
     }
 
     private var reasoningEffortOptions: [CodexReasoningEffort] {
-        selectedModelOption?.supportedReasoningEfforts ?? []
+        if selectedAgent.usesPiNativeRuntime {
+            return PiModelRegistry.reasoningEffortOptions(forRaw: selectedModelRaw)
+        }
+        return selectedModelOption?.supportedReasoningEfforts ?? []
     }
 
     private var showReasoningEffort: Bool {
-        selectedAgent == .codexExec && !reasoningEffortOptions.isEmpty
+        (selectedAgent == .codexExec || selectedAgent.usesPiNativeRuntime) && !reasoningEffortOptions.isEmpty
+    }
+
+    private var reasoningEffortChipTitle: String {
+        if selectedAgent.usesPiNativeRuntime {
+            return PiModelRegistry.displayName(forThinkingLevelRaw: selectedReasoningEffortRaw)
+        }
+        return selectedReasoningEffortRaw?.capitalized ?? "Default"
     }
 
     private var chipColor: Color {
@@ -138,7 +148,7 @@ struct AgentHandoffPopover: View {
                                     selectedReasoningEffortRaw = effort.rawValue
                                 } label: {
                                     HStack {
-                                        Text(effort.rawValue.capitalized)
+                                        Text(selectedAgent.usesPiNativeRuntime ? effort.displayName : effort.rawValue.capitalized)
                                         if selectedReasoningEffortRaw == effort.rawValue {
                                             Spacer()
                                             Image(systemName: "checkmark")
@@ -148,7 +158,7 @@ struct AgentHandoffPopover: View {
                             }
                         } label: {
                             HStack(spacing: 4) {
-                                Text(selectedReasoningEffortRaw?.capitalized ?? "Default")
+                                Text(reasoningEffortChipTitle)
                                     .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
                             }
                             .foregroundColor(.secondary)
@@ -287,13 +297,13 @@ struct AgentHandoffPopover: View {
     private func selectHandoffModel(_ model: AgentModelOption, for agent: AgentProviderKind) {
         selectedAgent = agent
         selectedModelRaw = model.rawValue
-        selectedReasoningEffortRaw = agent == .codexExec
-            ? Self.codexReasoningEffortRaw(
-                modelRaw: model.rawValue,
-                preferredReasoningEffortRaw: nil,
-                option: model
-            )
-            : nil
+        selectedReasoningEffortRaw = Self.initialReasoningEffortRaw(
+            for: agent,
+            modelRaw: model.rawValue,
+            preferredReasoningEffortRaw: nil,
+            option: model,
+            config: config
+        )
     }
 
     private func reconcileSelectionWithAvailability() {
@@ -317,6 +327,7 @@ struct AgentHandoffPopover: View {
             for: agent,
             modelRaw: fallbackModelRaw,
             preferredReasoningEffortRaw: agent == config.defaultDestinationAgent ? config.defaultReasoningEffortRaw : nil,
+            option: Self.option(matching: fallbackModelRaw, in: options),
             config: config
         )
     }
@@ -335,6 +346,7 @@ struct AgentHandoffPopover: View {
             for: agent,
             modelRaw: modelRaw,
             preferredReasoningEffortRaw: agent == config.defaultDestinationAgent ? config.defaultReasoningEffortRaw : nil,
+            option: option(matching: modelRaw, in: config.modelOptionsProvider(agent)),
             config: config
         )
         return AgentHandoffSelection(agent: agent, modelRaw: modelRaw, reasoningEffortRaw: reasoningEffortRaw)
@@ -361,15 +373,34 @@ struct AgentHandoffPopover: View {
         for agent: AgentProviderKind,
         modelRaw: String,
         preferredReasoningEffortRaw: String?,
-        config: AgentHandoffConfig
+        option: AgentModelOption?,
+        config _: AgentHandoffConfig
     ) -> String? {
+        if agent.usesPiNativeRuntime {
+            return piThinkingEffortRaw(
+                modelRaw: modelRaw,
+                preferredReasoningEffortRaw: preferredReasoningEffortRaw
+            )
+        }
         guard agent == .codexExec else { return nil }
-        let option = option(matching: modelRaw, in: config.modelOptionsProvider(agent))
         return codexReasoningEffortRaw(
             modelRaw: modelRaw,
             preferredReasoningEffortRaw: preferredReasoningEffortRaw,
             option: option
         )
+    }
+
+    private static func piThinkingEffortRaw(
+        modelRaw: String,
+        preferredReasoningEffortRaw: String?
+    ) -> String {
+        let supported = PiModelRegistry.reasoningEffortOptions(forRaw: modelRaw)
+        if let preferred = CodexReasoningEffort.parse(preferredReasoningEffortRaw),
+           supported.contains(preferred)
+        {
+            return preferred.rawValue
+        }
+        return supported.first?.rawValue ?? CodexReasoningEffort.none.rawValue
     }
 
     private static func codexReasoningEffortRaw(

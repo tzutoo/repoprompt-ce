@@ -131,6 +131,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
     /// stale-receipt fence: a proof minted for a previous process cannot certify a later turn.
     private var configurationLifetime = UUID()
     private var appliedConfigurationProof: NativeAgentRuntimeConfigurationProof?
+    private var cachedDiscoveredCommands: [PiProviderRuntimeBridge.DiscoveredCommand] = []
 
     init(options: Options, runID: UUID = UUID()) {
         self.options = options
@@ -214,6 +215,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         _ = effortLevel
         Task { [weak self] in
             await self?.refreshAvailableModelsBestEffort()
+            await self?.refreshDiscoveredCommandsBestEffort()
         }
         return NativeAgentRuntimeSessionRef(sessionID: currentSessionIDValue)
     }
@@ -259,10 +261,18 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
                     annotatedFailure(response.errorMessage ?? "set_model failed")
                 )
             }
+            await ingestSetModelResponse(response.data, requestedModel: resolved)
         }
         if let effortLevel {
             try await applyThinkingLevel(PiProviderRuntimeBridge.thinkingLevel(for: effortLevel))
         }
+    }
+
+    func discoveredSlashCommands() async -> [PiProviderRuntimeBridge.DiscoveredCommand] {
+        if cachedDiscoveredCommands.isEmpty {
+            await refreshDiscoveredCommandsBestEffort()
+        }
+        return cachedDiscoveredCommands
     }
 
     /// Pi-only thinking vocabulary includes `off` and `minimal`, which are not
@@ -929,6 +939,44 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         let modelValues = response.data?["models"]?.arrayValue ?? []
         let descriptors = modelValues.compactMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:))
         _ = PiModelRegistry.update(records: PiModelRegistry.records(from: descriptors))
+    }
+
+    private func ingestSetModelResponse(_ data: PiProviderRuntimeBridge.JSONValue?, requestedModel: PiProviderRuntimeBridge.ModelSelection) async {
+        if let descriptor = data.flatMap(PiProviderRuntimeBridge.ModelDescriptor.init(json:)) {
+            _ = PiModelRegistry.upsert(records: PiModelRegistry.records(from: [descriptor]))
+            return
+        }
+        await refreshThinkingLevelsBestEffort(
+            provider: requestedModel.provider,
+            modelID: requestedModel.modelPattern
+        )
+    }
+
+    private func refreshThinkingLevelsBestEffort(provider: String?, modelID: String) async {
+        guard let response = try? await roundTrip(.getAvailableThinkingLevels),
+              response.success
+        else { return }
+        let levels = response.data?["levels"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let raw = if let provider, !provider.isEmpty {
+            "\(provider)/\(modelID)"
+        } else {
+            modelID
+        }
+        if !PiModelRegistry.updateThinkingLevels(forRaw: raw, thinkingLevels: levels),
+           let existing = PiModelRegistry.record(matchingRaw: modelID)
+        {
+            _ = PiModelRegistry.updateThinkingLevels(
+                forRaw: existing.catalogRawValue,
+                thinkingLevels: levels
+            )
+        }
+    }
+
+    private func refreshDiscoveredCommandsBestEffort() async {
+        guard let response = try? await roundTrip(.getCommands),
+              response.success
+        else { return }
+        cachedDiscoveredCommands = PiProviderRuntimeBridge.DiscoveredCommand.parse(response.data)
     }
 
     private func refreshSessionStatsThenCompletePendingTurn() async {

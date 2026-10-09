@@ -139,6 +139,57 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertEqual(PiModelRegistry.piThinkingLevelRaw(fromCodexEffort: .minimal), "minimal")
         XCTAssertEqual(PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: "off"), nil)
         XCTAssertEqual(PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: "high"), .high)
+        XCTAssertEqual(
+            PiModelRegistry.resolvedOptions()?.last?.supportedReasoningEfforts.map(\.rawValue),
+            ["none"]
+        )
+    }
+
+    func testUpsertAndThinkingLevelRefreshPreserveOtherModels() {
+        PiModelRegistry.update(records: [
+            PiModelRegistry.ModelRecord(
+                id: "glm-5.3",
+                name: "GLM 5.3",
+                provider: "zai",
+                reasoning: true,
+                contextWindow: 200_000,
+                thinkingLevels: ["off", "low", "high"]
+            ),
+            PiModelRegistry.ModelRecord(
+                id: "grok",
+                name: "Grok",
+                provider: "local",
+                reasoning: true,
+                contextWindow: 128_000,
+                thinkingLevels: ["off", "minimal", "low", "medium", "high"]
+            )
+        ])
+        XCTAssertTrue(PiModelRegistry.updateThinkingLevels(
+            forRaw: "zai/glm-5.3",
+            thinkingLevels: ["off", "high", "max"]
+        ))
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: "zai/glm-5.3").map(\.rawValue),
+            ["none", "high", "max"]
+        )
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: "local/grok").map(\.rawValue),
+            ["none", "minimal", "low", "medium", "high"]
+        )
+        XCTAssertTrue(PiModelRegistry.upsert(records: [
+            PiModelRegistry.ModelRecord(
+                id: "vision",
+                name: "Vision",
+                provider: "zai",
+                reasoning: false,
+                contextWindow: 64000,
+                inputTypes: ["text", "image"]
+            )
+        ]))
+        XCTAssertEqual(
+            PiModelRegistry.resolvedRecords().map(\.catalogRawValue).sorted(),
+            ["local/grok", "zai/glm-5.3", "zai/vision"]
+        )
     }
 
     func testModelAcceptsImagesUsesInputTypes() {

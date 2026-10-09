@@ -8,6 +8,8 @@
     "compact",
     "get_state",
     "get_available_models",
+    "get_available_thinking_levels",
+    "get_commands",
     "get_session_stats",
     "abort",
     "clear_queue",

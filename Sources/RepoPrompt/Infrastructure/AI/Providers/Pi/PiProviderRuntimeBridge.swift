@@ -36,6 +36,7 @@ enum PiProviderRuntimeBridge {
     typealias SessionState = PiSessionState
     typealias SessionStats = PiSessionStats
     typealias SessionEntryList = PiSessionEntryList
+    typealias DiscoveredCommand = PiDiscoveredCommand
 
     typealias MCPServerConfiguration = PiBuiltinMCPServerConfiguration
     typealias MCPExposure = PiBuiltinMCPExposure

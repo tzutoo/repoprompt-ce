@@ -74,6 +74,38 @@ enum PiModelRegistry {
         store.update(records: records)
     }
 
+    /// Merges `incoming` into the live snapshot without dropping other models.
+    @discardableResult
+    static func upsert(records incoming: [ModelRecord]) -> Bool {
+        guard !incoming.isEmpty else { return false }
+        var merged = resolvedRecords()
+        for record in incoming {
+            if let index = merged.firstIndex(where: {
+                $0.catalogRawValue.caseInsensitiveCompare(record.catalogRawValue) == .orderedSame
+            }) {
+                merged[index] = record
+            } else {
+                merged.append(record)
+            }
+        }
+        return update(records: merged)
+    }
+
+    @discardableResult
+    static func updateThinkingLevels(forRaw rawModel: String, thinkingLevels: [String]) -> Bool {
+        guard let existing = record(matchingRaw: rawModel) else { return false }
+        let updated = ModelRecord(
+            id: existing.id,
+            name: existing.name,
+            provider: existing.provider,
+            reasoning: existing.reasoning || thinkingLevels.contains { $0 != "off" },
+            contextWindow: existing.contextWindow,
+            inputTypes: existing.inputTypes,
+            thinkingLevels: thinkingLevels
+        )
+        return upsert(records: [updated])
+    }
+
     static func records(from descriptors: [PiProviderRuntimeBridge.ModelDescriptor]) -> [ModelRecord] {
         descriptors.map { model in
             ModelRecord(
@@ -219,20 +251,26 @@ enum PiModelRegistry {
     static func resolvedOptions() -> [AgentModelOption]? {
         let records = resolvedRecords()
         guard !records.isEmpty else { return nil }
+        let fallbackEfforts = reasoningEffortOptions(forRaw: AgentModel.defaultModel.rawValue)
         let fallback = AgentModelOption(
             rawValue: AgentModel.defaultModel.rawValue,
             displayName: AgentModel.defaultModel.displayName,
             description: AgentModel.defaultModel.description,
             isPlaceholderDefault: true,
-            isProviderDefault: false
+            isProviderDefault: false,
+            supportedReasoningEfforts: fallbackEfforts,
+            defaultReasoningEffort: fallbackEfforts.first
         )
         let discovered = records.map { record in
-            AgentModelOption(
+            let efforts = reasoningEffortOptions(forRaw: record.catalogRawValue)
+            return AgentModelOption(
                 rawValue: record.catalogRawValue,
                 displayName: record.catalogDisplayName,
                 description: record.provider.isEmpty ? nil : record.provider,
                 isPlaceholderDefault: false,
-                isProviderDefault: false
+                isProviderDefault: false,
+                supportedReasoningEfforts: efforts,
+                defaultReasoningEffort: efforts.first
             )
         }
         return [fallback] + discovered

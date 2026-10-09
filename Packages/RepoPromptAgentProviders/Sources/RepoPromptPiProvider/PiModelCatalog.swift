@@ -187,3 +187,26 @@ public struct PiSessionEntryList: Equatable, Sendable {
         }
     }
 }
+
+/// One entry from `get_commands`: extension command, prompt template, or skill.
+public struct PiDiscoveredCommand: Equatable, Sendable {
+    public let name: String
+    public let description: String?
+    public let source: String?
+
+    public init?(json: PiJSONValue) {
+        guard let object = json.objectValue,
+              let name = object["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty
+        else { return nil }
+        self.name = name
+        let description = object["description"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.description = (description?.isEmpty == false) ? description : nil
+        let source = object["source"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.source = (source?.isEmpty == false) ? source : nil
+    }
+
+    public static func parse(_ data: PiJSONValue?) -> [PiDiscoveredCommand] {
+        data?["commands"]?.arrayValue?.compactMap(PiDiscoveredCommand.init(json:)) ?? []
+    }
+}

@@ -43,7 +43,16 @@ final class PiNativeSessionControllerTests: XCTestCase {
               printf '{"id":"%s","type":"response","command":"get_session_stats","success":true,"data":{"tokens":{"input":10,"output":2,"total":12,"cost":{"total":0.03}},"cost":0.03,"contextUsage":{"tokens":1200,"contextWindow":200000,"percent":0.6}}}\n' "$id"
               ;;
             get_available_models)
-              printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"smoke","name":"Smoke","provider":"local","reasoning":true,"contextWindow":128000,"input":["text"]}]}}\n' "$id"
+              printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"glm-5.3","name":"GLM 5.3","provider":"zai","reasoning":true,"contextWindow":200000,"input":["text"],"thinkingLevelMap":{"off":"off","minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null}}]}}\n' "$id"
+              ;;
+            set_model)
+              printf '{"id":"%s","type":"response","command":"set_model","success":true,"data":{"id":"glm-5.3","name":"GLM 5.3","provider":"zai","reasoning":true,"contextWindow":200000,"input":["text"],"thinkingLevelMap":{"off":"off","minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null}}}\n' "$id"
+              ;;
+            get_available_thinking_levels)
+              printf '{"id":"%s","type":"response","command":"get_available_thinking_levels","success":true,"data":{"levels":["off","low","high"]}}\n' "$id"
+              ;;
+            get_commands)
+              printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"skill:pdf-tools","description":"Extract PDFs","source":"skill"},{"name":"mcp","source":"extension"}]}}\n' "$id"
               ;;
             compact)
               printf '{"id":"%s","type":"response","command":"compact","success":true,"data":{"summary":"ok","usage":{"input":1,"output":1,"cost":{"total":0.01}}}}\n' "$id"
@@ -273,6 +282,33 @@ final class PiNativeSessionControllerTests: XCTestCase {
         await controller.respondToPermissionRequest(id: "gate-1", decision: .accept)
         await controller.respondToPermissionRequest(id: "gate-2", decision: .decline)
         await controller.respondToPermissionRequest(id: "gate-3", decision: .cancel)
+        await controller.shutdown()
+    }
+
+    func testSetModelUpsertsThinkingLevelsAndGetCommandsCachesSlashList() async throws {
+        PiModelRegistry.clear()
+        defer { PiModelRegistry.clear() }
+        PiModelRegistry.update(records: [
+            PiModelRegistry.ModelRecord(
+                id: "glm-5.3",
+                name: "GLM 5.3",
+                provider: "zai",
+                reasoning: true,
+                contextWindow: 200_000,
+                thinkingLevels: ["off", "minimal", "low", "medium", "high"]
+            )
+        ])
+        let controller = makeController()
+        await controller.ensureEventsStreamReady()
+        _ = try await controller.startOrResume(existingSessionID: nil, model: nil, effortLevel: nil, systemPromptOverride: nil)
+        try await controller.applyModelAndEffort(model: "zai/glm-5.3", effortLevel: .high)
+        XCTAssertEqual(
+            PiModelRegistry.reasoningEffortOptions(forRaw: "zai/glm-5.3").map(\.rawValue),
+            ["none", "low", "high"]
+        )
+        let commands = await controller.discoveredSlashCommands()
+        XCTAssertEqual(commands.map(\.name), ["skill:pdf-tools", "mcp"])
+        XCTAssertEqual(commands.first?.source, "skill")
         await controller.shutdown()
     }
 

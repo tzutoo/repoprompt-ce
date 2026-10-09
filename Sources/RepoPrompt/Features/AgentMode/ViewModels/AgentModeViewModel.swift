@@ -2956,16 +2956,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let skillQuery = isExplicitSkillNamespaceQuery
             ? String(query.dropFirst("skill:".count))
             : query
-        let nativeSuggestions = isExplicitSkillNamespaceQuery ? [] : (slashSession.map {
-            codexCoordinator.nativeSlashCommandSuggestions(
-                for: $0,
-                query: query,
-                limit: Self.slashSkillSuggestionLimit
-            )
-        } ?? [])
-        let nativeNames: Set<String> = slashSession?.selectedAgent == .codexExec
-            ? Set(CodexAgentModeCoordinator.NativeSlashCommand.allCases.map { $0.rawValue.lowercased() })
-            : []
+        let nativeSuggestions = isExplicitSkillNamespaceQuery ? [] : await nativeSlashSuggestions(
+            for: slashSession,
+            query: query,
+            limit: Self.slashSkillSuggestionLimit
+        )
+        let nativeNames = Set(nativeSuggestions.map { $0.relativePath.lowercased() })
         await refreshSkillCatalog(force: false)
         let skillSuggestions = skillCatalog.suggestions(prefix: skillQuery, limit: Self.slashSkillSuggestionLimit)
             .prefix(max(0, Self.slashSkillSuggestionLimit - nativeSuggestions.count))
@@ -2976,7 +2972,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let relativePath = collidesWithNativeCommand ? "skill:\(suggestion.name)" : suggestion.name
                 let displayName = collidesWithNativeCommand ? "/skill:\(suggestion.name)" : "/\(suggestion.name)"
                 let subtitle = collidesWithNativeCommand
-                    ? ["Slash skill — use /skill:\(suggestion.name) to bypass Codex native /\(suggestion.name)", baseSubtitle]
+                    ? ["Slash skill — use /skill:\(suggestion.name) to bypass native /\(suggestion.name)", baseSubtitle]
                     .compactMap(\.self)
                     .joined(separator: " — ")
                     : baseSubtitle
@@ -2988,6 +2984,49 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             }
         return nativeSuggestions + skillSuggestions
+    }
+
+    private func nativeSlashSuggestions(
+        for session: TabSession?,
+        query: String,
+        limit: Int
+    ) async -> [MentionSuggestion] {
+        guard let session else { return [] }
+        if session.selectedAgent == .codexExec {
+            return codexCoordinator.nativeSlashCommandSuggestions(
+                for: session,
+                query: query,
+                limit: limit
+            )
+        }
+        guard session.selectedAgent.usesPiNativeRuntime,
+              let piController = session.claudeController as? PiNativeSessionController
+        else {
+            return []
+        }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let commands = await piController.discoveredSlashCommands()
+        return commands
+            .filter { command in
+                normalizedQuery.isEmpty || command.name.lowercased().hasPrefix(normalizedQuery)
+            }
+            .prefix(limit)
+            .map { command in
+                let source = command.source?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let subtitle: String? = if let description = command.description {
+                    description
+                } else if let source, !source.isEmpty {
+                    source
+                } else {
+                    nil
+                }
+                return MentionSuggestion(
+                    displayName: "/\(command.name)",
+                    relativePath: command.name,
+                    kind: .skill,
+                    subtitle: subtitle
+                )
+            }
     }
 
     func effectiveWorkspacePath(for session: TabSession) throws -> String? {
