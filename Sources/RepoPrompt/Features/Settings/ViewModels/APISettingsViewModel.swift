@@ -3964,6 +3964,7 @@ public class APISettingsViewModel: ObservableObject {
             collector.append("pi built-in MCP detected (/mcp command registered)")
             collector.append("\(result.availableModelCount) model(s) reported by get_available_models")
             PiModelRegistry.update(records: PiModelRegistry.records(from: result.models))
+            PiCommandRegistry.update(commands: result.commands)
             let piOptions = AgentModelCatalog.options(
                 for: .piAgent,
                 availability: AgentModelCatalog.AvailabilityContext(piAvailable: true)

@@ -13,6 +13,7 @@ enum PiConnectionProbe {
         let builtinMCPDetected: Bool
         let availableModelCount: Int
         let models: [PiProviderRuntimeBridge.ModelDescriptor]
+        let commands: [PiProviderRuntimeBridge.DiscoveredCommand]
     }
 
     enum ProbeError: Error, LocalizedError, Equatable {
@@ -140,6 +141,7 @@ enum PiConnectionProbe {
 
         var state: PiProviderRuntimeBridge.SessionState?
         var builtinMCPDetected = false
+        var commands: [PiProviderRuntimeBridge.DiscoveredCommand] = []
         var pending = Set([stateID, commandsID])
         var accumulator = PiProviderRuntimeBridge.RPCLineAccumulator()
 
@@ -154,11 +156,8 @@ enum PiConnectionProbe {
                     case stateID:
                         state = response.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
                     case commandsID:
-                        if let commands = response.data?["commands"]?.arrayValue {
-                            builtinMCPDetected = commands.contains {
-                                $0["name"]?.stringValue == "mcp"
-                            }
-                        }
+                        commands = PiProviderRuntimeBridge.DiscoveredCommand.parse(response.data)
+                        builtinMCPDetected = commands.contains { $0.name == "mcp" }
                     default:
                         break
                     }
@@ -204,7 +203,8 @@ enum PiConnectionProbe {
             modelSummary: modelSummary,
             builtinMCPDetected: builtinMCPDetected,
             availableModelCount: models.count,
-            models: models
+            models: models,
+            commands: commands
         )
     }
 

@@ -10,6 +10,7 @@
     "get_available_models",
     "get_available_thinking_levels",
     "get_commands",
+    "get_entries",
     "get_session_stats",
     "abort",
     "clear_queue",

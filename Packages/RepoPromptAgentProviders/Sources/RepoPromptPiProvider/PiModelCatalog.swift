@@ -194,6 +194,12 @@ public struct PiDiscoveredCommand: Equatable, Sendable {
     public let description: String?
     public let source: String?
 
+    public init(name: String, description: String? = nil, source: String? = nil) {
+        self.name = name
+        self.description = description
+        self.source = source
+    }
+
     public init?(json: PiJSONValue) {
         guard let object = json.objectValue,
               let name = object["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),

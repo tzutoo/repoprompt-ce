@@ -54,6 +54,9 @@ final class PiNativeSessionControllerTests: XCTestCase {
             get_commands)
               printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"skill:pdf-tools","description":"Extract PDFs","source":"skill"},{"name":"mcp","source":"extension"}]}}\n' "$id"
               ;;
+            get_entries)
+              printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":"leaf-1"}}\n' "$id"
+              ;;
             compact)
               printf '{"id":"%s","type":"response","command":"compact","success":true,"data":{"summary":"ok","usage":{"input":1,"output":1,"cost":{"total":0.01}}}}\n' "$id"
               ;;
@@ -309,6 +312,37 @@ final class PiNativeSessionControllerTests: XCTestCase {
         let commands = await controller.discoveredSlashCommands()
         XCTAssertEqual(commands.map(\.name), ["skill:pdf-tools", "mcp"])
         XCTAssertEqual(commands.first?.source, "skill")
+        XCTAssertEqual(PiCommandRegistry.resolvedCommands().map(\.name), ["skill:pdf-tools", "mcp"])
+        await controller.shutdown()
+    }
+
+    func testResumeVerifiesMatchingSessionAndGetEntries() async throws {
+        let controller = makeController()
+        await controller.ensureEventsStreamReady()
+        let session = try await controller.startOrResume(
+            existingSessionID: "fake-session-1",
+            model: nil,
+            effortLevel: nil,
+            systemPromptOverride: nil
+        )
+        XCTAssertEqual(session.sessionID, "fake-session-1")
+        await controller.shutdown()
+    }
+
+    func testResumeRejectsMismatchedSessionIdentity() async throws {
+        let controller = makeController()
+        await controller.ensureEventsStreamReady()
+        do {
+            _ = try await controller.startOrResume(
+                existingSessionID: "other-session",
+                model: nil,
+                effortLevel: nil,
+                systemPromptOverride: nil
+            )
+            XCTFail("Expected resume to fail when get_state identity does not match")
+        } catch {
+            // Expected: fake get_state always reports fake-session-1.
+        }
         await controller.shutdown()
     }
 

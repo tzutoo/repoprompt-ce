@@ -2941,7 +2941,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if let activeSession {
                 return activeSession
             }
-            guard selectedAgent == .codexExec,
+            guard selectedAgent == .codexExec || selectedAgent.usesPiNativeRuntime,
                   let tabID = currentTabID
             else {
                 return nil
@@ -2999,13 +2999,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 limit: limit
             )
         }
-        guard session.selectedAgent.usesPiNativeRuntime,
-              let piController = session.claudeController as? PiNativeSessionController
-        else {
-            return []
-        }
+        guard session.selectedAgent.usesPiNativeRuntime else { return [] }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let commands = await piController.discoveredSlashCommands()
+        let commands: [PiProviderRuntimeBridge.DiscoveredCommand] = if let piController = session.claudeController as? PiNativeSessionController {
+            await piController.discoveredSlashCommands()
+        } else {
+            PiCommandRegistry.resolvedCommands()
+        }
         return commands
             .filter { command in
                 normalizedQuery.isEmpty || command.name.lowercased().hasPrefix(normalizedQuery)

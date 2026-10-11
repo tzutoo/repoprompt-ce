@@ -6,10 +6,12 @@ final class PiModelRegistryTests: XCTestCase {
     override func setUp() {
         super.setUp()
         PiModelRegistry.clear()
+        PiCommandRegistry.clear()
     }
 
     override func tearDown() {
         PiModelRegistry.clear()
+        PiCommandRegistry.clear()
         super.tearDown()
     }
 
@@ -215,5 +217,22 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertFalse(PiModelRegistry.modelAcceptsImages(rawModel: "text-only"))
         XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: "vision"))
         XCTAssertTrue(PiModelRegistry.modelAcceptsImages(rawModel: "unknown-model"))
+    }
+
+    func testCommandRegistryDedupesAndSurvivesIdleComposerLookup() {
+        XCTAssertTrue(PiCommandRegistry.update(commands: [
+            .init(name: "mcp", source: "extension"),
+            .init(name: "MCP", description: "duplicate"),
+            .init(name: "skill:pdf-tools", description: "Extract PDFs", source: "skill")
+        ]))
+        XCTAssertEqual(
+            PiCommandRegistry.resolvedCommands().map(\.name),
+            ["mcp", "skill:pdf-tools"]
+        )
+        XCTAssertEqual(PiCommandRegistry.resolvedCommands().first?.source, "extension")
+        XCTAssertFalse(PiCommandRegistry.update(commands: [
+            .init(name: "mcp", source: "extension"),
+            .init(name: "skill:pdf-tools", description: "Extract PDFs", source: "skill")
+        ]))
     }
 }

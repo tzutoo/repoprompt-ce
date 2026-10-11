@@ -1337,6 +1337,7 @@ final class ClaudeAgentModeCoordinator {
                     )
             }
             let autoEffort: ClaudeCodeEffortLevel? = {
+                guard !session.selectedAgent.usesPiNativeRuntime else { return nil }
                 guard let autoEffortSelection,
                       autoEffortSelection.isCurrent(
                           provider: session.selectedAgent,
@@ -1354,8 +1355,31 @@ final class ClaudeAgentModeCoordinator {
                 else { return nil }
                 return ClaudeCodeEffortLevel.parse(autoEffortSelection.effortRaw)
             }()
+            let piManualEffortRaw = CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)?.rawValue
+                ?? PiModelRegistry.reasoningEffortOptions(forRaw: session.selectedModelRaw).first?.rawValue
+            let piAutoThinkingRaw: String? = {
+                guard session.selectedAgent.usesPiNativeRuntime,
+                      let autoEffortSelection,
+                      autoEffortSelection.isCurrent(
+                          provider: session.selectedAgent,
+                          selectedModelRaw: session.selectedModelRaw,
+                          manualEffortRaw: piManualEffortRaw,
+                          enabled: autoEffortEnabledProvider()
+                      ),
+                      AutoEffortModelPolicy.piEfforts(
+                          modelRaw: session.selectedModelRaw,
+                          advertised: PiModelRegistry.reasoningEffortOptions(forRaw: session.selectedModelRaw)
+                      ).contains(autoEffortSelection.effortRaw)
+                else { return nil }
+                return PiModelRegistry.piThinkingLevelRaw(
+                    fromCodexEffort: CodexReasoningEffort.parse(autoEffortSelection.effortRaw)
+                )
+            }()
             if !isMaintenance,
-               autoEffortSelection != nil, autoEffort == nil, let auditTurnID
+               autoEffortSelection != nil,
+               autoEffort == nil,
+               piAutoThinkingRaw == nil,
+               let auditTurnID
             {
                 session.updateAutomationAudit(turnID: auditTurnID) {
                     if $0.autoEffort.decision == .selected {
@@ -1373,7 +1397,7 @@ final class ClaudeAgentModeCoordinator {
                     if session.selectedAgent.usesPiNativeRuntime,
                        let piController = controller as? PiNativeSessionController
                     {
-                        let thinkingRaw = selectedPiThinkingRaw ?? "off"
+                        let thinkingRaw = piAutoThinkingRaw ?? selectedPiThinkingRaw ?? "off"
                         application = try await piController.applyModelAndEffortWithProof(
                             model: selectedModel,
                             effortLevel: PiModelRegistry.nativeEffortLevel(fromThinkingLevelRaw: thinkingRaw)

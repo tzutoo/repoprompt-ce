@@ -91,4 +91,15 @@ enum AutoEffortModelPolicy {
         let permitted: [ClaudeCodeEffortLevel] = [.low, .medium, .high, .xhigh, .max]
         return permitted.filter { advertised.contains($0) }.map(\.rawValue)
     }
+
+    /// Pi thinking levels Jev already knows how to judge. `off`/`minimal` stay
+    /// picker-only so Auto Effort never asks for a non-Jev criterion.
+    static func piEfforts(modelRaw: String, advertised: [CodexReasoningEffort]) -> [String] {
+        let normalized = modelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame
+        else { return [] }
+        let permitted: [CodexReasoningEffort] = [.low, .medium, .high, .xhigh, .max]
+        return permitted.filter { advertised.contains($0) }.map(\.rawValue)
+    }
 }

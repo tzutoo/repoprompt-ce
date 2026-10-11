@@ -91,6 +91,24 @@ final class AutoEffortPolicyTests: XCTestCase {
         ).isEmpty)
     }
 
+    func testPiAdmissionUsesAdvertisedThinkingAndRejectsDefault() {
+        XCTAssertEqual(
+            AutoEffortModelPolicy.piEfforts(
+                modelRaw: "zai/glm-5.3",
+                advertised: [.none, .minimal, .low, .high, .max]
+            ),
+            ["low", "high", "max"]
+        )
+        XCTAssertTrue(AutoEffortModelPolicy.piEfforts(
+            modelRaw: AgentModel.defaultModel.rawValue,
+            advertised: [.low, .medium, .high]
+        ).isEmpty)
+        XCTAssertTrue(AutoEffortModelPolicy.piEfforts(
+            modelRaw: "",
+            advertised: [.low, .medium]
+        ).isEmpty)
+    }
+
     func testClaudeAdmissionRejectsAliasAndOlderModel() {
         XCTAssertEqual(
             AutoEffortModelPolicy.claudeEfforts(

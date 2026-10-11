@@ -198,6 +198,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         }
         let state = stateResponse.data.flatMap(PiProviderRuntimeBridge.SessionState.init(json:))
         currentSessionIDValue = state?.sessionId ?? existingSessionID
+        if let existingSessionID, !existingSessionID.isEmpty {
+            try await verifyResumedSession(existingSessionID: existingSessionID, state: state)
+        }
         emit(.runtimeInit(NativeAgentRuntimeRuntimeInitStatus(
             sessionID: currentSessionIDValue,
             tools: [],
@@ -977,6 +980,31 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
               response.success
         else { return }
         cachedDiscoveredCommands = PiProviderRuntimeBridge.DiscoveredCommand.parse(response.data)
+        _ = PiCommandRegistry.update(commands: cachedDiscoveredCommands)
+    }
+
+    /// Bounded resume check: `--session` must land on the requested identity, and
+    /// `get_entries` must return a leaf so RPCE knows the provider conversation is intact.
+    private func verifyResumedSession(
+        existingSessionID: String,
+        state: PiProviderRuntimeBridge.SessionState?
+    ) async throws {
+        if let sessionId = state?.sessionId,
+           !sessionId.isEmpty,
+           sessionId.caseInsensitiveCompare(existingSessionID) != .orderedSame
+        {
+            throw ControllerError.stateRequestFailed(
+                annotatedFailure(
+                    "resumed pi session \(sessionId) does not match requested \(existingSessionID)"
+                )
+            )
+        }
+        let entriesResponse = try await roundTrip(.getEntries())
+        guard entriesResponse.success else {
+            throw ControllerError.stateRequestFailed(
+                annotatedFailure(entriesResponse.errorMessage ?? "get_entries failed")
+            )
+        }
     }
 
     private func refreshSessionStatsThenCompletePendingTurn() async {

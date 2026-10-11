@@ -199,4 +199,13 @@ final class PiRPCEventTests: XCTestCase {
         XCTAssertEqual(commands.last?.source, "extension")
         XCTAssertNil(commands.last?.description)
     }
+
+    func testSessionEntryListParsesLeafCursor() throws {
+        let json = try PiRPCWire.decodeLine(
+            Data(#"{"entries":[],"leafId":"leaf-1"}"#.utf8)
+        )
+        let list = try XCTUnwrap(PiSessionEntryList(json: json))
+        XCTAssertTrue(list.entries.isEmpty)
+        XCTAssertEqual(list.leafId, "leaf-1")
+    }
 }
