@@ -107,6 +107,21 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertNil(claudeSession.selectedReasoningEffortRaw)
     }
 
+    func testAgentModePromptQualifiesPiSetStatusAsNamespacedMCPTool() {
+        let prompt = SystemPromptService.agentModePrompt(agentKind: .piAgent)
+        XCTAssertTrue(prompt.contains("`mcp__RepoPromptCE__set_status`"))
+        XCTAssertFalse(prompt.contains("`set_status`"))
+        XCTAssertTrue(prompt.contains("Do not announce this in chat."))
+        XCTAssertEqual(
+            AgentModePrompts.Fragments.qualifiedRepoPromptToolName("set_status", agentKind: .piAgent),
+            "mcp__RepoPromptCE__set_status"
+        )
+        XCTAssertEqual(
+            AgentModePrompts.Fragments.qualifiedRepoPromptToolName("set_status", agentKind: .claudeCode),
+            "set_status"
+        )
+    }
+
     func testSelfCompactAndControlCommandsAdmitPi() {
         XCTAssertTrue(AgentProviderKind.piAgent.usesPiNativeRuntime)
         XCTAssertFalse(AgentProviderControlCommand.acpRuntimeAdvertisesNativeCommands(.piAgent))

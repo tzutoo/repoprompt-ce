@@ -192,9 +192,9 @@ enum AgentSessionLinkPrompts {
         let canonical = MCPWindowToolName.agentSessionLink
         guard let agentKind else { return canonical }
         switch agentKind {
-        case .codexExec, .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
+        case .codexExec, .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .piAgent:
             return "mcp__\(MCPIntegrationHelper.repoPromptMCPServerName)__\(canonical)"
-        case .openCode, .cursor, .grokBuild, .piAgent, .antigravity, .devin:
+        case .openCode, .cursor, .grokBuild, .antigravity, .devin:
             return canonical
         }
     }

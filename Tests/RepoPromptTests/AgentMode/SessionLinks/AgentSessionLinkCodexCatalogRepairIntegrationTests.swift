@@ -915,12 +915,12 @@ final class AgentSessionLinkCodexCatalogRepairIntegrationTests: XCTestCase {
             configuration.apply()
         }
 
-        func sendUserMessage(_: String, configuration proof: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
+        func sendUserMessage(_: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
             try configuration.validate(proof)
             return try await sendUserMessage("")
         }
 
-        func sendUserMessage(_: String) async throws -> UUID {
+        func sendUserMessage(_: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
             let id = UUID()
             activeTurnID = id
             return id

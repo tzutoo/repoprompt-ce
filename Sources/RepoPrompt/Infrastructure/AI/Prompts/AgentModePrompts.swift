@@ -352,11 +352,29 @@ enum AgentModePrompts {
         }
 
         /// Qualify RepoPrompt MCP tool references for providers whose model-visible
-        /// tool names include the server namespace (Codex exposes them as
-        /// `mcp__RepoPrompt__<tool>`). Keep authoring prompts with canonical names
-        /// and qualify the rendered Codex prompt at the boundary.
+        /// tool names include the server namespace (Codex and pi expose them as
+        /// `mcp__RepoPromptCE__<tool>`). Keep authoring prompts with canonical names
+        /// and qualify the rendered prompt at the boundary.
+        static func usesServerQualifiedRepoPromptTools(_ agentKind: AgentProviderKind?) -> Bool {
+            switch agentKind {
+            case .codexExec, .piAgent:
+                true
+            default:
+                false
+            }
+        }
+
+        static func qualifiedRepoPromptToolName(
+            _ canonical: String,
+            agentKind: AgentProviderKind?
+        ) -> String {
+            guard usesServerQualifiedRepoPromptTools(agentKind) else { return canonical }
+            let tool = canonical == "RepoPrompt__read_file" ? "read_file" : canonical
+            return "mcp__\(MCPIntegrationHelper.repoPromptMCPServerName)__\(tool)"
+        }
+
         static func codexQualifiedToolReferences(_ prompt: String, agentKind: AgentProviderKind?) -> String {
-            guard agentKind == .codexExec else { return prompt }
+            guard usesServerQualifiedRepoPromptTools(agentKind) else { return prompt }
             var qualified = prompt
             let toolNames = MCPIntegrationHelper.repoPromptToolNames
                 .union(["RepoPrompt__read_file"])
@@ -365,7 +383,7 @@ enum AgentModePrompts {
                 let canonical = toolName == "RepoPrompt__read_file" ? "read_file" : toolName
                 qualified = qualified.replacingOccurrences(
                     of: "`\(toolName)`",
-                    with: "`mcp__\(MCPIntegrationHelper.repoPromptMCPServerName)__\(canonical)`"
+                    with: "`\(qualifiedRepoPromptToolName(canonical, agentKind: agentKind))`"
                 )
             }
             return qualified
@@ -373,34 +391,38 @@ enum AgentModePrompts {
 
         /// Tool-list item for session naming (provider-aware).
         static func setStatusToolListItem(agentKind: AgentProviderKind?) -> String {
-            if agentKind == .codexExec {
-                return "\n- `set_status` - RepoPrompt MCP tool call for setting or renaming the session title (call once at session start)"
+            let tool = qualifiedRepoPromptToolName("set_status", agentKind: agentKind)
+            if usesServerQualifiedRepoPromptTools(agentKind) {
+                return "\n- `\(tool)` - RepoPrompt MCP tool call for setting or renaming the session title (call once at session start)"
             }
-            return "\n- `set_status` - Set or rename the session title (call once at session start)"
+            return "\n- `\(tool)` - Set or rename the session title (call once at session start)"
         }
 
         /// Session-start instruction for role prompts that use inline numbered steps.
         static func setStatusStartSentence(agentKind: AgentProviderKind?) -> String {
-            if agentKind == .codexExec {
-                return "Call `set_status` with `session_name` as a RepoPrompt MCP tool call to name this session at the start."
+            let tool = qualifiedRepoPromptToolName("set_status", agentKind: agentKind)
+            if usesServerQualifiedRepoPromptTools(agentKind) {
+                return "Call `\(tool)` with `session_name` as a RepoPrompt MCP tool call to name this session at the start. Do not announce the naming in chat."
             }
-            return "Call `set_status` to name this session at the start."
+            return "Call `\(tool)` to name this session at the start. Do not announce the naming in chat."
         }
 
         /// Session-start bullet for standard workflow guidance.
         static func setStatusStartupBullet(agentKind: AgentProviderKind?) -> String {
-            if agentKind == .codexExec {
-                return "\t- Immediately call `set_status` with `session_name` as a RepoPrompt MCP tool call to name the current chat/session"
+            let tool = qualifiedRepoPromptToolName("set_status", agentKind: agentKind)
+            if usesServerQualifiedRepoPromptTools(agentKind) {
+                return "\t- Immediately call `\(tool)` with `session_name` as a RepoPrompt MCP tool call to name the current chat/session. Do not announce this in chat."
             }
-            return "\t- Immediately call `set_status` with `session_name` to name the current chat/session"
+            return "\t- Immediately call `\(tool)` with `session_name` to name the current chat/session. Do not announce this in chat."
         }
 
         /// Keep set_status title-only wording aligned with provider-specific tool naming.
         static func setStatusTitleOnlyBullet(agentKind: AgentProviderKind?) -> String {
-            if agentKind == .codexExec {
-                return "\t- Use RepoPrompt MCP `set_status` for session-title naming; use normal short assistant messages for progress updates"
+            let tool = qualifiedRepoPromptToolName("set_status", agentKind: agentKind)
+            if usesServerQualifiedRepoPromptTools(agentKind) {
+                return "\t- Use RepoPrompt MCP `\(tool)` for session-title naming; use normal short assistant messages for progress updates"
             }
-            return "\t- Use `set_status` only for naming the session, not for transient progress updates"
+            return "\t- Use `\(tool)` only for naming the session, not for transient progress updates"
         }
 
         /// After-completing-task guidance block (provider-aware).

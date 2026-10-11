@@ -57,6 +57,8 @@ Local tooling-half validation on 2026-09-30: `make conductor-selftest` passed; `
 
 **2026-10-11 fork/upstream reconciliation.** Merging `upstream/main` at `4c3a06dd` into the fork's `main` keeps the previous fork-measured gated counts (`tests_testable_import_app_files` 331) and the extracted-tree improvements already recorded, while bringing in current upstream Agent Mode, Grok, workspace, and quota work. This is a baseline reconciliation for existing fork feature work plus the upstream union, not a change to the non-increasing rule.
 
+**2026-10-11 pi-peer-parity merge reconciliation.** Merging `agent/pi-peer-parity` into local `main` after `upstream/main` 4c3a06dd unions the fork's Pi tests with current upstream app-level tests. Regenerated `ratchets.json` with `update --allow-regression` against the merged tree: gated `tests_testable_import_app_files` is 337 rather than 331. Non-increasing file-size and singleton gates stay 47 / 16 / 89. Tracked App lines are 618,208. This reconciles the merged tree. It does not weaken the non-increasing rule for later changes.
+
 ## Baseline — 2026-09-28 (`589cecc5`)
 
 Metrics: [`ratchets.json`](ratchets.json). App target: 1,160 files, 648,091 lines, 88.3% of first-party Swift; 17 files over 5k lines; 102 singleton declarations and 1,220 `.shared` uses; 1,102 wrong-way edges; largest cycle 67 of 75 components.

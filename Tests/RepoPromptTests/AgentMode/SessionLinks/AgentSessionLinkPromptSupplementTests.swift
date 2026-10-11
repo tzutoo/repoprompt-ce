@@ -1289,7 +1289,7 @@ final class AgentSessionLinkPromptRendererTests: XCTestCase {
     /// there — see `testTellsHostNamespacedProvidersHowToResolveTheName`.
     func testQualifiesToolReferenceForProvidersWithServerNamespacedToolNames() {
         let qualified = "mcp__\(MCPIntegrationHelper.repoPromptMCPServerName)__agent_session_link"
-        for kind in [AgentProviderKind.codexExec, .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible] {
+        for kind in [AgentProviderKind.codexExec, .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .piAgent] {
             XCTAssertEqual(
                 AgentSessionLinkPrompts.toolReference(agentKind: kind),
                 qualified,

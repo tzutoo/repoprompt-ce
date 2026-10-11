@@ -1,5 +1,5 @@
 {
-  "description": "Fork/upstream reconciliation at upstream/main 4c3a06dd. Keep the local measured gated counts from the previous fork merge (tests_testable_import_app_files 331) and refresh tracked app-line/file counts after merging current upstream/main. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
+  "description": "Fork/upstream plus pi-peer-parity merge reconciliation. Measured merged tree after upstream/main 4c3a06dd and agent/pi-peer-parity: tests_testable_import_app_files 337, app lines 618208. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
   "ratcheted": [
     "app_files_over_5000_lines",
     "app_files_over_2000_lines",
@@ -20,15 +20,15 @@
     "app_files_over_2000_lines": 47,
     "app_files_over_5000_lines": 16,
     "app_largest_cycle_components": 64,
-    "app_share_permille": 792,
-    "app_shared_accessor_uses": 1203,
+    "app_share_permille": 789,
+    "app_shared_accessor_uses": 1283,
     "app_static_shared_declarations": 89,
-    "app_target_swift_files": 1063,
-    "app_target_swift_lines": 606281,
-    "app_userdefaults_standard_uses": 241,
-    "app_wrong_way_file_edges": 974,
-    "first_party_swift_lines": 765030,
-    "tests_sleep_calls": 66,
-    "tests_testable_import_app_files": 331
+    "app_target_swift_files": 1088,
+    "app_target_swift_lines": 618208,
+    "app_userdefaults_standard_uses": 243,
+    "app_wrong_way_file_edges": 995,
+    "first_party_swift_lines": 783284,
+    "tests_sleep_calls": 76,
+    "tests_testable_import_app_files": 337
   }
 }
