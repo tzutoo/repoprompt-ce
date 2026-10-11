@@ -187,4 +187,25 @@ final class PiRPCEventTests: XCTestCase {
         XCTAssertEqual(name, "bash")
         XCTAssertEqual(arguments["command"]?.stringValue, "ls")
     }
+
+    func testDiscoveredCommandParseKeepsSkillsAndSkipsNameless() throws {
+        let json = try PiRPCWire.decodeLine(
+            Data(#"{"commands":[{"name":"skill:pdf-tools","description":"Extract PDFs","source":"skill"},{"name":"mcp","source":"extension"},{"description":"no name"}]}"#.utf8)
+        )
+        let commands = PiDiscoveredCommand.parse(json)
+        XCTAssertEqual(commands.map(\.name), ["skill:pdf-tools", "mcp"])
+        XCTAssertEqual(commands.first?.description, "Extract PDFs")
+        XCTAssertEqual(commands.first?.source, "skill")
+        XCTAssertEqual(commands.last?.source, "extension")
+        XCTAssertNil(commands.last?.description)
+    }
+
+    func testSessionEntryListParsesLeafCursor() throws {
+        let json = try PiRPCWire.decodeLine(
+            Data(#"{"entries":[],"leafId":"leaf-1"}"#.utf8)
+        )
+        let list = try XCTUnwrap(PiSessionEntryList(json: json))
+        XCTAssertTrue(list.entries.isEmpty)
+        XCTAssertEqual(list.leafId, "leaf-1")
+    }
 }

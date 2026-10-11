@@ -352,6 +352,12 @@ extension AgentModeViewModel {
                 )
             )
             manualEffortRaw = claudeCoordinator.currentClaudeEffortLevel(for: session).rawValue
+        case .piAgent:
+            let advertised = PiModelRegistry.reasoningEffortOptions(forRaw: modelRaw)
+            modelID = modelRaw
+            efforts = AutoEffortModelPolicy.piEfforts(modelRaw: modelRaw, advertised: advertised)
+            manualEffortRaw = CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)?.rawValue
+                ?? advertised.first?.rawValue
         default:
             return ineligibleAutoEffortChoice()
         }
@@ -386,6 +392,9 @@ extension AgentModeViewModel {
         let currentManualEffortRaw: String? = switch provider {
         case .codexExec: codexCoordinator.effectiveCodexSelection(for: session).reasoningEffort
         case .claudeCode: claudeCoordinator.currentClaudeEffortLevel(for: session).rawValue
+        case .piAgent:
+            CodexReasoningEffort.parse(session.selectedReasoningEffortRaw)?.rawValue
+                ?? PiModelRegistry.reasoningEffortOptions(forRaw: session.selectedModelRaw).first?.rawValue
         default: nil
         }
         guard currentManualEffortRaw == manualEffortRaw else {

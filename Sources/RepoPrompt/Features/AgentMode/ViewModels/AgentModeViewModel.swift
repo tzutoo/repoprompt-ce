@@ -417,7 +417,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     var selectedReasoningEffortDisplayName: String {
-        codexCoordinator.selectedReasoningEffortDisplayName(raw: selectedReasoningEffortRaw)
+        if selectedAgent.usesPiNativeRuntime {
+            let raw = selectedReasoningEffortRaw
+            if let effort = CodexReasoningEffort.parse(raw) {
+                return effort.displayName
+            }
+            return PiModelRegistry.displayName(forThinkingLevelRaw: raw)
+        }
+        return codexCoordinator.selectedReasoningEffortDisplayName(raw: selectedReasoningEffortRaw)
     }
 
     var isProviderPickerLockedForCurrentTab: Bool {
@@ -1809,10 +1816,19 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
 
     func selectReasoningEffort(_ effort: CodexReasoningEffort?) {
         selectedReasoningEffortRaw = effort?.rawValue
+        if selectedAgent.usesPiNativeRuntime, let session = activeSession {
+            piCoordinator.scheduleApplyCurrentClaudeModelAndEffortIfPossible(
+                for: session,
+                reason: "pi_thinking_changed"
+            )
+        }
     }
 
     func reasoningEffortOptionsForCurrentSelection() -> [CodexReasoningEffort] {
-        codexCoordinator.reasoningEffortOptions(
+        if selectedAgent.usesPiNativeRuntime {
+            return PiModelRegistry.reasoningEffortOptions(forRaw: selectedModelRaw)
+        }
+        return codexCoordinator.reasoningEffortOptions(
             forModelRaw: selectedModelRaw,
             agentKind: selectedAgent,
             precomputedOptions: cachedCollapsedCodexOptions.isEmpty ? nil : cachedCollapsedCodexOptions
@@ -2948,7 +2964,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             if let activeSession {
                 return activeSession
             }
-            guard selectedAgent == .codexExec,
+            guard selectedAgent == .codexExec || selectedAgent.usesPiNativeRuntime,
                   let tabID = currentTabID
             else {
                 return nil
@@ -2963,16 +2979,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let skillQuery = isExplicitSkillNamespaceQuery
             ? String(query.dropFirst("skill:".count))
             : query
-        let nativeSuggestions = isExplicitSkillNamespaceQuery ? [] : (slashSession.map {
-            codexCoordinator.nativeSlashCommandSuggestions(
-                for: $0,
-                query: query,
-                limit: Self.slashSkillSuggestionLimit
-            )
-        } ?? [])
-        let nativeNames: Set<String> = slashSession?.selectedAgent == .codexExec
-            ? Set(CodexAgentModeCoordinator.NativeSlashCommand.allCases.map { $0.rawValue.lowercased() })
-            : []
+        let nativeSuggestions = isExplicitSkillNamespaceQuery ? [] : await nativeSlashSuggestions(
+            for: slashSession,
+            query: query,
+            limit: Self.slashSkillSuggestionLimit
+        )
+        let nativeNames = Set(nativeSuggestions.map { $0.relativePath.lowercased() })
         await refreshSkillCatalog(force: false)
         let skillSuggestions = skillCatalog.suggestions(prefix: skillQuery, limit: Self.slashSkillSuggestionLimit)
             .prefix(max(0, Self.slashSkillSuggestionLimit - nativeSuggestions.count))
@@ -2983,7 +2995,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 let relativePath = collidesWithNativeCommand ? "skill:\(suggestion.name)" : suggestion.name
                 let displayName = collidesWithNativeCommand ? "/skill:\(suggestion.name)" : "/\(suggestion.name)"
                 let subtitle = collidesWithNativeCommand
-                    ? ["Slash skill — use /skill:\(suggestion.name) to bypass Codex native /\(suggestion.name)", baseSubtitle]
+                    ? ["Slash skill — use /skill:\(suggestion.name) to bypass native /\(suggestion.name)", baseSubtitle]
                     .compactMap(\.self)
                     .joined(separator: " — ")
                     : baseSubtitle
@@ -2995,6 +3007,49 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 )
             }
         return nativeSuggestions + skillSuggestions
+    }
+
+    private func nativeSlashSuggestions(
+        for session: TabSession?,
+        query: String,
+        limit: Int
+    ) async -> [MentionSuggestion] {
+        guard let session else { return [] }
+        if session.selectedAgent == .codexExec {
+            return codexCoordinator.nativeSlashCommandSuggestions(
+                for: session,
+                query: query,
+                limit: limit
+            )
+        }
+        guard session.selectedAgent.usesPiNativeRuntime else { return [] }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let commands: [PiProviderRuntimeBridge.DiscoveredCommand] = if let piController = session.claudeController as? PiNativeSessionController {
+            await piController.discoveredSlashCommands()
+        } else {
+            PiCommandRegistry.resolvedCommands()
+        }
+        return commands
+            .filter { command in
+                normalizedQuery.isEmpty || command.name.lowercased().hasPrefix(normalizedQuery)
+            }
+            .prefix(limit)
+            .map { command in
+                let source = command.source?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let subtitle: String? = if let description = command.description {
+                    description
+                } else if let source, !source.isEmpty {
+                    source
+                } else {
+                    nil
+                }
+                return MentionSuggestion(
+                    displayName: "/\(command.name)",
+                    relativePath: command.name,
+                    kind: .skill,
+                    subtitle: subtitle
+                )
+            }
     }
 
     func effectiveWorkspacePath(for session: TabSession) throws -> String? {
@@ -3188,8 +3243,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     /// coordinator's Claude-shaped launch settings are ignored beyond the
     /// workspace path: pi tool surface comes from `PiAgentToolPreferences`
     /// (launch-time policy, like Claude's environment settings), and the
-    /// RepoPrompt MCP server is injected through the ephemeral `--mcp-config`
-    /// document with an eager lifecycle so routing completes pre-prompt.
+    /// RepoPrompt MCP server is injected through pi's built-in MCP
+    /// (`registerMcpServer` with `exposure: direct`) so routing completes pre-prompt.
     static func makePiNativeController(
         runID: UUID,
         tabID: UUID,
@@ -3210,6 +3265,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 mcpServers: mcpServers,
                 expectedPIDMCPClientName: AgentProviderKind.piMCPClientID,
                 toolProfile: PiAgentToolPreferences.permissionLevel().launchToolProfile,
+                loadsApprovalGate: PiAgentToolPreferences.permissionLevel() == .fullAccess,
                 enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
             ),
             runID: runID
@@ -9874,8 +9930,11 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         _ = refreshMCPPermissionProfileIfNeeded(for: session)
         // Codex normalization clears reasoning effort for every non-Codex provider.
         // Native MCP effort is a separate session pin and must survive configuration, including
-        // explicit overseer lane selections for compatible native agents.
-        if !session.selectedAgent.usesClaudeNativeRuntime {
+        // explicit overseer lane selections for compatible native agents. Pi stores thinking on
+        // the same field and must also keep an explicit pin.
+        if !session.selectedAgent.usesClaudeNativeRuntime,
+           !session.selectedAgent.usesPiNativeRuntime
+        {
             codexCoordinator.normalizeCodexSelectionForSession(
                 session,
                 preservingExplicitEffort: reasoningEffortRaw != nil

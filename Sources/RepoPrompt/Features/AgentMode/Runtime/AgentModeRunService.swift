@@ -162,7 +162,9 @@ final class AgentModeRunService {
         _ command: AgentProviderControlCommand,
         for session: AgentTabSession
     ) -> Bool {
-        if session.selectedAgent == .claudeCode { return true }
+        if session.selectedAgent == .claudeCode || session.selectedAgent.usesPiNativeRuntime {
+            return true
+        }
         return AgentProviderControlCommand.acpSession(
             session,
             advertises: command.kind,
@@ -174,7 +176,10 @@ final class AgentModeRunService {
     /// runtimes whose advertised `compact` is a native command, and only after that support was
     /// recorded on the attempt.
     private static func allowsSelfCompactDispatch(_ session: AgentTabSession) -> Bool {
-        if session.selectedAgent == .codexExec || session.selectedAgent == .claudeCode {
+        if session.selectedAgent == .codexExec
+            || session.selectedAgent == .claudeCode
+            || session.selectedAgent.usesPiNativeRuntime
+        {
             return true
         }
         return AgentProviderControlCommand.acpRuntimeAdvertisesNativeCommands(session.selectedAgent)
@@ -295,8 +300,13 @@ final class AgentModeRunService {
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
-                makeLease: makeLease
+                makeLease: makeLease,
+                autoEffortSelection: autoEffortSelection,
+                providerControlCommand: providerControlCommand,
+                selfCompactDispatchID: selfCompactDispatchID,
+                stopFence: stopFence
             )
+            recordNonCodexStartOutcome(startOutcome, session: session)
             return nil
         }
         if selectedAgent.usesClaudeNativeRuntime {

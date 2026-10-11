@@ -3,10 +3,11 @@ import Foundation
 enum PiAgentToolPreferences {
     /// pi core has no permission prompts, so RPCE shapes the tool surface at
     /// launch instead. `mcpOnly` keeps pi's built-in tools disabled while the
-    /// RepoPrompt MCP tools (via pi-mcp-adapter) stay enabled — RPCE's
+    /// RepoPrompt MCP tools (via built-in MCP) stay enabled — RPCE's
     /// server-side policies remain the single permission authority.
     /// `readOnly` allows pi's read-only built-ins, and `fullAccess` enables
-    /// pi's full built-in tool set (`read`, `bash`, `edit`, `write`).
+    /// pi's full built-in tool set (`read`, `bash`, `edit`, `write`) with the
+    /// RPC approval gate on interactive runs.
     enum PermissionLevel: String, CaseIterable {
         case mcpOnly
         case readOnly
@@ -30,7 +31,7 @@ enum PiAgentToolPreferences {
             case .readOnly:
                 "pi launches with `--tools read,grep,find,ls`. RepoPrompt MCP tools remain available and governed server-side."
             case .fullAccess:
-                "pi launches with its full built-in tool set, so pi's own shell and edit tools run without per-request confirmation. Applies to newly launched pi processes."
+                "pi launches with its full built-in tool set. Interactive runs confirm bash/edit/write through RepoPrompt approval cards."
             }
         }
 
@@ -61,11 +62,46 @@ enum PiAgentToolPreferences {
         }
     }
 
-    static func permissionLevel() -> PermissionLevel {
-        PermissionLevel(rawValue: UserDefaults.standard.string(forKey: "PiAgentPermissionLevel") ?? "") ?? .mcpOnly
+    private static let permissionLevelKey = "PiAgentPermissionLevel"
+
+    static func permissionLevel(
+        defaults: UserDefaults = .standard,
+        secureStore: AgentPermissionSecureStore? = nil
+    ) -> PermissionLevel {
+        if let secureStore = resolvedSecureStore(defaults: defaults, secureStore: secureStore) {
+            let stored = secureStore.piPermissions().permissionLevel()
+            if let legacy = PermissionLevel(rawValue: defaults.string(forKey: permissionLevelKey) ?? ""),
+               stored == .mcpOnly,
+               legacy != .mcpOnly,
+               defaults.object(forKey: permissionLevelKey) != nil
+            {
+                secureStore.setPiPermissionLevel(legacy)
+                return legacy
+            }
+            return stored
+        }
+        return PermissionLevel(rawValue: defaults.string(forKey: permissionLevelKey) ?? "") ?? .mcpOnly
     }
 
-    static func setPermissionLevel(_ level: PermissionLevel) {
-        UserDefaults.standard.set(level.rawValue, forKey: "PiAgentPermissionLevel")
+    static func setPermissionLevel(
+        _ level: PermissionLevel,
+        defaults: UserDefaults = .standard,
+        secureStore: AgentPermissionSecureStore? = nil
+    ) {
+        if let secureStore = resolvedSecureStore(defaults: defaults, secureStore: secureStore) {
+            secureStore.setPiPermissionLevel(level)
+            return
+        }
+        defaults.set(level.rawValue, forKey: permissionLevelKey)
+    }
+
+    private static func resolvedSecureStore(
+        defaults: UserDefaults,
+        secureStore: AgentPermissionSecureStore?
+    ) -> AgentPermissionSecureStore? {
+        if let secureStore {
+            return secureStore
+        }
+        return defaults === UserDefaults.standard ? AgentPermissionSecureStore.shared : nil
     }
 }

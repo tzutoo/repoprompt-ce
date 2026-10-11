@@ -8,7 +8,10 @@ final class PiLaunchOptionsTests: XCTestCase {
             mode: .rpc,
             session: .ephemeral,
             sessionDisplayName: "CE agent run",
-            mcpConfigPath: "/tmp/rpce-pi-mcp.json"
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: "/tmp/rpce-pi-inject.ts"
+            )
         )
         XCTAssertEqual(
             options.arguments(),
@@ -16,8 +19,8 @@ final class PiLaunchOptionsTests: XCTestCase {
                 "--mode", "rpc",
                 "--no-session",
                 "--name", "CE agent run",
-                "--no-extensions", "-e", "npm:pi-mcp-adapter@2.32.1",
-                "--mcp-config", "/tmp/rpce-pi-mcp.json",
+                "--no-extensions", "-e", "builtin:mcp",
+                "-e", "/tmp/rpce-pi-inject.ts",
                 "-na",
                 "-nc"
             ]
@@ -32,7 +35,10 @@ final class PiLaunchOptionsTests: XCTestCase {
         let options = PiLaunchOptions(
             mode: .jsonEventStream(initialPrompt: "Summarize this workspace"),
             toolProfile: .mcpOnly,
-            mcpConfigPath: "/tmp/rpce-pi-mcp.json"
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: "/tmp/rpce-pi-inject.ts"
+            )
         )
         XCTAssertEqual(
             options.arguments(),
@@ -40,8 +46,8 @@ final class PiLaunchOptionsTests: XCTestCase {
                 "--mode", "json",
                 "--no-session",
                 "--no-builtin-tools",
-                "--no-extensions", "-e", "npm:pi-mcp-adapter@2.32.1",
-                "--mcp-config", "/tmp/rpce-pi-mcp.json",
+                "--no-extensions", "-e", "builtin:mcp",
+                "-e", "/tmp/rpce-pi-inject.ts",
                 "-na",
                 "-nc",
                 "--", "Summarize this workspace"
@@ -74,7 +80,11 @@ final class PiLaunchOptionsTests: XCTestCase {
         let options = PiLaunchOptions(
             mode: .rpc,
             model: PiModelSelection(provider: "anthropic", modelPattern: "claude-sonnet-4-20250514", thinkingLevel: "high"),
-            session: .resume("01a06f3a")
+            session: .resume("01a06f3a"),
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: nil
+            )
         )
         XCTAssertEqual(
             options.arguments(),
@@ -84,7 +94,7 @@ final class PiLaunchOptionsTests: XCTestCase {
                 "--model", "claude-sonnet-4-20250514",
                 "--thinking", "high",
                 "--session", "01a06f3a",
-                "--no-extensions", "-e", "npm:pi-mcp-adapter@2.32.1",
+                "--no-extensions", "-e", "builtin:mcp",
                 "-na",
                 "-nc"
             ]
@@ -95,15 +105,26 @@ final class PiLaunchOptionsTests: XCTestCase {
         let directoryOptions = PiLaunchOptions(
             mode: .rpc,
             session: .directory("/tmp/rpce-pi-sessions"),
-            toolProfile: .allowlist(["read", "grep", "mcp"])
+            toolProfile: .allowlist(["read", "grep"]),
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: nil
+            )
         )
         XCTAssertTrue(directoryOptions.arguments().contains("--session-dir"))
         XCTAssertEqual(
             directoryOptions.arguments().drop(while: { $0 != "--tools" }).prefix(2).dropFirst().first,
-            "read,grep,mcp"
+            "read,grep"
         )
 
-        let persistent = PiLaunchOptions(mode: .rpc, session: .persistent)
+        let persistent = PiLaunchOptions(
+            mode: .rpc,
+            session: .persistent,
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: nil
+            )
+        )
         XCTAssertFalse(persistent.arguments().contains("--no-session"))
     }
 
@@ -117,7 +138,13 @@ final class PiLaunchOptionsTests: XCTestCase {
     }
 
     func testEnvironmentPreservesBaseValues() {
-        let options = PiLaunchOptions(mode: .rpc)
+        let options = PiLaunchOptions(
+            mode: .rpc,
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: "/tmp/missing-pi-extensions",
+                injectorPath: nil
+            )
+        )
         let env = options.environment(over: ["PATH": "/usr/bin"])
         XCTAssertEqual(env["PATH"], "/usr/bin")
         XCTAssertEqual(env["PI_OFFLINE"], "1")
@@ -152,19 +179,20 @@ final class PiLaunchOptionsTests: XCTestCase {
         )
     }
 
-    func testPinnedAdapterWithUserGlobalExtensionsKeepsNoExtensionsAndPinnedAdapter() throws {
+    func testBuiltinMCPWithUserGlobalExtensionsKeepsNoExtensionsAndBuiltinMCP() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("rpce-pi-ext-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let extensionPath = root.appendingPathComponent("appmosa-sync.ts")
         try "export {}".write(to: extensionPath, atomically: true, encoding: .utf8)
+        let injectorPath = root.appendingPathComponent("rpce-inject.ts").path
 
         let options = PiLaunchOptions(
             mode: .rpc,
-            extensionPolicy: .pinnedAdapterWithUserGlobalExtensions(
-                version: "2.32.1",
-                directory: root.path
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: root.path,
+                injectorPath: injectorPath
             )
         )
         XCTAssertEqual(
@@ -173,8 +201,9 @@ final class PiLaunchOptionsTests: XCTestCase {
                 "--mode", "rpc",
                 "--no-session",
                 "--no-extensions",
+                "-e", "builtin:mcp",
                 "-e", extensionPath.standardizedFileURL.path,
-                "-e", "npm:pi-mcp-adapter@2.32.1",
+                "-e", injectorPath,
                 "-na",
                 "-nc"
             ]
@@ -182,9 +211,9 @@ final class PiLaunchOptionsTests: XCTestCase {
 
         let missing = PiLaunchOptions(
             mode: .rpc,
-            extensionPolicy: .pinnedAdapterWithUserGlobalExtensions(
-                version: "2.32.1",
-                directory: root.appendingPathComponent("missing").path
+            extensionPolicy: .builtinMCPWithUserGlobalExtensions(
+                directory: root.appendingPathComponent("missing").path,
+                injectorPath: nil
             )
         )
         XCTAssertEqual(
@@ -193,7 +222,7 @@ final class PiLaunchOptionsTests: XCTestCase {
                 "--mode", "rpc",
                 "--no-session",
                 "--no-extensions",
-                "-e", "npm:pi-mcp-adapter@2.32.1",
+                "-e", "builtin:mcp",
                 "-na",
                 "-nc"
             ]

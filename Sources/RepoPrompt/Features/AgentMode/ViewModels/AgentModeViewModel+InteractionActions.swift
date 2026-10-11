@@ -27,6 +27,8 @@ extension AgentModeViewModel {
             codexCoordinator.submitApprovalDecision(session: session, decision: decision)
         case .claudeControl:
             claudeCoordinator.submitApprovalDecision(session: session, decision: decision)
+        case .piExtensionUI:
+            piCoordinator.submitApprovalDecision(session: session, decision: decision)
         case let .acp(requestID):
             session.pendingApproval = nil
             if session.runState == .waitingForApproval {

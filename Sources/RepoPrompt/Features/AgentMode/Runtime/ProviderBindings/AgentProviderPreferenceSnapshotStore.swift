@@ -194,7 +194,7 @@ final class AgentProviderPreferenceSnapshotStore {
         case let .grokBuild(level):
             GrokBuildAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         case let .pi(level):
-            PiAgentToolPreferences.setPermissionLevel(level)
+            PiAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         case let .devin(level):
             DevinAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         }

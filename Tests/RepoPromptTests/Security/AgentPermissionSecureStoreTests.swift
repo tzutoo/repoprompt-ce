@@ -46,6 +46,46 @@ final class AgentPermissionSecureStoreTests: XCTestCase {
         XCTAssertNil(store.diagnostic(for: .devin))
     }
 
+    func testMissingPiDocumentCreatesAndSavesMCPOnlyDefault() throws {
+        let secureStrings = FakeSecurePlainStringStore()
+        let key = AgentPermissionSecureDomain.pi.storageKey
+        let store = makeStore(secureStrings: secureStrings)
+
+        XCTAssertEqual(store.piPermissions().permissionLevel(), .mcpOnly)
+
+        let saved = try decode(SecurePiPermissionDocument.self, from: secureStrings.plainValues[key])
+        XCTAssertEqual(saved.permissionLevel(), .mcpOnly)
+        XCTAssertNil(store.diagnostic(for: .pi))
+    }
+
+    func testMalformedPiDocumentFailsClosedToMCPOnly() {
+        let secureStrings = FakeSecurePlainStringStore()
+        secureStrings.plainValues[AgentPermissionSecureDomain.pi.storageKey] = "{"
+        let store = makeStore(secureStrings: secureStrings)
+
+        XCTAssertEqual(store.piPermissions().permissionLevel(), .mcpOnly)
+        XCTAssertEqual(store.diagnostic(for: .pi)?.kind, .decodeFailed)
+    }
+
+    func testPiPermissionMigratesFromUserDefaultsWhenKeychainIsMCPOnly() throws {
+        let suiteName = "PiPermissionMigrate.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("fullAccess", forKey: "PiAgentPermissionLevel")
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let secureStrings = FakeSecurePlainStringStore()
+        let store = makeStore(secureStrings: secureStrings)
+
+        XCTAssertEqual(
+            PiAgentToolPreferences.permissionLevel(defaults: defaults, secureStore: store),
+            .fullAccess
+        )
+        XCTAssertEqual(store.piPermissions().permissionLevel(), .fullAccess)
+        XCTAssertEqual(defaults.string(forKey: "PiAgentPermissionLevel"), "fullAccess")
+    }
+
     func testMalformedDevinDocumentFailsClosedToNormal() {
         let secureStrings = FakeSecurePlainStringStore()
         secureStrings.plainValues[AgentPermissionSecureDomain.devin.storageKey] = "{"

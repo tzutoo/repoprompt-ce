@@ -5,13 +5,13 @@ import RepoPromptProcess
 /// Headless pi provider for Context Builder discovery and other one-shot runs.
 ///
 /// Launches `pi --mode json` with the same deterministic MCP injection profile as the
-/// interactive controller: pinned pi-mcp-adapter, ephemeral `--mcp-config`, mcp-only
-/// tools by default, and expected-PID registration against `pi-mcp-RepoPromptCE`.
+/// interactive controller: built-in MCP (`builtin:mcp` + `registerMcpServer` injector),
+/// mcp-only tools by default, and expected-PID registration against `pi`.
 final class PiExecAgentProvider: HeadlessAgentProvider {
     private let config: PiExecAgentConfig
     private let toolTracking = AgentToolTrackingController()
     private var streamTask: Task<Void, Never>?
-    private var ephemeralMCPConfigURL: URL?
+    private var ephemeralMCPInjectorURL: URL?
     private var runner: CLIProcessRunner?
 
     private var enableDebugLogging: Bool {
@@ -73,8 +73,8 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
 
         let environment = await launchEnvironment
         let executablePath = try resolveExecutable(environment: environment)
-        let mcpConfigPath = try writeEphemeralMCPConfiguration(runID: actualRunID)
-        defer { removeEphemeralMCPConfiguration() }
+        let injectorPath = try writeEphemeralMCPInjector(runID: actualRunID)
+        defer { removeEphemeralMCPInjector() }
 
         let combinedPrompt = combinedPrompt(from: message)
         let launchOptions = PiProviderRuntimeBridge.LaunchOptions(
@@ -83,9 +83,8 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
             session: .ephemeral,
             toolProfile: config.toolProfile,
             extensionPolicy: PiProviderRuntimeBridge.managedExtensionPolicy(
-                adapterVersion: config.pinnedAdapterVersion
+                injectorPath: injectorPath
             ),
-            mcpConfigPath: mcpConfigPath,
             suppressProjectResources: true,
             suppressContextFiles: true,
             quietStartupNetwork: true
@@ -225,7 +224,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         await toolTracking.stopTracking()
         await runner?.cancelAll()
         runner = nil
-        removeEphemeralMCPConfiguration()
+        removeEphemeralMCPInjector()
     }
 
     // MARK: - Launch helpers
@@ -286,31 +285,37 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         return resolved
     }
 
-    private func writeEphemeralMCPConfiguration(runID: UUID) throws -> String {
+    private func writeEphemeralMCPInjector(runID: UUID) throws -> String {
         let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt
-        let document = PiProviderRuntimeBridge.MCPAdapterConfigurationDocument(
-            servers: [
-                serverConfiguration.name: PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(
+        let source: String
+        do {
+            source = try PiProviderRuntimeBridge.MCPInjector.extensionSource(
+                serverName: serverConfiguration.name,
+                configuration: PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(
                     serverConfiguration
                 )
-            ]
-        )
+            )
+        } catch {
+            throw AIProviderError.invalidConfiguration(
+                detail: "Failed writing the ephemeral pi MCP injector: \(error.localizedDescription)"
+            )
+        }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rpce-pi-headless-mcp-\(runID.uuidString).json")
+            .appendingPathComponent("rpce-pi-headless-mcp-\(runID.uuidString).ts")
         do {
-            try document.encodedDocument().write(to: url, options: .atomic)
-            ephemeralMCPConfigURL = url
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            ephemeralMCPInjectorURL = url
             return url.path
         } catch {
             throw AIProviderError.invalidConfiguration(
-                detail: "Failed writing the ephemeral pi MCP configuration: \(error.localizedDescription)"
+                detail: "Failed writing the ephemeral pi MCP injector: \(error.localizedDescription)"
             )
         }
     }
 
-    private func removeEphemeralMCPConfiguration() {
-        guard let url = ephemeralMCPConfigURL else { return }
-        ephemeralMCPConfigURL = nil
+    private func removeEphemeralMCPInjector() {
+        guard let url = ephemeralMCPInjectorURL else { return }
+        ephemeralMCPInjectorURL = nil
         try? FileManager.default.removeItem(at: url)
     }
 

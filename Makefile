@@ -1,4 +1,4 @@
-.PHONY: help doctor setup install-format-tools format-tools-status format format-check lint install-debug-cli uninstall-debug-cli debug-cli-status codex-acquire codex-status codex-update-candidate resolve build run test guardrails codex-schema-check conductor-selftest new-module ci-app-test-runner-selftest release-selftest release-sync-cli-version release-preflight release-artifact install-local-production xcode xcode-open xcode-generate xcode-check xcode-validate xcode-clean dev-status dev-build dev-swift-build dev-run dev-launch-existing dev-codex-schema-check dev-test dev-provider-test dev-smoke dev-smoke-launch dev-format dev-format-check dev-lint dev-format-tools-status dev-check-format-tools dev-install-format-tools dev-release-preflight dev-release-artifact dev-install-local-production dev-stop-app dev-daemon-stop clean
+.PHONY: help doctor setup install-format-tools format-tools-status format format-check lint install-debug-cli uninstall-debug-cli debug-cli-status codex-acquire codex-status codex-update-candidate resolve build run test guardrails codex-schema-check pi-schema-check conductor-selftest new-module ci-app-test-runner-selftest release-selftest release-sync-cli-version release-preflight release-artifact install-local-production xcode xcode-open xcode-generate xcode-check xcode-validate xcode-clean dev-status dev-build dev-swift-build dev-run dev-launch-existing dev-codex-schema-check dev-pi-schema-check dev-test dev-provider-test dev-smoke dev-smoke-launch dev-format dev-format-check dev-lint dev-format-tools-status dev-check-format-tools dev-install-format-tools dev-release-preflight dev-release-artifact dev-install-local-production dev-stop-app dev-daemon-stop clean
 
 PRODUCT ?= all
 CODEX_ARCH ?= all
@@ -13,6 +13,7 @@ help:
 	@printf '  %-30s %s\n' 'test' 'Run the Swift test suite'
 	@printf '  %-30s %s\n' 'guardrails' 'Run source layout and repository guardrails'
 	@printf '  %-30s %s\n' 'codex-schema-check' 'Validate bounded app-server assumptions against generated Codex schemas'
+	@printf '  %-30s %s\n' 'pi-schema-check' 'Validate bounded pi RPC/MCP injector contract against the local pi CLI'
 	@printf '  %-30s %s\n' 'clean' 'Remove .build'
 	@printf '\n%s\n' 'Coordinated developer daemon targets:'
 	@printf '  %-30s %s\n' 'dev-status' 'Show conductor daemon status'
@@ -21,6 +22,7 @@ help:
 	@printf '  %-30s %s\n' 'dev-run' 'Coordinated debug app build and launch'
 	@printf '  %-30s %s\n' 'dev-launch-existing' 'Launch existing coordinated debug app without building'
 	@printf '  %-30s %s\n' 'dev-codex-schema-check' 'Coordinated Codex app-server schema validation'
+	@printf '  %-30s %s\n' 'dev-pi-schema-check' 'Coordinated pi RPC contract check'
 	@printf '  %-30s %s\n' 'dev-test' 'Coordinated test run; set MODULE=Tests target or FILTER=suite'
 	@printf '  %-30s %s\n' 'dev-provider-test' 'Run provider package tests; override with FILTER=name'
 	@printf '  %-30s %s\n' 'dev-smoke' 'Run non-disruptive live debug app smoke checks'
@@ -134,6 +136,9 @@ guardrails:
 codex-schema-check:
 	python3 Scripts/check_codex_app_server_schema.py
 
+pi-schema-check:
+	python3 Scripts/check_pi_rpc_contract.py
+
 new-module:
 	python3 Scripts/modularization_new_module.py --name "$(NAME)" --family "$(FAMILY)"
 
@@ -215,6 +220,9 @@ dev-launch-existing:
 
 dev-codex-schema-check:
 	./conductor codex-schema-check
+
+dev-pi-schema-check:
+	./conductor pi-schema-check
 
 dev-test:
 	python3 Scripts/modularization_dev_test.py$(if $(MODULE), --module '$(MODULE)')$(if $(FILTER), --filter '$(FILTER)')$(if $(TEST_PRODUCT), --test-product '$(TEST_PRODUCT)')

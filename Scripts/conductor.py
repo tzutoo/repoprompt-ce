@@ -250,6 +250,7 @@ IMPLEMENTED_OPERATIONS = {
     "doctor",
     "guardrails",
     "codex-schema-check",
+    "pi-schema-check",
     "format",
     "format-check",
     "lint",
@@ -297,6 +298,7 @@ Operation commands:
   ./conductor doctor
   ./conductor guardrails
   ./conductor codex-schema-check      # validate bounded RPCE assumptions against generated Codex schemas
+  ./conductor pi-schema-check         # validate bounded pi RPC/MCP injector contract
   ./conductor format                 # mutates first-party Swift files
   ./conductor format-check           # non-mutating SwiftFormat check
   ./conductor lint                   # non-mutating format-check + SwiftLint strict
@@ -320,7 +322,7 @@ Operation commands:
   ./conductor app stop                                 # latest interactive stop intent
   ./conductor app launch-existing [-- <app args...>]   # launch existing DebugApps bundle without building
   ./conductor app relaunch [-- <app args...>]          # latest interactive relaunch intent
-  ./conductor smoke [--launch | --packaged-app <path>] [--artifact-manifest <path>] [--workspace <name>] [--window-id <id>] [--agent-run] [--execution-location-ui]
+  ./conductor smoke [--launch | --packaged-app <path>] [--artifact-manifest <path>] [--workspace <name>] [--window-id <id>] [--agent-run] [--pi-agent-run] [--execution-location-ui]
     --execution-location-ui uses REPOPROMPT_EXECUTION_LOCATION_UI_SMOKE_WAIT (default 3s) and _CYCLES (default 3); Accessibility permission is required.
     (without --launch/--packaged-app, requires the CE debug app to already be running and CLI installed)
   ./conductor diagnostics agent-mode-on [--log-file <path>]
@@ -3682,6 +3684,8 @@ class OperationRegistry:
             return [script("guardrails.sh")], lanes, cwd, env, effective_timeout
         if operation == "codex-schema-check":
             return [sys.executable, script("check_codex_app_server_schema.py")], lanes, cwd, env, effective_timeout
+        if operation == "pi-schema-check":
+            return [sys.executable, script("check_pi_rpc_contract.py")], lanes, cwd, env, effective_timeout
         if operation == "format":
             return [script("swift_style.sh"), "format"], ["style", "build"], cwd, env, effective_timeout
         if operation == "format-check":
@@ -3848,6 +3852,7 @@ class OperationRegistry:
             "doctor",
             "guardrails",
             "codex-schema-check",
+            "pi-schema-check",
             "debug-cli-status",
             "format-tools-status",
             "check-format-tools",
@@ -3859,7 +3864,7 @@ class OperationRegistry:
             return RELEASE_ARTIFACT_TIMEOUT_SECONDS
         if operation in {"package", "release"} and (args.get("config") == "release" or args.get("subcommand") in {"package", "local-install"}):
             return RELEASE_TIMEOUT_SECONDS
-        if operation == "smoke" and args.get("agentRun"):
+        if operation == "smoke" and (args.get("agentRun") or args.get("piAgentRun")):
             return MEDIUM_TIMEOUT_SECONDS
         if operation == "diagnostics":
             return SHORT_TIMEOUT_SECONDS
@@ -8223,42 +8228,81 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
             return code
 
     if args.get("agentRun"):
-        agent_timeout = float(args.get("agentTimeout") or SMOKE_AGENT_WAIT_SECONDS)
-        start_payload = {
-            "op": "start",
-            "model_id": "explore",
-            "session_name": "CE debug CLI smoke",
-            "message": "Reply exactly with CE_AGENT_RUN_SMOKE_OK and stop. Do not edit files.",
-            "detach": True,
-        }
-        code, stdout, _stderr = run_operation_command(
-            "agent_run start",
-            routed_structured_cli_argv(cli, window_id, "agent_run", start_payload),
-            repo_root,
+        code = run_agent_run_smoke(
+            cli=cli,
+            window_id=window_id,
+            repo_root=repo_root,
             env=env,
+            agent_timeout=float(args.get("agentTimeout") or SMOKE_AGENT_WAIT_SECONDS),
+            model_id="explore",
+            session_name="CE debug CLI smoke",
+            message="Reply exactly with CE_AGENT_RUN_SMOKE_OK and stop. Do not edit files.",
         )
         if code != 0:
             return code
-        session_id = None
-        try:
-            session_id = find_session_id(json.loads(stdout))
-        except json.JSONDecodeError:
-            session_id = find_session_id_in_text(stdout)
-        if not session_id:
-            print("ERROR: Could not parse session_id from agent_run start output.", flush=True)
-            print("Manual wait hint: rpce-cli-debug -w 1 -c agent_run -j '{\"op\":\"wait\",\"session_id\":\"<session_id>\",\"timeout\":120}'", flush=True)
-            return 1
-        wait_payload = {"op": "wait", "session_id": session_id, "timeout": agent_timeout}
-        code, _stdout, _stderr = run_operation_command(
-            "agent_run wait",
-            routed_structured_cli_argv(cli, window_id, "agent_run", wait_payload),
-            repo_root,
+    if args.get("piAgentRun"):
+        code = run_agent_run_smoke(
+            cli=cli,
+            window_id=window_id,
+            repo_root=repo_root,
             env=env,
-            timeout=agent_timeout + 10.0,
+            agent_timeout=float(args.get("agentTimeout") or SMOKE_AGENT_WAIT_SECONDS),
+            model_id="piAgent:default",
+            session_name="CE pi CLI smoke",
+            message="Reply exactly with CE_PI_AGENT_RUN_SMOKE_OK and stop. Do not edit files.",
         )
         if code != 0:
             return code
     return 0
+
+
+def run_agent_run_smoke(
+    *,
+    cli: str,
+    window_id: int,
+    repo_root: Path,
+    env: Dict[str, str],
+    agent_timeout: float,
+    model_id: str,
+    session_name: str,
+    message: str,
+) -> int:
+    start_payload = {
+        "op": "start",
+        "model_id": model_id,
+        "session_name": session_name,
+        "message": message,
+        "detach": True,
+    }
+    code, stdout, _stderr = run_operation_command(
+        f"agent_run start ({model_id})",
+        routed_structured_cli_argv(cli, window_id, "agent_run", start_payload),
+        repo_root,
+        env=env,
+    )
+    if code != 0:
+        return code
+    session_id = None
+    try:
+        session_id = find_session_id(json.loads(stdout))
+    except json.JSONDecodeError:
+        session_id = find_session_id_in_text(stdout)
+    if not session_id:
+        print("ERROR: Could not parse session_id from agent_run start output.", flush=True)
+        print(
+            "Manual wait hint: rpce-cli-debug -w 1 -c agent_run -j '{\"op\":\"wait\",\"session_id\":\"<session_id>\",\"timeout\":120}'",
+            flush=True,
+        )
+        return 1
+    wait_payload = {"op": "wait", "session_id": session_id, "timeout": agent_timeout}
+    code, _stdout, _stderr = run_operation_command(
+        f"agent_run wait ({model_id})",
+        routed_structured_cli_argv(cli, window_id, "agent_run", wait_payload),
+        repo_root,
+        env=env,
+        timeout=agent_timeout + 10.0,
+    )
+    return code
 
 
 def directory_size_bytes(path: Path) -> Optional[int]:
@@ -8771,6 +8815,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
         "doctor",
         "guardrails",
         "codex-schema-check",
+        "pi-schema-check",
         "build",
         "ci-build-tests",
         "install-debug-cli",
@@ -8867,6 +8912,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
         parser.add_argument("--workspace", default="repoprompt-ce")
         parser.add_argument("--window-id", type=int, default=1)
         parser.add_argument("--agent-run", action="store_true")
+        parser.add_argument("--pi-agent-run", action="store_true")
         parser.add_argument("--agent-timeout", type=float, default=SMOKE_AGENT_WAIT_SECONDS)
         parser.add_argument("--execution-location-ui", action="store_true")
         ns = parser.parse_args(rest)
@@ -8876,6 +8922,8 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
             raise ConductorError("--artifact-manifest requires --packaged-app")
         if ns.packaged_app and ns.agent_run:
             raise ConductorError("--agent-run is not supported with --packaged-app")
+        if ns.packaged_app and ns.pi_agent_run:
+            raise ConductorError("--pi-agent-run is not supported with --packaged-app")
         if ns.packaged_app and ns.execution_location_ui:
             raise ConductorError("--execution-location-ui is not supported with --packaged-app")
         args.update(
@@ -8886,6 +8934,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
                 "workspace": ns.workspace,
                 "windowId": ns.window_id,
                 "agentRun": ns.agent_run,
+                "piAgentRun": ns.pi_agent_run,
                 "agentTimeout": ns.agent_timeout,
                 "executionLocationUI": ns.execution_location_ui,
             }

@@ -19,6 +19,8 @@ enum PiModelRegistry {
         let reasoning: Bool
         let contextWindow: Int
         let inputTypes: [String]
+        /// pi `thinkingLevelMap` effective levels (`off`…`max`) in canonical order.
+        let thinkingLevels: [String]
 
         init(
             id: String,
@@ -26,7 +28,8 @@ enum PiModelRegistry {
             provider: String,
             reasoning: Bool,
             contextWindow: Int,
-            inputTypes: [String] = ["text"]
+            inputTypes: [String] = ["text"],
+            thinkingLevels: [String] = []
         ) {
             self.id = id
             self.name = name
@@ -34,6 +37,7 @@ enum PiModelRegistry {
             self.reasoning = reasoning
             self.contextWindow = contextWindow
             self.inputTypes = inputTypes
+            self.thinkingLevels = thinkingLevels
         }
 
         init(from decoder: Decoder) throws {
@@ -44,6 +48,7 @@ enum PiModelRegistry {
             reasoning = try container.decode(Bool.self, forKey: .reasoning)
             contextWindow = try container.decode(Int.self, forKey: .contextWindow)
             inputTypes = try container.decodeIfPresent([String].self, forKey: .inputTypes) ?? ["text"]
+            thinkingLevels = try container.decodeIfPresent([String].self, forKey: .thinkingLevels) ?? []
         }
 
         /// Stable picker value. Prefix with `provider/` so later `set_model` keeps
@@ -67,6 +72,52 @@ enum PiModelRegistry {
     @discardableResult
     static func update(records: [ModelRecord]) -> Bool {
         store.update(records: records)
+    }
+
+    /// Merges `incoming` into the live snapshot without dropping other models.
+    @discardableResult
+    static func upsert(records incoming: [ModelRecord]) -> Bool {
+        guard !incoming.isEmpty else { return false }
+        var merged = resolvedRecords()
+        for record in incoming {
+            if let index = merged.firstIndex(where: {
+                $0.catalogRawValue.caseInsensitiveCompare(record.catalogRawValue) == .orderedSame
+            }) {
+                merged[index] = record
+            } else {
+                merged.append(record)
+            }
+        }
+        return update(records: merged)
+    }
+
+    @discardableResult
+    static func updateThinkingLevels(forRaw rawModel: String, thinkingLevels: [String]) -> Bool {
+        guard let existing = record(matchingRaw: rawModel) else { return false }
+        let updated = ModelRecord(
+            id: existing.id,
+            name: existing.name,
+            provider: existing.provider,
+            reasoning: existing.reasoning || thinkingLevels.contains { $0 != "off" },
+            contextWindow: existing.contextWindow,
+            inputTypes: existing.inputTypes,
+            thinkingLevels: thinkingLevels
+        )
+        return upsert(records: [updated])
+    }
+
+    static func records(from descriptors: [PiProviderRuntimeBridge.ModelDescriptor]) -> [ModelRecord] {
+        descriptors.map { model in
+            ModelRecord(
+                id: model.id,
+                name: model.name,
+                provider: model.provider,
+                reasoning: model.reasoning,
+                contextWindow: model.contextWindow,
+                inputTypes: model.inputTypes,
+                thinkingLevels: model.effectiveThinkingLevels().map(\.rawValue)
+            )
+        }
     }
 
     /// Discovered records, Default placeholder excluded.
@@ -96,6 +147,88 @@ enum PiModelRegistry {
         }
     }
 
+    /// Thinking levels advertised for the selected model, in canonical pi order.
+    /// Default / unknown models expose the standard `off`…`high` set so the picker
+    /// is usable before a connect snapshot arrives.
+    static func thinkingLevels(forRaw rawModel: String) -> [PiProviderRuntimeBridge.ThinkingLevel] {
+        let normalized = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty || normalized == AgentModel.defaultModel.rawValue {
+            return Self.defaultThinkingLevels
+        }
+        guard let record = record(matchingRaw: normalized) else {
+            return Self.defaultThinkingLevels
+        }
+        if !record.reasoning {
+            return [.off]
+        }
+        let decoded = record.thinkingLevels.compactMap(PiProviderRuntimeBridge.ThinkingLevel.init(rawValue:))
+        return decoded.isEmpty ? Self.defaultThinkingLevels : decoded
+    }
+
+    /// Codex-shaped effort options for the Agent Mode chip. pi `off` maps to
+    /// `CodexReasoningEffort.none`; `ultra` is never advertised.
+    static func reasoningEffortOptions(forRaw rawModel: String) -> [CodexReasoningEffort] {
+        thinkingLevels(forRaw: rawModel).map(codexEffort(for:))
+    }
+
+    static func displayName(forThinkingLevelRaw raw: String?) -> String {
+        let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if normalized.isEmpty {
+            return CodexReasoningEffort.none.displayName
+        }
+        if let effort = CodexReasoningEffort.parse(normalized == "off" ? "none" : normalized) {
+            return effort.displayName
+        }
+        return raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? CodexReasoningEffort.none.displayName
+    }
+
+    static func piThinkingLevelRaw(fromCodexEffort effort: CodexReasoningEffort?) -> String {
+        guard let effort else { return "off" }
+        switch effort {
+        case .none:
+            return "off"
+        case .minimal:
+            return "minimal"
+        case .low:
+            return "low"
+        case .medium:
+            return "medium"
+        case .high:
+            return "high"
+        case .xhigh:
+            return "xhigh"
+        case .max, .ultra:
+            return "max"
+        }
+    }
+
+    static func nativeEffortLevel(fromThinkingLevelRaw raw: String?) -> NativeAgentRuntimeEffortLevel? {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "low": .low
+        case "medium": .medium
+        case "high": .high
+        case "xhigh", "x-high": .xhigh
+        case "max": .max
+        default: nil
+        }
+    }
+
+    private static let defaultThinkingLevels: [PiProviderRuntimeBridge.ThinkingLevel] = [
+        .off, .minimal, .low, .medium, .high
+    ]
+
+    private static func codexEffort(for level: PiProviderRuntimeBridge.ThinkingLevel) -> CodexReasoningEffort {
+        switch level {
+        case .off: CodexReasoningEffort.none
+        case .minimal: .minimal
+        case .low: .low
+        case .medium: .medium
+        case .high: .high
+        case .xhigh: .xhigh
+        case .max: .max
+        }
+    }
+
     /// Whether the selected model advertises image input. Unknown / Default
     /// selections are treated as image-capable so a first-run connect snapshot
     /// that omitted `input` does not block composer attachments.
@@ -118,20 +251,26 @@ enum PiModelRegistry {
     static func resolvedOptions() -> [AgentModelOption]? {
         let records = resolvedRecords()
         guard !records.isEmpty else { return nil }
+        let fallbackEfforts = reasoningEffortOptions(forRaw: AgentModel.defaultModel.rawValue)
         let fallback = AgentModelOption(
             rawValue: AgentModel.defaultModel.rawValue,
             displayName: AgentModel.defaultModel.displayName,
             description: AgentModel.defaultModel.description,
             isPlaceholderDefault: true,
-            isProviderDefault: false
+            isProviderDefault: false,
+            supportedReasoningEfforts: fallbackEfforts,
+            defaultReasoningEffort: fallbackEfforts.first
         )
         let discovered = records.map { record in
-            AgentModelOption(
+            let efforts = reasoningEffortOptions(forRaw: record.catalogRawValue)
+            return AgentModelOption(
                 rawValue: record.catalogRawValue,
                 displayName: record.catalogDisplayName,
                 description: record.provider.isEmpty ? nil : record.provider,
                 isPlaceholderDefault: false,
-                isProviderDefault: false
+                isProviderDefault: false,
+                supportedReasoningEfforts: efforts,
+                defaultReasoningEffort: efforts.first
             )
         }
         return [fallback] + discovered

@@ -56,8 +56,12 @@ enum MCPClientIdentity {
         if normalized == "grok-shell" || normalized.hasPrefix("grok-shell-") {
             return "grok-shell"
         }
-        // pi-mcp-adapter presents `pi-mcp-<server name>` (e.g. `pi-mcp-RepoPromptCE`).
-        // Same literal-prefix family treatment as grok-shell; `pi-mcpx` must not match.
+        // pi's built-in MCP client presents `pi` (runtime.js `new McpClient({ name: "pi" })`).
+        // Exact match only: `pi-mcp` is the retired adapter family and must not collapse here.
+        if normalized == "pi" {
+            return "pi"
+        }
+        // Retired adapter identity, kept so leftover always-allow entries still match.
         if normalized == "pi-mcp" || normalized.hasPrefix("pi-mcp-") {
             return "pi-mcp"
         }

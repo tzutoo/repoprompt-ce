@@ -937,6 +937,7 @@ enum AgentApprovalRequestID: Hashable {
     case codex(CodexAppServerRequestID)
     case claudeControl(String)
     case acp(String)
+    case piExtensionUI(String)
 
     var displayValue: String {
         switch self {
@@ -945,6 +946,8 @@ enum AgentApprovalRequestID: Hashable {
         case let .claudeControl(id):
             id
         case let .acp(id):
+            id
+        case let .piExtensionUI(id):
             id
         }
     }

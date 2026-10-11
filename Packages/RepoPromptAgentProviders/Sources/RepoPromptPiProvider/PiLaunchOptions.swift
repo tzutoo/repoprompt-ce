@@ -53,8 +53,8 @@ public enum PiToolProfile: Equatable, Sendable {
     case standard
     /// `--tools read,grep,find,ls`: read-only built-ins.
     case readOnly
-    /// `--no-builtin-tools`: built-ins disabled while extension tools (RepoPrompt MCP
-    /// tools via pi-mcp-adapter) stay enabled — the MCP-only restricted profile.
+    /// `--no-builtin-tools`: built-ins disabled while extension/MCP tools (RepoPrompt
+    /// tools via built-in MCP) stay enabled — the MCP-only restricted profile.
     case mcpOnly
     /// `--tools <list>`: explicit allowlist across built-in, extension, and custom tools.
     case allowlist([String])
@@ -102,57 +102,68 @@ public enum PiUserGlobalExtensionDiscovery: Sendable {
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             if isDirectory {
                 let index = url.appendingPathComponent("index.ts")
-                if fileManager.isReadableFile(atPath: index.path) {
+                if fileManager.isReadableFile(atPath: index.path),
+                   !Self.looksLikeMCPAdapter(url)
+                {
                     paths.append(index.standardizedFileURL.path)
                 }
-            } else if url.pathExtension == "ts" {
+            } else if url.pathExtension == "ts", !Self.looksLikeMCPAdapter(url) {
                 paths.append(url.standardizedFileURL.path)
             }
         }
         return paths
     }
+
+    /// Skip leftover adapter sources so a user-global copy cannot replace `builtin:mcp`.
+    private static func looksLikeMCPAdapter(_ url: URL) -> Bool {
+        url.lastPathComponent.lowercased().contains("pi-mcp-adapter")
+            || url.deletingPathExtension().lastPathComponent.lowercased().contains("pi-mcp-adapter")
+    }
 }
 
-/// Which extensions a managed launch loads. Unpinned `npm:` specs resolve to
-/// latest and must not be used.
+/// Which extensions a managed launch loads.
 ///
-/// `--no-extensions` disables both auto-discovery and installed `settings.json`
-/// packages so a second `-e npm:pi-mcp-adapter@…` cannot double-load the
-/// adapter. User-global custom providers (for example a `local` OpenAI-compatible
-/// catalog) live under `~/.pi/agent/extensions` and must be re-attached
-/// explicitly or Agent Mode's catalog will not match the Settings connect probe.
+/// `--no-extensions` disables auto-discovery, installed `settings.json` packages,
+/// and built-in extensions. Explicit `-e` still works, so managed launches re-enable
+/// `builtin:mcp` and any user-global `~/.pi/agent/extensions` sources. Custom catalogs
+/// (for example a `local` OpenAI-compatible provider) stay visible without loading
+/// pi-mcp-adapter, which would replace built-in MCP for that session.
 public enum PiExtensionPolicy: Equatable, Sendable {
     case userEnvironment
-    case pinnedAdapterOnly(version: String)
-    /// `--no-extensions`, then each discovered user-global extension source,
-    /// then the version-pinned pi-mcp-adapter.
-    case pinnedAdapterWithUserGlobalExtensions(version: String, directory: String)
+    /// `--no-extensions -e builtin:mcp`, then discovered user-global sources, then an
+    /// optional ephemeral injector that calls `pi.registerMcpServer`, then an optional
+    /// Full Access approval gate.
+    case builtinMCPWithUserGlobalExtensions(directory: String, injectorPath: String?, gatePath: String? = nil)
 
-    /// Managed Agent Mode / probe / headless launches: keep `--no-extensions` so
-    /// installed packages cannot double-load the adapter, then re-attach the
-    /// user's global extension sources and the pinned adapter.
-    public static func pinnedAdapterWithDiscoveredUserGlobalExtensions(
-        version: String,
+    /// Managed Agent Mode / probe / headless launches.
+    public static func builtinMCPWithDiscoveredUserGlobalExtensions(
+        injectorPath: String? = nil,
+        gatePath: String? = nil,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> PiExtensionPolicy {
-        .pinnedAdapterWithUserGlobalExtensions(
-            version: version,
-            directory: PiUserGlobalExtensionDiscovery.defaultDirectory(homeDirectory: homeDirectory).path
+        .builtinMCPWithUserGlobalExtensions(
+            directory: PiUserGlobalExtensionDiscovery.defaultDirectory(homeDirectory: homeDirectory).path,
+            injectorPath: injectorPath,
+            gatePath: gatePath
         )
     }
 
     var arguments: [String] {
         switch self {
         case .userEnvironment:
-            []
-        case let .pinnedAdapterOnly(version):
-            ["--no-extensions", "-e", "npm:pi-mcp-adapter@\(version)"]
-        case let .pinnedAdapterWithUserGlobalExtensions(version, directory):
-            ["--no-extensions"]
-                + PiUserGlobalExtensionDiscovery.sourcePaths(
-                    in: URL(fileURLWithPath: directory, isDirectory: true)
-                ).flatMap { ["-e", $0] }
-                + ["-e", "npm:pi-mcp-adapter@\(version)"]
+            return []
+        case let .builtinMCPWithUserGlobalExtensions(directory, injectorPath, gatePath):
+            var args = ["--no-extensions", "-e", "builtin:mcp"]
+            args += PiUserGlobalExtensionDiscovery.sourcePaths(
+                in: URL(fileURLWithPath: directory, isDirectory: true)
+            ).flatMap { ["-e", $0] }
+            if let injectorPath, !injectorPath.isEmpty {
+                args += ["-e", injectorPath]
+            }
+            if let gatePath, !gatePath.isEmpty {
+                args += ["-e", gatePath]
+            }
+            return args
         }
     }
 }
@@ -167,8 +178,6 @@ public struct PiLaunchOptions: Equatable, Sendable {
     public var sessionDisplayName: String?
     public var toolProfile: PiToolProfile
     public var extensionPolicy: PiExtensionPolicy
-    /// Path to the ephemeral `--mcp-config` document (pi-mcp-adapter CLI flag).
-    public var mcpConfigPath: String?
     public var suppressProjectResources: Bool
     public var suppressContextFiles: Bool
     public var quietStartupNetwork: Bool
@@ -180,8 +189,10 @@ public struct PiLaunchOptions: Equatable, Sendable {
         session: PiSessionSelection = .ephemeral,
         sessionDisplayName: String? = nil,
         toolProfile: PiToolProfile = .standard,
-        extensionPolicy: PiExtensionPolicy = .pinnedAdapterOnly(version: "2.32.1"),
-        mcpConfigPath: String? = nil,
+        extensionPolicy: PiExtensionPolicy = .builtinMCPWithUserGlobalExtensions(
+            directory: "",
+            injectorPath: nil
+        ),
         suppressProjectResources: Bool = true,
         suppressContextFiles: Bool = true,
         quietStartupNetwork: Bool = true,
@@ -193,7 +204,6 @@ public struct PiLaunchOptions: Equatable, Sendable {
         self.sessionDisplayName = sessionDisplayName
         self.toolProfile = toolProfile
         self.extensionPolicy = extensionPolicy
-        self.mcpConfigPath = mcpConfigPath
         self.suppressProjectResources = suppressProjectResources
         self.suppressContextFiles = suppressContextFiles
         self.quietStartupNetwork = quietStartupNetwork
@@ -235,9 +245,6 @@ public struct PiLaunchOptions: Equatable, Sendable {
         }
         args.append(contentsOf: toolProfile.arguments)
         args.append(contentsOf: extensionPolicy.arguments)
-        if let mcpConfigPath {
-            args.append(contentsOf: ["--mcp-config", mcpConfigPath])
-        }
         if suppressProjectResources {
             args.append("-na")
         }
