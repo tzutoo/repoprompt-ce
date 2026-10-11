@@ -2019,7 +2019,7 @@ import XCTest
                     try await MCPDomainProtectedMutationSettlementContext.$observer.withValue(
                         { settlementProbe.record($0) }
                     ) {
-                        try await MCPDomainInvocationSecurityContext.$current.withValue(context) {
+                        try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
                             try await protectedBinding([
                                 "op": .string("export"),
                                 "operation_id": .string(operationID)
@@ -4664,6 +4664,11 @@ import XCTest
         private var responseInterceptors: [Int: @Sendable (String) async throws -> String] = [:]
         private var interceptingResponses: [Int: InterceptingResponse] = [:]
         private var isClosed = false
+        private var notificationObserver: (@Sendable (Data) -> Void)?
+
+        func observeNotifications(_ observer: @escaping @Sendable (Data) -> Void) {
+            withStateLock { notificationObserver = observer }
+        }
 
         init(fd: Int32) {
             self.fd = fd
@@ -4872,6 +4877,8 @@ import XCTest
                 guard object["method"] as? String != nil else {
                     throw ClientError.invalidResponse
                 }
+                let observer = withStateLock { notificationObserver }
+                observer?(line)
                 return true
             } catch {
                 close(with: error)

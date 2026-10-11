@@ -545,15 +545,7 @@ package actor DomainAgentSessionLinkAuthority {
     ) -> DomainAgentSessionLinkInventory {
         var items: [DomainAgentSessionLinkInventoryItem] = []
         for record in links.values where predicate(record) {
-            let targetSessionID: UUID = record.grant.target.sessionID
-            items.append(DomainAgentSessionLinkInventoryItem(
-                linkID: record.grant.id,
-                generation: record.grant.generation,
-                observerSessionID: record.grant.observer.sessionID,
-                targetSessionID: targetSessionID,
-                displayName: targets[targetSessionID]?.snapshot.displayName,
-                capabilities: record.grant.capabilities
-            ))
+            items.append(inventoryItem(record, outbound: true))
         }
         items.sort(by: Self.orderedByTarget)
         return DomainAgentSessionLinkInventory(
@@ -587,14 +579,7 @@ package actor DomainAgentSessionLinkAuthority {
     ) -> DomainAgentSessionLinkInventory {
         var items: [DomainAgentSessionLinkInventoryItem] = []
         for record in links.values where predicate(record) {
-            items.append(DomainAgentSessionLinkInventoryItem(
-                linkID: record.grant.id,
-                generation: record.grant.generation,
-                observerSessionID: record.grant.observer.sessionID,
-                targetSessionID: record.grant.target.sessionID,
-                displayName: nil,
-                capabilities: record.grant.capabilities
-            ))
+            items.append(inventoryItem(record, outbound: false))
         }
         items.sort(by: Self.orderedByObserver)
         return DomainAgentSessionLinkInventory(
@@ -672,6 +657,66 @@ package actor DomainAgentSessionLinkAuthority {
         targetLinkSetRevisions[targetSessionID] ?? 0
     }
 
+    /// Groups exact membership once, sharing inventory ordering and revision semantics with the
+    /// ordinary inventory queries. Additional endpoints receive real empty inventories for final
+    /// agent publications, but never become retained catalog keys merely by being requested.
+    package func presentationSnapshot(
+        additionalEndpoints: Set<DomainAgentSessionLinkEndpointIdentity> = []
+    ) -> DomainAgentSessionLinkPresentationSnapshot {
+        var outbound: [DomainAgentSessionLinkEndpointIdentity: [DomainAgentSessionLinkInventoryItem]] = [:]
+        var inbound: [DomainAgentSessionLinkEndpointIdentity: [DomainAgentSessionLinkInventoryItem]] = [:]
+        var targetEndpoints: [DomainAgentSessionLinkEndpointIdentity: [UUID: DomainAgentSessionLinkEndpointIdentity]] = [:]
+        var observerEndpoints: [DomainAgentSessionLinkEndpointIdentity: [UUID: DomainAgentSessionLinkEndpointIdentity]] = [:]
+        for record in links.values {
+            let grant = record.grant
+            outbound[grant.observer, default: []].append(inventoryItem(record, outbound: true))
+            inbound[grant.target, default: []].append(inventoryItem(record, outbound: false))
+            targetEndpoints[grant.observer, default: [:]][grant.id] = grant.target
+            observerEndpoints[grant.target, default: [:]][grant.id] = grant.observer
+        }
+        let activeObservers = Set(outbound.keys)
+        let endpoints = activeObservers.union(inbound.keys).union(recentRevocationNotices.keys)
+        var inputs: [DomainAgentSessionLinkEndpointIdentity: DomainAgentSessionLinkEndpointProjectionInputs] = [:]
+        for endpoint in endpoints.union(additionalEndpoints) {
+            inputs[endpoint] = DomainAgentSessionLinkEndpointProjectionInputs(
+                outbound: DomainAgentSessionLinkInventory(
+                    sessionID: endpoint.sessionID,
+                    linkSetRevision: observerLinkSetRevisions[endpoint.sessionID] ?? 0,
+                    authorityRevision: authorityRevision,
+                    items: (outbound[endpoint] ?? []).sorted(by: Self.orderedByTarget)
+                ),
+                inbound: DomainAgentSessionLinkInventory(
+                    sessionID: endpoint.sessionID,
+                    linkSetRevision: targetLinkSetRevisions[endpoint.sessionID] ?? 0,
+                    authorityRevision: authorityRevision,
+                    items: (inbound[endpoint] ?? []).sorted(by: Self.orderedByObserver)
+                ),
+                outboundTargetEndpoints: targetEndpoints[endpoint] ?? [:],
+                inboundObserverEndpoints: observerEndpoints[endpoint] ?? [:],
+                activeOutboundObserverEndpoints: activeObservers,
+                notices: recentRevocationNotices[endpoint] ?? []
+            )
+        }
+        return DomainAgentSessionLinkPresentationSnapshot(
+            authorityRevision: authorityRevision,
+            endpoints: endpoints,
+            activeOutboundObserverEndpoints: activeObservers,
+            inputs: inputs
+        )
+    }
+
+    private func inventoryItem(_ record: LinkRecord, outbound: Bool) -> DomainAgentSessionLinkInventoryItem {
+        DomainAgentSessionLinkInventoryItem(
+            linkID: record.grant.id,
+            generation: record.grant.generation,
+            observerSessionID: record.grant.observer.sessionID,
+            targetSessionID: record.grant.target.sessionID,
+            displayName: outbound ? targets[record.grant.target.sessionID]?.snapshot.displayName : nil,
+            capabilities: record.grant.capabilities,
+            createdAt: record.grant.createdAt
+        )
+    }
+
     /// Whether one exact observer incarnation currently holds an outbound link.
     ///
     /// This is the live input to outbound readiness and targetless `list` authorization, so it is
@@ -688,6 +733,27 @@ package actor DomainAgentSessionLinkAuthority {
         guard let id = outboundLinksByEndpoint[observerEndpoint]?.first,
               let record = links[id] else { return false }
         return record.grant.observer == observerEndpoint
+    }
+
+    /// Exact indexed relationship sample for a caller that must exclude its own unsettled
+    /// activation-backed creations. Ordinary inbound grants cannot be those creations: the private
+    /// bootstrap proof is restricted to a freshly allocated lane target, never the ordinary caller.
+    package func activeDirectGrant(
+        endpoint: DomainAgentSessionLinkEndpointIdentity,
+        excludingOutboundTargets: Set<DomainAgentSessionLinkEndpointIdentity>
+    ) -> DomainAgentSessionLinkGrant? {
+        for id in outboundLinksByEndpoint[endpoint] ?? [] {
+            if let grant = links[id]?.grant, grant.observer == endpoint,
+               !excludingOutboundTargets.contains(grant.target)
+            {
+                return grant
+            }
+        }
+        guard let target = targets[endpoint.sessionID], target.endpoint == endpoint else { return nil }
+        for id in target.inboundLinkIDs {
+            if let grant = links[id]?.grant, grant.target == endpoint { return grant }
+        }
+        return nil
     }
 
     package func hasActiveLink(endpoint: DomainAgentSessionLinkEndpointIdentity) -> Bool {

@@ -2946,6 +2946,7 @@ public class APISettingsViewModel: ObservableObject {
     // MARK: - Claude Code
 
     func testClaudeCodeConnection() async throws -> Bool {
+        let wasConnected = isClaudeCodeConnected
         let previousStatus = claudeCodeCLIStatus
         let collector = CLIProcessLogCollector()
         collector.append("Claude Code connection test started")
@@ -2964,6 +2965,9 @@ public class APISettingsViewModel: ObservableObject {
             await provider.dispose()
             collector.append("Claude Code provider disposed")
             isClaudeCodeConnected = ok
+            if !ok || !wasConnected {
+                await WindowStatesManager.shared.providerQuotaRuntime.claude.invalidate()
+            }
             setContextBuilderProviderVerified(.claudeCode, verified: ok)
             if ok {
                 claudeCodeCLIStatus = .binaryPresent
@@ -2987,6 +2991,7 @@ public class APISettingsViewModel: ObservableObject {
             collector.append("Disposing Claude Code provider resources after failure")
             await provider.dispose()
             collector.append("Claude Code provider disposed")
+            await WindowStatesManager.shared.providerQuotaRuntime.claude.invalidate()
             isClaudeCodeConnected = false
             setContextBuilderProviderVerified(.claudeCode, verified: false)
             claudeCodeCLIStatus = Self.errorLooksLikeClaudeCodeBinaryMissing(error)
@@ -3885,7 +3890,7 @@ public class APISettingsViewModel: ObservableObject {
             collector.append("Connection test threw error: \(error.localizedDescription)")
             isGrokBuildConnected = false
             setContextBuilderProviderVerified(.grokBuild, verified: false)
-            grokBuildError = friendlyGrokBuildMessage(for: error)
+            grokBuildError = Self.friendlyGrokBuildMessage(for: error)
             UserDefaults.standard.set(false, forKey: "GrokBuildCLIConnected")
             stopGrokBuildModelsSubscription(clearModels: true)
             await updateAvailableModels()
@@ -3916,7 +3921,7 @@ public class APISettingsViewModel: ObservableObject {
         )
     }
 
-    private func friendlyGrokBuildMessage(for error: Error) -> String {
+    static func friendlyGrokBuildMessage(for error: Error) -> String {
         if let providerError = error as? AIProviderError {
             switch providerError {
             case let .invalidConfiguration(detail):
@@ -3940,6 +3945,9 @@ public class APISettingsViewModel: ObservableObject {
         }
         if lowered.contains("stdio") {
             return "Installed Grok Build CLI does not advertise the ACP stdio subcommand. Update Grok Build and ensure `grok agent --help` lists `stdio`."
+        }
+        if lowered.contains("authentication required") {
+            return "Grok Build needs authentication. Run `grok login` in Terminal, or save a Grok (xAI) API key under Settings → API Providers, then try Connect again."
         }
         return message
     }

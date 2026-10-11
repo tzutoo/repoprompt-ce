@@ -154,6 +154,7 @@ struct NativeAgentRuntimeRuntimeInitStatus: Equatable {
 /// coordinators, runners, and tab-session storage.
 enum NativeAgentRuntimeEvent {
     case stream(AIStreamResult)
+    case rateLimit(ClaudeCompatiblePluginRateLimitInfo)
     case runtimeInit(NativeAgentRuntimeRuntimeInitStatus)
     case approvalRequest(AgentApprovalRequest)
     case approvalCancelled(requestID: String)

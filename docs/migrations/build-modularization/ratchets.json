@@ -1,5 +1,5 @@
 {
-  "description": "Fork/upstream reconciliation at upstream/main e2535e29. Measured merged tree: app lines 606281 (upstream baseline 603133 plus fork-only app code), tests_testable_import_app_files 331, tests_sleep_calls 66. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
+  "description": "Fork/upstream reconciliation at upstream/main 4c3a06dd. Keep the local measured gated counts from the previous fork merge (tests_testable_import_app_files 331) and refresh tracked app-line/file counts after merging current upstream/main. Ratcheted metrics may only decrease; regenerate with `python3 Scripts/modularization_metrics.py update` after an improving slice. App Swift lines above baseline plus headroom are advisory, not a failing gate.",
   "ratcheted": [
     "app_files_over_5000_lines",
     "app_files_over_2000_lines",

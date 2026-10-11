@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import RepoPromptDomainRuntime
 import RepoPromptInstrumentation
 import RepoPromptSettingsCore
 
@@ -163,6 +164,11 @@ final class AgentTabSession: ObservableObject {
         }
     }
 
+    /// Set while Handoff installs inherited worktree bindings on a never-activated destination.
+    /// Debounced autosaves stay disarmed so the first durable record cannot be the provisional,
+    /// unbound state; Handoff performs the destination's first save explicitly afterwards.
+    var isInstallingHandoffWorktreeBindings = false
+
     var worktreeBindingTransitionInProgress: Bool = false
 
     /// Wait/question state
@@ -295,6 +301,7 @@ final class AgentTabSession: ObservableObject {
     /// exact session may act as an oversight observer.
     var mcpControlContext: AgentModeViewModel.AgentMCPControlContext? {
         didSet {
+            if mcpControlContext != nil { oversight.overseerActivation = nil }
             guard oldValue?.taskLabelKind != mcpControlContext?.taskLabelKind
                 || (oldValue == nil) != (mcpControlContext == nil)
             else {
@@ -307,6 +314,17 @@ final class AgentTabSession: ObservableObject {
     var mcpStateObservationCancellable: AnyCancellable?
     var mcpControlCleanupTask: Task<Void, Never>?
     var mcpControlActivationGeneration: UInt64 = 0
+    private(set) var codexComputerUseOwnershipTransitionHolds: Set<UUID> = []
+    var codexComputerUseRevocationDepth = 0
+
+    /// A scoped eligibility fence, not link authority. Independent ownership transitions cannot
+    /// release each other's hold, and a rebound endpoint still releases its captured session.
+    func holdCodexComputerUseAdmission() -> @MainActor () -> Void {
+        let token = UUID()
+        codexComputerUseOwnershipTransitionHolds.insert(token)
+        return { [weak self] in self?.codexComputerUseOwnershipTransitionHolds.remove(token) }
+    }
+
     var mcpFollowUpRunPendingUpdatedAt: Date?
     var mcpFollowUpRunPending: Bool = false {
         didSet {
@@ -319,7 +337,13 @@ final class AgentTabSession: ObservableObject {
 
     var isMCPInstructionDispatchInProgress: Bool = false
     /// Whether this session was originally created by an MCP client.
-    var isMCPOriginated: Bool = false
+    var isMCPOriginated: Bool = false {
+        didSet {
+            if isMCPOriginated { oversight.overseerActivation = nil }
+            if oldValue != isMCPOriginated { AgentSessionLinkCandidateReadinessSignal.didChange() }
+        }
+    }
+
     /// Lifetime classification for sessions created, controlled, parented, or pending activation through MCP.
     /// A nonzero activation generation remains authoritative after live control is released.
     var isMCPRelated: Bool {
@@ -403,8 +427,32 @@ final class AgentTabSession: ObservableObject {
     struct ACPSteeringManagedContext {
         let sink: AgentSessionLinkManagedSteerSink
         let attributedItemID: UUID
-        let candidate: AgentSessionLinkEndpointCandidate
-        let attribution: AgentCrossSessionAttribution
+        let endpoint: DomainAgentSessionLinkEndpointIdentity
+        let attribution: AgentCrossSessionAttribution?
+
+        init(
+            sink: AgentSessionLinkManagedSteerSink,
+            attributedItemID: UUID,
+            endpoint: DomainAgentSessionLinkEndpointIdentity,
+            attribution: AgentCrossSessionAttribution?
+        ) {
+            self.sink = sink
+            self.attributedItemID = attributedItemID
+            self.endpoint = endpoint
+            self.attribution = attribution
+        }
+
+        init(
+            sink: AgentSessionLinkManagedSteerSink,
+            attributedItemID: UUID,
+            candidate: AgentSessionLinkEndpointCandidate,
+            attribution: AgentCrossSessionAttribution
+        ) {
+            self.init(
+                sink: sink, attributedItemID: attributedItemID,
+                endpoint: candidate.domainEndpoint, attribution: attribution
+            )
+        }
     }
 
     struct ACPSteeringInstruction: Identifiable {
@@ -434,7 +482,7 @@ final class AgentTabSession: ObservableObject {
     func settlePendingManagedACPSteeringAsNotAccepted() {
         for instruction in pendingACPSteeringInstructions {
             guard let managed = instruction.managed else { continue }
-            let candidate = managed.candidate
+            let candidate = managed.endpoint
             if tabID == candidate.tabID,
                activeAgentSessionID == candidate.sessionID,
                persistentSessionBindingIdentity?.generation == candidate.persistentBindingGeneration,
@@ -616,6 +664,8 @@ final class AgentTabSession: ObservableObject {
         let origin: CodexFallbackOrigin
         let dispatchTicket: UInt64?
         var stopFence: AgentRunStartStopFence?
+        /// Explicit composer provenance; absent/internal contexts never inherit companion access.
+        var isLocalUserInput: Bool = false
     }
 
     struct CodexFallbackBlockingTurn: Equatable {
@@ -1200,9 +1250,12 @@ final class AgentTabSession: ObservableObject {
         var capabilities: CodexCapabilitySettings = .disabled
     }
 
+    // In-memory authority for this chat, never written to AgentSession persistence. Runtime
+    // reconnects and ownership transitions may reuse it; session shutdown and explicit off revoke it.
+    var codexComputerUseArmingRequestID: UUID?
     var pendingCodexComputerUseActivation: AgentModeViewModel.CodexComputerUseActivation?
     var codexControllerFeatureState: CodexControllerFeatureState?
-    var wantsCodexComputerUseForNextTurn: Bool {
+    var isCodexComputerUseArmed: Bool {
         pendingCodexComputerUseActivation != nil
     }
 
@@ -1281,7 +1334,11 @@ final class AgentTabSession: ObservableObject {
     }
 
     /// Runtime-only timer and note worker; persisted state is deliberately inert on restore.
-    var selfCompactNativeCompletion: AgentSelfCompactNativeCompletionCoordinator?
+    var selfCompactNativeCompletion: AgentSelfCompactNativeCompletionCoordinator? {
+        didSet {
+            if oldValue !== selfCompactNativeCompletion { oldValue?.cancelRuntimeWork() }
+        }
+    }
 
     /// Transcript item IDs present when an ACP self-compact command was issued. Rows added after
     /// this set are the command turn. Not persisted.
@@ -1309,8 +1366,19 @@ final class AgentTabSession: ObservableObject {
 
     private(set) var persistenceMutationGeneration: UInt64 = 0
     var saveRequestGeneration: UInt64 = 0
-    var parentSessionID: UUID?
-    var createdByOverseerSessionID: UUID?
+    var parentSessionID: UUID? {
+        didSet {
+            if parentSessionID != nil { oversight.overseerActivation = nil }
+            if (oldValue == nil) != (parentSessionID == nil) { AgentSessionLinkCandidateReadinessSignal.didChange() }
+        }
+    }
+
+    var createdByOverseerSessionID: UUID? {
+        didSet {
+            if createdByOverseerSessionID != nil { oversight.overseerActivation = nil }
+        }
+    }
+
     var hasLoadedPersistedState: Bool = false {
         didSet {
             if oldValue != hasLoadedPersistedState {
@@ -1497,6 +1565,7 @@ final class AgentTabSession: ObservableObject {
 
     @discardableResult
     func beginPersistentBindingTransition() -> UInt64 {
+        oversight.overseerActivation = nil
         // Clear the outgoing proof before the generation moves so it cannot be observed under the
         // incoming incarnation.
         restorationReadiness = .unbound
@@ -1513,6 +1582,7 @@ final class AgentTabSession: ObservableObject {
 
     func installPersistentSessionBinding(_ binding: AgentPersistentSessionBindingIdentity?) {
         precondition(binding == nil || binding?.tabID == tabID)
+        if persistentSessionBindingIdentity != binding { oversight.overseerActivation = nil }
         persistentSessionBindingIdentity = binding
         bindingTransitionInProgress = false
         restorationReadiness = currentRestorationBindingToken.map { .pending($0) } ?? .unbound
