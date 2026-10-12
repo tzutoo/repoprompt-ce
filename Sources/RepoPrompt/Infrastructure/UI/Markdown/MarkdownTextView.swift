@@ -474,6 +474,7 @@ struct MarkdownTextView: View, Equatable {
     let suppressBareLinksTouchingEndBoundary: Bool
     let renderCadence: MarkdownRenderCadence
     private let allowsStreamingSegmentation: Bool
+    private let allowsDiagramSplitting: Bool
     @Environment(\.markdownFileLinkOpener) private var markdownFileLinkOpener
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
@@ -496,7 +497,8 @@ struct MarkdownTextView: View, Equatable {
         bareURLLinkificationPolicy: BareURLLinkificationPolicy = .disabled,
         suppressBareLinksTouchingEndBoundary: Bool = false,
         renderCadence: MarkdownRenderCadence = .immediate,
-        allowsStreamingSegmentation: Bool = true
+        allowsStreamingSegmentation: Bool = true,
+        allowsDiagramSplitting: Bool = true
     ) {
         self.text = text
         self.isMarkdown = isMarkdown
@@ -507,6 +509,7 @@ struct MarkdownTextView: View, Equatable {
         self.suppressBareLinksTouchingEndBoundary = suppressBareLinksTouchingEndBoundary
         self.renderCadence = renderCadence
         self.allowsStreamingSegmentation = allowsStreamingSegmentation
+        self.allowsDiagramSplitting = allowsDiagramSplitting
     }
 
     static func == (lhs: MarkdownTextView, rhs: MarkdownTextView) -> Bool {
@@ -519,6 +522,7 @@ struct MarkdownTextView: View, Equatable {
             lhs.suppressBareLinksTouchingEndBoundary == rhs.suppressBareLinksTouchingEndBoundary &&
             lhs.renderCadence == rhs.renderCadence &&
             lhs.allowsStreamingSegmentation == rhs.allowsStreamingSegmentation &&
+            lhs.allowsDiagramSplitting == rhs.allowsDiagramSplitting &&
             lhs.fontScale.preset.scaleFactor == rhs.fontScale.preset.scaleFactor
     }
 
@@ -545,7 +549,34 @@ struct MarkdownTextView: View, Equatable {
 
     @ViewBuilder
     private var markdownBody: some View {
-        if let segmentedBoundary {
+        if let diagramSegments {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(diagramSegments.enumerated()), id: \.offset) { _, segment in
+                    switch segment {
+                    case let .markdown(chunk):
+                        MarkdownTextView(
+                            text: chunk,
+                            isMarkdown: true,
+                            allowInteraction: allowInteraction,
+                            forceTextColor: forceTextColor,
+                            useMonospaced: useMonospaced,
+                            bareURLLinkificationPolicy: bareURLLinkificationPolicy,
+                            suppressBareLinksTouchingEndBoundary: suppressBareLinksTouchingEndBoundary,
+                            renderCadence: renderCadence,
+                            allowsStreamingSegmentation: allowsStreamingSegmentation,
+                            allowsDiagramSplitting: false
+                        )
+                    case let .mermaid(source):
+                        MermaidDiagramCard(
+                            source: source,
+                            allowInteraction: allowInteraction
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let segmentedBoundary {
             SegmentedStreamingMarkdownTextView(
                 text: text,
                 allowInteraction: allowInteraction,
@@ -583,6 +614,13 @@ struct MarkdownTextView: View, Equatable {
         )
     }
 
+    private var diagramSegments: [MarkdownTranscriptSegment]? {
+        guard isMarkdown, allowsDiagramSplitting else { return nil }
+        let segments = MarkdownDiagramFenceParser.segments(in: text)
+        guard segments.contains(where: \.isMermaid) else { return nil }
+        return segments
+    }
+
     private var segmentedBoundary: MarkdownStreamingFreezeBoundary? {
         guard shouldUseSegmentedStreamingRenderer else { return nil }
         return MarkdownStreamingFreezeBoundaryResolver.resolveBoundary(in: text)
@@ -616,7 +654,7 @@ struct MarkdownTextView: View, Equatable {
             cancelPendingCompile()
             return
         }
-        guard !shouldUseSegmentedStreamingRenderer else {
+        if diagramSegments != nil || shouldUseSegmentedStreamingRenderer {
             clearSingleRendererRenderState()
             return
         }

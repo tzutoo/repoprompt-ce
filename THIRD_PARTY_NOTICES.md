@@ -57,6 +57,15 @@ package graph. Its machine-checkable
 resolved version or revision to its upstream repository and copied notice
 bundle. Tree-sitter packages refer to the separately curated bundle above.
 
+## Mermaid
+
+RepoPrompt CE bundles the Mermaid 10.9.3 UMD runtime to render complete
+`mermaid` fences in chat and Agent Mode markdown. The copied license is included
+at [`ThirdPartyLicenses/mermaid/LICENSE`](ThirdPartyLicenses/mermaid/LICENSE),
+and the exact local file plus checksum are recorded under
+[`AppResources/Markdown/`](AppResources/Markdown/). The renderer never fetches
+Mermaid from the network.
+
 ## Markdownosaur
 
 Portions of the following source file are adapted from [Markdownosaur](https://github.com/christianselig/Markdownosaur) by Christian Selig, licensed under the Apache License, Version 2.0:
