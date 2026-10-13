@@ -339,7 +339,29 @@ final class MarkdownDiagramFenceParserTests: XCTestCase {
     func testHeightIsClampedToVisibleBounds() {
         XCTAssertEqual(MermaidRenderPolicy.clampedHeight(10), MermaidRenderPolicy.minimumHeight)
         XCTAssertEqual(MermaidRenderPolicy.clampedHeight(9000), MermaidRenderPolicy.maximumHeight)
-        XCTAssertEqual(MermaidRenderPolicy.clampedHeight(320), 320)
+        XCTAssertEqual(MermaidRenderPolicy.clampedHeight(400), 400)
+    }
+
+    func testFittedHeightUsesCardWidthAndDoesNotShrinkBelowMinimum() {
+        let wide = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 400, height: 200),
+            zoom: 1,
+            containerWidth: 800
+        )
+        let unknownWidth = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 400, height: 200),
+            zoom: 1,
+            containerWidth: 0
+        )
+        let short = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 1200, height: 200),
+            zoom: 1,
+            containerWidth: 400
+        )
+
+        XCTAssertEqual(wide, 400)
+        XCTAssertEqual(unknownWidth, 400)
+        XCTAssertEqual(short, MermaidRenderPolicy.minimumHeight)
     }
 
     func testContentSizeUsesPlaceholderUntilContainerWidthIsKnown() {
@@ -477,5 +499,21 @@ final class MarkdownDiagramFenceParserTests: XCTestCase {
         XCTAssertEqual(next.zoom, 2)
         XCTAssertEqual(next.pan.width, 100, accuracy: 0.001)
         XCTAssertEqual(next.pan.height, 60, accuracy: 0.001)
+    }
+
+    func testSVGExportAddsNamespaceAndViewBox() {
+        let svg = MermaidExportPayload.svgDocument(
+            from: "<svg width=\"10\" height=\"20\"></svg>",
+            intrinsic: CGSize(width: 10, height: 20)
+        )
+
+        XCTAssertEqual(
+            svg,
+            "<svg viewBox=\"0 0 10.0 20.0\" xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"20\"></svg>"
+        )
+    }
+
+    func testNonSVGMarkupIsRejectedForExport() {
+        XCTAssertNil(MermaidExportPayload.svgDocument(from: "flowchart LR", intrinsic: .zero))
     }
 }

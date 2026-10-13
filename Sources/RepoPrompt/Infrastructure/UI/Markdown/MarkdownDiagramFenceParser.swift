@@ -166,8 +166,9 @@ enum MarkdownDiagramFenceParser {
 
 enum MermaidRenderPolicy {
     static let maxSourceCharacters = 16000
-    static let minimumHeight: CGFloat = 240
+    static let minimumHeight: CGFloat = 360
     static let maximumHeight: CGFloat = 4000
+    static let fallbackFitWidth: CGFloat = 800
     static let minimumZoom: CGFloat = 0.5
     static let maximumZoom: CGFloat = 4.0
     static let defaultZoom: CGFloat = 1.0
@@ -204,13 +205,19 @@ enum MermaidRenderPolicy {
     /// Zoom/pan happen inside this viewport so mouse interaction does not jump chat layout.
     /// Height of a width-fitted diagram. Until the SVG size is known, use a
     /// readable placeholder. Never invent a 1pt-wide canvas.
-    static func fittedHeight(intrinsic: CGSize, zoom: CGFloat, assumedWidth: CGFloat = 640) -> CGFloat {
+    static func fittedHeight(
+        intrinsic: CGSize,
+        zoom: CGFloat,
+        containerWidth: CGFloat,
+        assumedWidth: CGFloat = fallbackFitWidth
+    ) -> CGFloat {
         let resolvedZoom = clampedZoom(zoom)
         guard intrinsic.width > 1, intrinsic.height > 1 else {
             return minimumHeight
         }
-        let width = assumedWidth > 1 ? assumedWidth : intrinsic.width
-        return min(intrinsic.height * (width / intrinsic.width) * resolvedZoom, maximumHeight)
+        let width = containerWidth > 1 ? containerWidth : assumedWidth
+        let fitted = intrinsic.height * (width / intrinsic.width) * resolvedZoom
+        return min(max(fitted, minimumHeight), maximumHeight)
     }
 
     static func viewportSize(
@@ -304,5 +311,39 @@ enum MermaidRenderPolicy {
             height: anchor.y - center.y - (anchor.y - center.y - pan.height) * newZoom / oldZoom
         )
         return (newZoom, clampedPan(newPan, viewport: viewport, zoom: newZoom))
+    }
+}
+
+enum MermaidExportFormat: String, CaseIterable {
+    case png
+    case svg
+
+    var fileExtension: String {
+        rawValue
+    }
+
+    var defaultFileName: String {
+        "diagram.\(rawValue)"
+    }
+}
+
+enum MermaidExportPayload {
+    static func svgDocument(from rawMarkup: String, intrinsic: CGSize) -> String? {
+        let trimmed = rawMarkup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("<svg") else { return nil }
+
+        var svg = trimmed
+        if svg.hasPrefix("<svg"), !svg.contains("xmlns=") {
+            svg = svg.replacingOccurrences(
+                of: "<svg",
+                with: "<svg xmlns=\"http://www.w3.org/2000/svg\"",
+                range: svg.startIndex ..< svg.index(svg.startIndex, offsetBy: 4)
+            )
+        }
+        if intrinsic.width > 1, intrinsic.height > 1, !svg.contains("viewBox=") {
+            let viewBox = "viewBox=\"0 0 \(intrinsic.width) \(intrinsic.height)\""
+            svg = svg.replacingOccurrences(of: "<svg", with: "<svg \(viewBox)", range: svg.startIndex ..< svg.index(svg.startIndex, offsetBy: 4))
+        }
+        return svg
     }
 }

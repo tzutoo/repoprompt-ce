@@ -2,6 +2,14 @@ import AppKit
 import SwiftUI
 import WebKit
 
+private struct MermaidDiagramWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 /// Renders a complete Mermaid fence as a diagram, with source fallback.
 struct MermaidDiagramCard: View {
     let source: String
@@ -10,10 +18,12 @@ struct MermaidDiagramCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var fontScale = FontScaleManager.shared
     @State private var showSource = false
+    @State private var containerWidth: CGFloat = 0
     @State private var intrinsicSize: CGSize = .zero
     @State private var zoom: CGFloat = MermaidRenderPolicy.defaultZoom
     @State private var pan: CGSize = .zero
     @State private var renderError: String?
+    @StateObject private var exporter = MermaidExportHandle()
 
     private var theme: String {
         colorScheme == .dark ? "dark" : "default"
@@ -31,7 +41,8 @@ struct MermaidDiagramCard: View {
                     zoom: $zoom,
                     pan: $pan,
                     intrinsicSize: $intrinsicSize,
-                    onError: { renderError = $0 }
+                    onError: { renderError = $0 },
+                    exporter: exporter
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: canvasHeight)
@@ -49,6 +60,15 @@ struct MermaidDiagramCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: MermaidDiagramWidthPreferenceKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(MermaidDiagramWidthPreferenceKey.self) { width in
+            guard width > 1, abs(containerWidth - width) > 0.5 else { return }
+            containerWidth = width
+        }
         .onChange(of: source) { _, _ in
             resetRenderState()
         }
@@ -60,7 +80,8 @@ struct MermaidDiagramCard: View {
     private var canvasHeight: CGFloat {
         MermaidRenderPolicy.fittedHeight(
             intrinsic: intrinsicSize,
-            zoom: MermaidRenderPolicy.defaultZoom
+            zoom: MermaidRenderPolicy.defaultZoom,
+            containerWidth: containerWidth
         )
     }
 
@@ -78,6 +99,19 @@ struct MermaidDiagramCard: View {
                 .font(fontScale.preset.captionFont)
                 .foregroundColor(.secondary)
             }
+            Menu("Save") {
+                Button("PNG Image") {
+                    saveDiagram(.png)
+                }
+                Button("SVG Vector") {
+                    saveDiagram(.svg)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(fontScale.preset.captionFont)
+            .foregroundColor(.secondary)
+            .disabled(!allowInteraction || renderError != nil || showSource)
             Button("Copy") {
                 copySource()
             }
@@ -126,6 +160,101 @@ struct MermaidDiagramCard: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(source, forType: .string)
     }
+
+    private func saveDiagram(_ format: MermaidExportFormat) {
+        Task { @MainActor in
+            do {
+                let markup = try await exporter.svgMarkup()
+                let data: Data
+                switch format {
+                case .svg:
+                    guard let svg = MermaidExportPayload.svgDocument(from: markup, intrinsic: intrinsicSize),
+                          let svgData = svg.data(using: .utf8)
+                    else {
+                        throw MermaidRenderError.renderFailed("Could not build an SVG document.")
+                    }
+                    data = svgData
+                case .png:
+                    guard let pngData = MermaidPNGExport.pngData(from: markup, intrinsic: intrinsicSize) else {
+                        throw MermaidRenderError.renderFailed("Could not convert the diagram to PNG.")
+                    }
+                    data = pngData
+                }
+                presentSavePanel(format: format, data: data)
+            } catch {
+                renderError = error.localizedDescription
+            }
+        }
+    }
+
+    private func presentSavePanel(format: MermaidExportFormat, data: Data) {
+        let panel = NSSavePanel()
+        panel.title = "Save Diagram"
+        panel.prompt = "Save"
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = format.defaultFileName
+        panel.allowedContentTypes = format == .png ? [.png] : [.svg]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            renderError = error.localizedDescription
+        }
+    }
+}
+
+enum MermaidPNGExport {
+    static func pngData(from svgMarkup: String, intrinsic: CGSize, scale: CGFloat = 2) -> Data? {
+        guard let svg = MermaidExportPayload.svgDocument(from: svgMarkup, intrinsic: intrinsic),
+              let svgData = svg.data(using: .utf8),
+              let image = NSImage(data: svgData)
+        else {
+            return nil
+        }
+
+        let pixelWidth = max(1, Int((max(intrinsic.width, image.size.width) * scale).rounded()))
+        let pixelHeight = max(1, Int((max(intrinsic.height, image.size.height) * scale).rounded()))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return nil
+        }
+
+        bitmap.size = NSSize(width: pixelWidth, height: pixelHeight)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight).fill()
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
+@MainActor
+final class MermaidExportHandle: ObservableObject {
+    weak var coordinator: MermaidCanvasCoordinator?
+
+    func svgMarkup() async throws -> String {
+        guard let coordinator else {
+            throw MermaidRenderError.renderFailed("Diagram renderer is unavailable.")
+        }
+        return try await coordinator.exportSVGMarkup()
+    }
 }
 
 private struct MermaidCanvasView: NSViewRepresentable {
@@ -135,6 +264,7 @@ private struct MermaidCanvasView: NSViewRepresentable {
     @Binding var pan: CGSize
     @Binding var intrinsicSize: CGSize
     let onError: (String) -> Void
+    let exporter: MermaidExportHandle
 
     func makeCoordinator() -> MermaidCanvasCoordinator {
         MermaidCanvasCoordinator()
@@ -151,6 +281,7 @@ private struct MermaidCanvasView: NSViewRepresentable {
         context.coordinator.panBinding = $pan
         context.coordinator.intrinsicBinding = $intrinsicSize
         context.coordinator.onError = onError
+        exporter.coordinator = context.coordinator
         view.coordinator = context.coordinator
         view.applyCamera(zoom: zoom, pan: pan)
         context.coordinator.render(source: source, theme: theme)
@@ -197,6 +328,22 @@ final class MermaidCanvasCoordinator: NSObject, WKNavigationDelegate {
         pendingTheme = nil
         host?.webView.navigationDelegate = nil
         host?.webView.stopLoading()
+    }
+
+    func exportSVGMarkup() async throws -> String {
+        guard let webView = host?.webView else {
+            throw MermaidRenderError.renderFailed("Diagram renderer is unavailable.")
+        }
+        let result = try await webView.callAsyncJavaScript(
+            "return document.querySelector('#host svg')?.outerHTML ?? '';",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let markup = result as? String, markup.contains("<svg") else {
+            throw MermaidRenderError.renderFailed("Could not read the rendered SVG.")
+        }
+        return markup
     }
 
     func applyZoom(deltaY: CGFloat, hasPreciseDeltas: Bool, anchor: CGPoint) {
@@ -547,7 +694,8 @@ private enum MermaidWebRuntime {
         svg.style.width = "100%";
         svg.style.height = "100%";
       }
-      return rpceSvgSize(svg);
+      const size = rpceSvgSize(svg);
+      return { svg: rendered.svg, width: size.width, height: size.height };
     };
 
     window.rpceSetCamera = function(zoom, panX, panY) {
