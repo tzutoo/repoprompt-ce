@@ -216,3 +216,304 @@ final class EnhancedMarkdownBareURLTests: XCTestCase {
         return compiler.attributedString(from: Document(parsing: markdown, options: options))
     }
 }
+
+final class MarkdownDiagramFenceParserTests: XCTestCase {
+    func testPlainMarkdownStaysOneSegment() {
+        let segments = MarkdownDiagramFenceParser.segments(in: "Hello **world**")
+        XCTAssertEqual(segments, [.markdown("Hello **world**")])
+        XCTAssertFalse(MarkdownDiagramFenceParser.containsCompleteMermaidFence(in: "Hello **world**"))
+    }
+
+    func testCompleteMermaidFenceSplitsOutOfSurroundingProse() {
+        let markdown = """
+        Before
+
+        ```mermaid
+        flowchart LR
+          A --> B
+        ```
+
+        After
+        """
+        let segments = MarkdownDiagramFenceParser.segments(in: markdown)
+
+        XCTAssertEqual(segments.count, 3)
+        guard case let .markdown(before) = segments[0] else {
+            return XCTFail("expected leading markdown")
+        }
+        XCTAssertEqual(before.trimmingCharacters(in: .whitespacesAndNewlines), "Before")
+        XCTAssertEqual(segments[1], .mermaid("flowchart LR\n  A --> B"))
+        guard case let .markdown(after) = segments[2] else {
+            return XCTFail("expected trailing markdown")
+        }
+        XCTAssertEqual(after.trimmingCharacters(in: .whitespacesAndNewlines), "After")
+        XCTAssertTrue(MarkdownDiagramFenceParser.containsCompleteMermaidFence(in: markdown))
+    }
+
+    func testUnclosedMermaidFenceStaysOrdinaryMarkdown() {
+        let markdown = """
+        ```mermaid
+        sequenceDiagram
+          Alice->>Bob: Hello
+        """
+        XCTAssertEqual(
+            MarkdownDiagramFenceParser.segments(in: markdown),
+            [.markdown(markdown)]
+        )
+        XCTAssertFalse(MarkdownDiagramFenceParser.containsCompleteMermaidFence(in: markdown))
+    }
+
+    func testNonMermaidFenceIsNotADiagram() {
+        let markdown = """
+        ```swift
+        print("hi")
+        ```
+        """
+        XCTAssertEqual(
+            MarkdownDiagramFenceParser.segments(in: markdown),
+            [.markdown(markdown)]
+        )
+    }
+
+    func testLanguageAliasesAndTildeFencesAreAccepted() {
+        let cases = [
+            ("mermaid", "```"),
+            ("MERMAID", "```"),
+            ("flowchart", "```"),
+            ("sequenceDiagram", "~~~")
+        ]
+
+        for (language, fence) in cases {
+            let markdown = """
+            \(fence)\(language)
+            flowchart TD
+              X --> Y
+            \(fence)
+            """
+            let segments = MarkdownDiagramFenceParser.segments(in: markdown)
+            XCTAssertEqual(segments, [.mermaid("flowchart TD\n  X --> Y")], language)
+        }
+    }
+
+    func testInlineBackticksAreNotTreatedAsFences() {
+        let markdown = "Use `mermaid` in a ``` code span"
+        XCTAssertEqual(
+            MarkdownDiagramFenceParser.segments(in: markdown),
+            [.markdown(markdown)]
+        )
+    }
+
+    func testMultipleMermaidFencesPreserveSwiftCodeBetweenThem() {
+        let markdown = """
+        ```mermaid
+        pie title Pets
+          \"Cats\": 2
+        ```
+
+        ```swift
+        let value = 1
+        ```
+
+        ```mermaid
+        sequenceDiagram
+          A->>B: ping
+        ```
+        """
+        let segments = MarkdownDiagramFenceParser.segments(in: markdown)
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertEqual(segments[0], .mermaid("pie title Pets\n  \"Cats\": 2"))
+        guard case let .markdown(swiftChunk) = segments[1] else {
+            return XCTFail("expected swift code to remain markdown")
+        }
+        XCTAssertTrue(swiftChunk.contains("```swift"))
+        XCTAssertTrue(swiftChunk.contains("let value = 1"))
+        XCTAssertEqual(segments[2], .mermaid("sequenceDiagram\n  A->>B: ping"))
+    }
+
+    func testEmptyAndOversizedSourcesAreRejected() {
+        XCTAssertFalse(MermaidRenderPolicy.shouldRender("   \n"))
+        XCTAssertFalse(MermaidRenderPolicy.shouldRender(String(repeating: "A", count: MermaidRenderPolicy.maxSourceCharacters + 1)))
+        XCTAssertTrue(MermaidRenderPolicy.shouldRender("flowchart LR\nA --> B"))
+    }
+
+    func testHeightIsClampedToVisibleBounds() {
+        XCTAssertEqual(MermaidRenderPolicy.clampedHeight(10), MermaidRenderPolicy.minimumHeight)
+        XCTAssertEqual(MermaidRenderPolicy.clampedHeight(9000), MermaidRenderPolicy.maximumHeight)
+        XCTAssertEqual(MermaidRenderPolicy.clampedHeight(400), 400)
+    }
+
+    func testFittedHeightUsesCardWidthAndDoesNotShrinkBelowMinimum() {
+        let wide = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 400, height: 200),
+            zoom: 1,
+            containerWidth: 800
+        )
+        let unknownWidth = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 400, height: 200),
+            zoom: 1,
+            containerWidth: 0
+        )
+        let short = MermaidRenderPolicy.fittedHeight(
+            intrinsic: CGSize(width: 1200, height: 200),
+            zoom: 1,
+            containerWidth: 400
+        )
+
+        XCTAssertEqual(wide, 400)
+        XCTAssertEqual(unknownWidth, 400)
+        XCTAssertEqual(short, MermaidRenderPolicy.minimumHeight)
+    }
+
+    func testContentSizeUsesPlaceholderUntilContainerWidthIsKnown() {
+        let size = MermaidRenderPolicy.contentSize(
+            intrinsic: CGSize(width: 400, height: 200),
+            containerWidth: 0,
+            zoom: 1
+        )
+
+        XCTAssertEqual(size.width, 1)
+        XCTAssertEqual(size.height, 200)
+    }
+
+    func testWideDiagramFitsCardWidthAndKeepsFullGraphicVisible() {
+        let viewport = MermaidRenderPolicy.viewportSize(
+            intrinsic: CGSize(width: 1200, height: 800),
+            containerWidth: 400
+        )
+        let content = MermaidRenderPolicy.contentSize(
+            intrinsic: CGSize(width: 1200, height: 800),
+            containerWidth: 400,
+            zoom: 1
+        )
+
+        XCTAssertEqual(viewport.width, 400)
+        XCTAssertEqual(viewport.height, 800 * 400 / 1200, accuracy: 0.001)
+        XCTAssertEqual(content, viewport)
+        XCTAssertFalse(MermaidRenderPolicy.isPannable(viewport: viewport, content: content))
+    }
+
+    func testNarrowDiagramScalesUpToFillWiderChat() {
+        let viewport = MermaidRenderPolicy.viewportSize(
+            intrinsic: CGSize(width: 400, height: 200),
+            containerWidth: 800
+        )
+
+        XCTAssertEqual(viewport, CGSize(width: 800, height: 400))
+        XCTAssertFalse(
+            MermaidRenderPolicy.isPannable(
+                viewport: viewport,
+                content: MermaidRenderPolicy.contentSize(
+                    intrinsic: CGSize(width: 400, height: 200),
+                    containerWidth: 800,
+                    zoom: 1
+                )
+            )
+        )
+    }
+
+    func testContentSizeGrowsWhenZoomingInAndShrinksWhenZoomingOut() {
+        let zoomedIn = MermaidRenderPolicy.contentSize(
+            intrinsic: CGSize(width: 400, height: 200),
+            containerWidth: 400,
+            zoom: 2
+        )
+        let zoomedOut = MermaidRenderPolicy.contentSize(
+            intrinsic: CGSize(width: 400, height: 200),
+            containerWidth: 400,
+            zoom: 0.5
+        )
+
+        XCTAssertEqual(zoomedIn, CGSize(width: 800, height: 400))
+        XCTAssertEqual(zoomedOut, CGSize(width: 200, height: 100))
+    }
+
+    func testZoomIsClampedToAllowedRange() {
+        XCTAssertEqual(MermaidRenderPolicy.clampedZoom(0.1), MermaidRenderPolicy.minimumZoom)
+        XCTAssertEqual(MermaidRenderPolicy.clampedZoom(8), MermaidRenderPolicy.maximumZoom)
+    }
+
+    func testMouseWheelZoomUsesDiscreteSteps() {
+        XCTAssertEqual(
+            MermaidRenderPolicy.zoomFactor(normalizedDeltaY: 1, hasPreciseDeltas: false),
+            MermaidRenderPolicy.mouseWheelZoomFactor,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            MermaidRenderPolicy.zoomFactor(normalizedDeltaY: -1, hasPreciseDeltas: false),
+            1 / MermaidRenderPolicy.mouseWheelZoomFactor,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            MermaidRenderPolicy.zoomFactor(normalizedDeltaY: 0, hasPreciseDeltas: false),
+            1,
+            accuracy: 0.0001
+        )
+    }
+
+    func testPanIsClampedToZoomedOverflow() {
+        let viewport = CGSize(width: 400, height: 200)
+        XCTAssertEqual(
+            MermaidRenderPolicy.clampedPan(
+                CGSize(width: 80, height: 40),
+                viewport: viewport,
+                zoom: 1
+            ),
+            .zero
+        )
+        XCTAssertEqual(
+            MermaidRenderPolicy.clampedPan(
+                CGSize(width: 500, height: 500),
+                viewport: viewport,
+                zoom: 2
+            ),
+            CGSize(width: 200, height: 100)
+        )
+    }
+
+    func testZoomedPanCanReachEveryEdge() {
+        let viewport = CGSize(width: 400, height: 240)
+        let limit = MermaidRenderPolicy.panLimit(viewport: viewport, zoom: 3)
+
+        XCTAssertEqual(limit.width, 400)
+        XCTAssertEqual(limit.height, 240)
+        XCTAssertEqual(
+            MermaidRenderPolicy.clampedPan(
+                CGSize(width: 0, height: -1000),
+                viewport: viewport,
+                zoom: 3
+            ).height,
+            -240
+        )
+    }
+
+    func testZoomKeepsTheCursorAnchorStationary() {
+        let next = MermaidRenderPolicy.applyingZoom(
+            2,
+            currentZoom: 1,
+            pan: .zero,
+            anchor: CGPoint(x: 100, y: 40),
+            viewport: CGSize(width: 400, height: 200),
+            content: CGSize(width: 400, height: 200)
+        )
+
+        XCTAssertEqual(next.zoom, 2)
+        XCTAssertEqual(next.pan.width, 100, accuracy: 0.001)
+        XCTAssertEqual(next.pan.height, 60, accuracy: 0.001)
+    }
+
+    func testSVGExportAddsNamespaceAndViewBox() {
+        let svg = MermaidExportPayload.svgDocument(
+            from: "<svg width=\"10\" height=\"20\"></svg>",
+            intrinsic: CGSize(width: 10, height: 20)
+        )
+
+        XCTAssertEqual(
+            svg,
+            "<svg viewBox=\"0 0 10.0 20.0\" xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"20\"></svg>"
+        )
+    }
+
+    func testNonSVGMarkupIsRejectedForExport() {
+        XCTAssertNil(MermaidExportPayload.svgDocument(from: "flowchart LR", intrinsic: .zero))
+    }
+}

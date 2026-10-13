@@ -4,3 +4,6 @@ Vendor/Sparkle/** -whitespace
 # Preserve exact upstream Codex voice license bytes, including legacy whitespace.
 ThirdPartyLicenses/codex/VOICE-LGPL-2.1.txt -whitespace
 ThirdPartyLicenses/codex/VOICE-proxy-libintl.txt -whitespace
+
+# Preserve the vendored Mermaid UMD runtime bytes, including upstream whitespace.
+AppResources/Markdown/mermaid.min.js -whitespace
