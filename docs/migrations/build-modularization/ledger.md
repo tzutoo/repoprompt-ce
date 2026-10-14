@@ -63,6 +63,8 @@ Local tooling-half validation on 2026-09-30: `make conductor-selftest` passed; `
 
 **2026-10-14 fork/upstream reconciliation.** Merging `upstream/main` at `6f151c0a` into the fork's `main` brings in overseer control-surface work, Codex Ultrafast, Oracle groups, and related Agent Mode/MCP changes on top of the fork's still-app-resident pi provider. Regenerated `ratchets.json` with `update --allow-regression` against the merged tree: gated `tests_testable_import_app_files` is 339 rather than 337 because the merged test tree is the union of both branches' app-level tests. Non-increasing file-size and singleton gates stay 47 / 16 / 89. Tracked App lines are 633,471. This is a baseline reconciliation for existing fork feature work plus the upstream union, not a change to the non-increasing rule.
 
+**2026-10-15 fork/upstream reconciliation.** Merging `upstream/main` at `6afefb5d` into the fork's `main` brings in OpenAI Decisions / multi-decision model-router work and Overseer discovery/lifecycle hardening on top of the fork's still-app-resident pi provider. Regenerated `ratchets.json` with `update --allow-regression` against the merged tree. Gated `tests_testable_import_app_files` stays 339; file-size and singleton gates stay 47 / 16 / 89. Tracked App lines are 644,290. This is a baseline reconciliation for existing fork feature work plus the upstream union, not a change to the non-increasing rule.
+
 ## Baseline — 2026-09-28 (`589cecc5`)
 
 Metrics: [`ratchets.json`](ratchets.json). App target: 1,160 files, 648,091 lines, 88.3% of first-party Swift; 17 files over 5k lines; 102 singleton declarations and 1,220 `.shared` uses; 1,102 wrong-way edges; largest cycle 67 of 75 components.
