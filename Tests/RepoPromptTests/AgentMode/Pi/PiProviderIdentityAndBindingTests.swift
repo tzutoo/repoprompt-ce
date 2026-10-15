@@ -51,6 +51,11 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
             PiAgentToolPreferences.PermissionLevel.fullAccess.launchToolProfile.arguments,
             []
         )
+        XCTAssertFalse(PiAgentToolPreferences.PermissionLevel.fullAccess.loadsInteractiveApprovalGate)
+        XCTAssertTrue(PiAgentToolPreferences.PermissionLevel.mcpOnly.loadsInteractiveApprovalGate)
+        XCTAssertTrue(PiAgentToolPreferences.PermissionLevel.readOnly.loadsInteractiveApprovalGate)
+        XCTAssertEqual(AgentProviderPermissionProfile.userConfigured.piPermissionMode, PiAgentToolPreferences.permissionLevel().rawValue)
+        XCTAssertEqual(AgentProviderPermissionProfile.mcpSafeDefaults.piPermissionMode, "mcpOnly")
         XCTAssertEqual(AgentProviderPermissionLevelID.subagentDefault(for: .pi), .pi(.mcpOnly))
         XCTAssertEqual(
             AgentProviderPermissionLevelID.options(for: .pi).count,
@@ -105,6 +110,57 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         claudeSession.selectedReasoningEffortRaw = "high"
         coordinator.normalizeCodexSelectionForSession(claudeSession, preservingExplicitEffort: true)
         XCTAssertNil(claudeSession.selectedReasoningEffortRaw)
+    }
+
+    func testLastUsedThinkingEffortPersistsByModelSlug() {
+        let suiteName = "PiThinkingPersistenceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        PiAgentToolPreferences.setLastUsedThinkingEffort(.medium, forModelRaw: "openai/gpt-5", defaults: defaults)
+        XCTAssertEqual(
+            PiAgentToolPreferences.lastUsedThinkingEffort(forModelRaw: "openai/gpt-5", defaults: defaults),
+            .medium
+        )
+        XCTAssertEqual(PiAgentToolPreferences.lastUsedThinkingEffort(defaults: defaults), .medium)
+        PiAgentToolPreferences.setLastUsedThinkingEffort(.high, forModelRaw: "anthropic/claude", defaults: defaults)
+        XCTAssertEqual(
+            PiAgentToolPreferences.lastUsedThinkingEffort(forModelRaw: "openai/gpt-5", defaults: defaults),
+            .medium
+        )
+        XCTAssertEqual(
+            PiAgentToolPreferences.lastUsedThinkingEffort(forModelRaw: "anthropic/claude", defaults: defaults),
+            .high
+        )
+    }
+
+    @MainActor
+    func testRestoredPiThinkingPrefersSavedSessionOverLastUsed() {
+        let previous = PiAgentToolPreferences.lastUsedThinkingEffort()
+        defer { PiAgentToolPreferences.setLastUsedThinkingEffort(previous) }
+        PiAgentToolPreferences.setLastUsedThinkingEffort(.high, forModelRaw: "openai/gpt-5")
+        let viewModel = AgentModeViewModel(
+            testWindowID: 99_013,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Pi thinking restore tests must not start Codex")
+            },
+            claudeControllerFactory: { _, _, _, _ in
+                preconditionFailure("Pi thinking restore tests must not start Claude")
+            },
+            headlessProviderFactory: { _, _ in UnsupportedHeadlessAgentProvider(reason: "pi thinking restore test") },
+            mcpServerEnabler: { false },
+            testUsesProductionAgentDefaultsAndModelPolling: false
+        )
+        let session = AgentTabSession(tabID: UUID())
+        session.selectedAgent = .piAgent
+        session.selectedModelRaw = "openai/gpt-5"
+        let persisted = AgentSession(
+            name: "Saved pi thinking",
+            agentKind: AgentProviderKind.piAgent.rawValue,
+            agentModel: "openai/gpt-5",
+            agentReasoningEffort: "medium"
+        )
+        viewModel.restorePiThinking(from: persisted, to: session)
+        XCTAssertEqual(session.selectedReasoningEffortRaw, "medium")
     }
 
     func testAgentModePromptQualifiesPiSetStatusAsNamespacedMCPTool() {

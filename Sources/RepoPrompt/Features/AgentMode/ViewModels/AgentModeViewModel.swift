@@ -347,6 +347,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 if !isModelRawValid(selectedModelRaw, for: selectedAgent) {
                     selectedModelRaw = defaultModelRaw(for: selectedAgent)
                 }
+                restoreLastUsedPiThinkingIfNeeded(for: session)
                 codexCoordinator.normalizeCodexSelectionForSession(session, preservingExplicitEffort: false)
                 updatePermissionBindingState(from: session)
                 scheduleSave(for: session.tabID)
@@ -403,6 +404,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             defer {
                 syncComposerUIState()
                 syncRunInteractionUIState()
+            }
+            if selectedAgent.usesPiNativeRuntime,
+               let effort = CodexReasoningEffort.parse(selectedReasoningEffortRaw)
+            {
+                PiAgentToolPreferences.setLastUsedThinkingEffort(
+                    effort,
+                    forModelRaw: selectedModelRaw
+                )
             }
             guard let session = activeSession else { return }
             session.selectedReasoningEffortRaw = selectedReasoningEffortRaw
@@ -1857,6 +1866,12 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         isRestoringState = true
         selectedAgent = normalized.agent
         selectedModelRaw = normalized.modelRaw
+        if normalized.agent.usesPiNativeRuntime {
+            restoreLastUsedPiThinkingIfNeeded(
+                modelRaw: normalized.modelRaw,
+                currentEffortRaw: selectedReasoningEffortRaw
+            )
+        }
         isRestoringState = false
         if usesProductionAgentDefaultsAndModelPolling,
            normalized.agent.rawValue != savedAgentRaw
@@ -1869,6 +1884,57 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         guard usesProductionAgentDefaultsAndModelPolling else { return }
         guard shouldPersistLastUsedModel(agent: agent, modelRaw: modelRaw) else { return }
         Self.persistModelForAgent(agentRaw: agent.rawValue, modelRaw: modelRaw)
+    }
+
+    private func restoreLastUsedPiThinkingIfNeeded(for session: TabSession) {
+        restoreLastUsedPiThinkingIfNeeded(
+            for: session,
+            modelRaw: session.selectedModelRaw,
+            currentEffortRaw: session.selectedReasoningEffortRaw
+        )
+    }
+
+    private func restoreLastUsedPiThinkingIfNeeded(
+        for session: TabSession? = nil,
+        modelRaw: String,
+        currentEffortRaw: String?
+    ) {
+        let agent = session?.selectedAgent ?? selectedAgent
+        guard agent.usesPiNativeRuntime else { return }
+        let options = PiModelRegistry.reasoningEffortOptions(forRaw: modelRaw)
+        let resolvedRaw: String?
+        if let current = CodexReasoningEffort.parse(currentEffortRaw), options.contains(current) {
+            resolvedRaw = current.rawValue
+        } else if let effort = PiAgentToolPreferences.lastUsedThinkingEffort(forModelRaw: modelRaw),
+                  options.contains(effort)
+        {
+            resolvedRaw = effort.rawValue
+        } else {
+            resolvedRaw = nil
+        }
+        guard let resolvedRaw else { return }
+        if let session {
+            session.selectedReasoningEffortRaw = resolvedRaw
+        }
+        if session == nil || session === activeSession {
+            selectedReasoningEffortRaw = resolvedRaw
+        }
+    }
+
+    func restorePiThinking(from persisted: AgentSession, to session: TabSession) {
+        guard session.selectedAgent.usesPiNativeRuntime else { return }
+        let options = PiModelRegistry.reasoningEffortOptions(forRaw: session.selectedModelRaw)
+        if let saved = CodexReasoningEffort.parse(persisted.agentReasoningEffort), options.contains(saved) {
+            session.selectedReasoningEffortRaw = saved.rawValue
+            if usesProductionAgentDefaultsAndModelPolling {
+                PiAgentToolPreferences.setLastUsedThinkingEffort(
+                    saved,
+                    forModelRaw: session.selectedModelRaw
+                )
+            }
+            return
+        }
+        restoreLastUsedPiThinkingIfNeeded(for: session)
     }
 
     private func shouldPersistLastUsedModel(agent: AgentProviderKind, modelRaw: String) -> Bool {
@@ -2650,7 +2716,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     runID: runID,
                     tabID: tabID,
                     windowID: windowID,
-                    workspacePath: launchSettings.workspacePath
+                    workspacePath: launchSettings.workspacePath,
+                    permissionMode: launchSettings.permissionMode
                 )
             },
             awaitNoActiveMCPTools: { [weak mcpServer] runID in
@@ -2932,7 +2999,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                         runID: runID,
                         tabID: tabID,
                         windowID: windowID,
-                        workspacePath: launchSettings.workspacePath
+                        workspacePath: launchSettings.workspacePath,
+                        permissionMode: launchSettings.permissionMode
                     )
                 }
             )
@@ -3301,19 +3369,22 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     /// Constructs the pi native controller for a managed Agent Mode run. The pi
-    /// coordinator's Claude-shaped launch settings are ignored beyond the
-    /// workspace path: pi tool surface comes from `PiAgentToolPreferences`
-    /// (launch-time policy, like Claude's environment settings), and the
-    /// RepoPrompt MCP server is injected through pi's built-in MCP
-    /// (`registerMcpServer` with `exposure: direct`) so routing completes pre-prompt.
+    /// coordinator's Claude-shaped launch settings carry the workspace path and
+    /// the effective permission raw. Pi tool surface and the Full Access confirm
+    /// gate follow that permission, and the RepoPrompt MCP server is injected
+    /// through pi's built-in MCP (`registerMcpServer` with `exposure: direct`)
+    /// so routing completes pre-prompt.
     static func makePiNativeController(
         runID: UUID,
         tabID: UUID,
         windowID: Int,
-        workspacePath: String?
+        workspacePath: String?,
+        permissionMode: String? = nil
     ) -> PiNativeSessionController {
         _ = tabID
         _ = windowID
+        let permissionLevel = PiAgentToolPreferences.PermissionLevel(rawValue: permissionMode ?? "")
+            ?? PiAgentToolPreferences.permissionLevel()
         let serverConfiguration = RepoPromptMCPServerConfiguration.repoPrompt
         let mcpServers = [
             serverConfiguration.name: PiProviderRuntimeBridge.managedRepoPromptMCPServerConfiguration(
@@ -3325,8 +3396,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 workingDirectory: workspacePath.map { URL(fileURLWithPath: $0) },
                 mcpServers: mcpServers,
                 expectedPIDMCPClientName: AgentProviderKind.piMCPClientID,
-                toolProfile: PiAgentToolPreferences.permissionLevel().launchToolProfile,
-                loadsApprovalGate: PiAgentToolPreferences.permissionLevel() == .fullAccess,
+                toolProfile: permissionLevel.launchToolProfile,
+                loadsApprovalGate: permissionLevel.loadsInteractiveApprovalGate,
                 enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
             ),
             runID: runID
@@ -7224,6 +7295,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             codexCoordinator.restoreCodexSelection(from: agentSession, session: session)
         } else {
             session.selectedModelRaw = payload.normalizedSelection.modelRaw
+            if session.selectedAgent.usesPiNativeRuntime {
+                restorePiThinking(from: agentSession, to: session)
+            }
         }
         if !AgentModelCatalog.isValid(
             rawModel: session.selectedModelRaw,

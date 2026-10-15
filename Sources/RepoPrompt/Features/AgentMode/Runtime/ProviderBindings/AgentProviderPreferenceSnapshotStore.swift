@@ -161,9 +161,15 @@ final class AgentProviderPreferenceSnapshotStore {
                 acceptsPendingACPApprovalWhenActivated: level.launchesWithAlwaysApprove
             )
         case .pi:
-            // pi shapes its tool surface at launch (PiAgentToolPreferences.PermissionLevel ->
-            // launchToolProfile); there is no ACP permission surface to auto-approve.
+            // pi shapes its tool surface at launch. Recycle uses `claudePermissionMode`
+            // as the permission raw because pi rides the Claude native coordinator.
             return AgentProviderRuntimePermissionBinding(
+                claudePermissionMode: profile.piPermissionLevel(
+                    userConfigured: PiAgentToolPreferences.permissionLevel(
+                        defaults: defaults,
+                        secureStore: securePermissions
+                    )
+                ).rawValue,
                 autoApproveAllACPToolPermissions: false,
                 acceptsPendingACPApprovalWhenActivated: false
             )

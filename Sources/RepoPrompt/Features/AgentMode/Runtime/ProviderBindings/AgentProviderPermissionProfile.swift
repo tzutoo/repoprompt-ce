@@ -98,6 +98,13 @@ extension AgentProviderPermissionProfile {
         }
     }
 
+    /// Effective pi permission raw for native launch. Recycled through the shared
+    /// Claude coordinator `permissionMode` field so a chat-dropdown change can
+    /// recycle the pi process on the next idle turn.
+    var piPermissionMode: String {
+        piPermissionLevel().rawValue
+    }
+
     func claudePermissionLevel(
         userConfigured: ClaudeAgentToolPreferences.PermissionLevel = ClaudeAgentToolPreferences.permissionLevel()
     ) -> ClaudeAgentToolPreferences.PermissionLevel {

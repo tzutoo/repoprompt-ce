@@ -10,8 +10,9 @@ import RepoPromptProcess
 /// `pi.registerMcpServer` extension (never `mcp.json`, never pi-mcp-adapter).
 ///
 /// v1 boundaries (documented, deliberate):
-/// - Full Access loads an ephemeral `tool_call` gate; `confirm` dialogs become
-///   Agent Mode approval cards. Probe launches still auto-cancel.
+/// - MCP-only and Read Only load an ephemeral `tool_call` gate so unexpected
+///   bash/edit/write calls become Agent Mode approval cards. Full Access skips
+///   that gate. Probe launches still auto-cancel.
 /// - `runtimeInit` carries the pi session identity; the Claude-compatible
 ///   initialize snapshot stays `nil`.
 actor PiNativeSessionController: NativeAgentRuntimeControlling {
@@ -33,7 +34,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
         var expectedPIDMCPClientName: String?
         /// Tool surface for the managed launch.
         var toolProfile: PiProviderRuntimeBridge.ToolProfile
-        /// Load the Full Access `tool_call` confirm gate. Off for MCP-only / read-only.
+        /// Load the bash/edit/write `tool_call` confirm gate. Off for Full Access.
         var loadsApprovalGate: Bool
         /// Suppress `-na`/`-nc` determinism flags (tests with fake binaries).
         var suppressDeterminismFlags: Bool

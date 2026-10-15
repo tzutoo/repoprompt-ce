@@ -466,11 +466,11 @@ final class ClaudeAgentModeCoordinator {
         let launchModelRaw = session.selectedModelRaw
         let runtimeVariant = session.selectedAgent.claudeRuntimeVariant ?? .standard
         let runtimePermission = effectiveClaudeRuntimePermission(for: session)
-        let effectivePermissionMode = effectiveClaudePermissionResolution(
+        let effectivePermissionMode = effectiveNativePermissionMode(
             for: session,
             selectedModelRaw: launchModelRaw,
             runtimePermission: runtimePermission
-        ).effectiveMode
+        )
         let effectiveAllowNativeBashTool = runtimePermission.allowNativeBashTool
         let effectiveMCPStrictMode = runtimePermission.mcpStrictMode
 
@@ -597,11 +597,11 @@ final class ClaudeAgentModeCoordinator {
             return true
         }
         let runtimePermission = effectiveClaudeRuntimePermission(for: session)
-        let effectivePermissionMode = effectiveClaudePermissionResolution(
+        let effectivePermissionMode = effectiveNativePermissionMode(
             for: session,
             selectedModelRaw: session.selectedModelRaw,
             runtimePermission: runtimePermission
-        ).effectiveMode
+        )
         let expected = ControllerLaunchSettings(
             runtimeVariant: runtimeVariant,
             workspacePath: runtimeWorkspacePath,
@@ -1369,7 +1369,7 @@ final class ClaudeAgentModeCoordinator {
                           provider: session.selectedAgent,
                           selectedModelRaw: session.selectedModelRaw,
                           manualEffortRaw: piManualEffortRaw,
-                          enabled: autoEffortEnabledProvider()
+                          configuration: autoEffortConfigurationProvider()
                       ),
                       AutoEffortModelPolicy.piEfforts(
                           modelRaw: session.selectedModelRaw,
@@ -2233,15 +2233,22 @@ final class ClaudeAgentModeCoordinator {
     ) -> ClaudeControllerLaunchPolicy {
         guard let providerBindingService else {
             return ClaudeControllerLaunchPolicy(
-                permissionMode: session.permissionProfile.claudePermissionMode,
+                permissionMode: session.selectedAgent.usesPiNativeRuntime
+                    ? session.permissionProfile.piPermissionMode
+                    : session.permissionProfile.claudePermissionMode,
                 allowNativeBashTool: session.permissionProfile == .mcpSafeDefaults ? false : nil,
                 mcpStrictMode: session.permissionProfile == .mcpSafeDefaults ? true : nil
             )
         }
-        let permissionMode = providerBindingService.runtimePermission(
-            for: session.selectedAgent,
-            profile: session.permissionProfile
-        ).claudePermissionMode
+        let permissionMode: String?
+        if session.selectedAgent.usesPiNativeRuntime {
+            permissionMode = session.permissionProfile.piPermissionMode
+        } else {
+            permissionMode = providerBindingService.runtimePermission(
+                for: session.selectedAgent,
+                profile: session.permissionProfile
+            ).claudePermissionMode
+        }
         let preferences = providerBindingService.preferences
         return ClaudeControllerLaunchPolicy.resolve(
             permissionMode: permissionMode,
@@ -2269,6 +2276,22 @@ final class ClaudeAgentModeCoordinator {
             selectedModelRaw: selectedModelRaw,
             unsupportedAutoFallback: unsupportedAutoFallback(for: session)
         )
+    }
+
+    private func effectiveNativePermissionMode(
+        for session: AgentTabSession,
+        selectedModelRaw: String,
+        runtimePermission: ClaudeControllerLaunchPolicy? = nil
+    ) -> String {
+        if session.selectedAgent.usesPiNativeRuntime {
+            return (runtimePermission ?? effectiveClaudeRuntimePermission(for: session)).permissionMode
+                ?? session.permissionProfile.piPermissionMode
+        }
+        return effectiveClaudePermissionResolution(
+            for: session,
+            selectedModelRaw: selectedModelRaw,
+            runtimePermission: runtimePermission
+        ).effectiveMode
     }
 
     private func effectiveClaudeModel(for session: AgentTabSession) -> String? {

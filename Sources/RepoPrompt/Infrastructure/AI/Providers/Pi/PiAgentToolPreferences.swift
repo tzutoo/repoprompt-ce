@@ -6,8 +6,9 @@ enum PiAgentToolPreferences {
     /// RepoPrompt MCP tools (via built-in MCP) stay enabled — RPCE's
     /// server-side policies remain the single permission authority.
     /// `readOnly` allows pi's read-only built-ins, and `fullAccess` enables
-    /// pi's full built-in tool set (`read`, `bash`, `edit`, `write`) with the
-    /// RPC approval gate on interactive runs.
+    /// pi's full built-in tool set (`read`, `bash`, `edit`, `write`) without
+    /// per-call approval cards. Interactive runs still load the confirm gate
+    /// for `mcpOnly`/`readOnly` so an unexpected built-in mutation is blocked.
     enum PermissionLevel: String, CaseIterable {
         case mcpOnly
         case readOnly
@@ -31,7 +32,7 @@ enum PiAgentToolPreferences {
             case .readOnly:
                 "pi launches with `--tools read,grep,find,ls`. RepoPrompt MCP tools remain available and governed server-side."
             case .fullAccess:
-                "pi launches with its full built-in tool set. Interactive runs confirm bash/edit/write through RepoPrompt approval cards."
+                "pi launches with its full built-in tool set. Bash, edit, and write run without per-call approval cards. Use only in trusted environments."
             }
         }
 
@@ -59,6 +60,11 @@ enum PiAgentToolPreferences {
             case .fullAccess:
                 .standard
             }
+        }
+
+        /// Full Access is the only level that skips the bash/edit/write confirm gate.
+        var loadsInteractiveApprovalGate: Bool {
+            self != .fullAccess
         }
     }
 
@@ -93,6 +99,53 @@ enum PiAgentToolPreferences {
             return
         }
         defaults.set(level.rawValue, forKey: permissionLevelKey)
+    }
+
+    private static let lastUsedThinkingLevelKey = "piAgent.thinking.lastUsedLevel"
+    private static let lastUsedThinkingLevelByModelSlugKey = "piAgent.thinking.lastUsedLevelByModelSlug"
+
+    static func lastUsedThinkingEffort(defaults: UserDefaults = .standard) -> CodexReasoningEffort? {
+        CodexReasoningEffort.parse(defaults.string(forKey: lastUsedThinkingLevelKey))
+    }
+
+    static func lastUsedThinkingEffort(
+        forModelRaw modelRaw: String?,
+        defaults: UserDefaults = .standard
+    ) -> CodexReasoningEffort? {
+        let slug = CodexAgentToolPreferences.reasoningEffortPreferenceSlug(forModelRaw: modelRaw)
+        if let rawValue = rawLastUsedThinkingEffortsByModelSlug(defaults: defaults)[slug],
+           let effort = CodexReasoningEffort.parse(rawValue)
+        {
+            return effort
+        }
+        return lastUsedThinkingEffort(defaults: defaults)
+    }
+
+    static func setLastUsedThinkingEffort(
+        _ effort: CodexReasoningEffort?,
+        forModelRaw modelRaw: String? = nil,
+        defaults: UserDefaults = .standard
+    ) {
+        let slug = CodexAgentToolPreferences.reasoningEffortPreferenceSlug(forModelRaw: modelRaw)
+        var stored = rawLastUsedThinkingEffortsByModelSlug(defaults: defaults)
+        guard let effort else {
+            stored.removeValue(forKey: slug)
+            defaults.set(stored, forKey: lastUsedThinkingLevelByModelSlugKey)
+            defaults.removeObject(forKey: lastUsedThinkingLevelKey)
+            return
+        }
+        stored[slug] = effort.rawValue
+        defaults.set(stored, forKey: lastUsedThinkingLevelByModelSlugKey)
+        defaults.set(effort.rawValue, forKey: lastUsedThinkingLevelKey)
+    }
+
+    private static func rawLastUsedThinkingEffortsByModelSlug(defaults: UserDefaults) -> [String: String] {
+        guard let dictionary = defaults.dictionary(forKey: lastUsedThinkingLevelByModelSlugKey) else { return [:] }
+        return dictionary.reduce(into: [:]) { result, entry in
+            if let value = entry.value as? String {
+                result[entry.key] = value
+            }
+        }
     }
 
     private static func resolvedSecureStore(
