@@ -171,10 +171,14 @@ struct ContextBuilderRunBehavior: Equatable {
 
     static func ui(
         settings: ContextBuilderBehaviorSettings,
-        selectedFollowUp: ContextBuilderFollowUpType
+        selectedFollowUp: ContextBuilderFollowUpType,
+        modelContextWindowTokens: Int = ContextBuilderDefaults.fallbackContextWindowTokens
     ) -> ContextBuilderRunBehavior {
         ContextBuilderRunBehavior(
-            tokenBudget: ContextBuilderBudgetResolver.resolveUIBudget(behaviorSettings: settings),
+            tokenBudget: ContextBuilderBudgetResolver.resolveUIBudget(
+                behaviorSettings: settings,
+                modelContextWindowTokens: modelContextWindowTokens
+            ),
             enhancementMode: settings.enhancementMode,
             questionTimeoutSeconds: settings.questionTimeoutSeconds,
             allowClarifyingQuestions: settings.allowUIClarifyingQuestions,
@@ -185,12 +189,14 @@ struct ContextBuilderRunBehavior: Equatable {
     static func mcp(
         settings: ContextBuilderBehaviorSettings,
         wantsResponse: Bool,
-        targetIsActive: Bool
+        targetIsActive: Bool,
+        modelContextWindowTokens: Int = ContextBuilderDefaults.fallbackContextWindowTokens
     ) -> ContextBuilderRunBehavior {
         ContextBuilderRunBehavior(
             tokenBudget: ContextBuilderBudgetResolver.resolveMCPBudget(
                 wantsResponse: wantsResponse,
-                behaviorSettings: settings
+                behaviorSettings: settings,
+                modelContextWindowTokens: modelContextWindowTokens
             ),
             enhancementMode: settings.enhancementMode,
             questionTimeoutSeconds: settings.questionTimeoutSeconds,

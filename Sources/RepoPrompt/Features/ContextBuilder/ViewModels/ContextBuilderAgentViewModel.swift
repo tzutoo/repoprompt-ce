@@ -2036,7 +2036,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         let runBehavior = ContextBuilderRunBehavior.mcp(
             settings: behaviorSettings,
             wantsResponse: parsedResponseType?.wantsResponse ?? false,
-            targetIsActive: manager.activeWorkspaceID == identity.workspaceID
+            targetIsActive: manager.activeWorkspaceID == identity.workspaceID,
+            modelContextWindowTokens: ContextBuilderBudgetResolver.contextWindowTokens(
+                agentKind: selection.agent,
+                modelRaw: selection.modelRaw
+            )
         )
         let configuration = ContextBuilderMCPRunConfiguration(
             identity: identity,
@@ -4210,7 +4214,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         } else {
             session.runStartBehavior = ContextBuilderRunBehavior.ui(
                 settings: settingsManager.contextBuilderBehaviorSettings(),
-                selectedFollowUp: session.selectedFollowUpType
+                selectedFollowUp: session.selectedFollowUpType,
+                modelContextWindowTokens: ContextBuilderBudgetResolver.contextWindowTokens(
+                    agentKind: selectedAgent,
+                    modelRaw: selectedModelRaw
+                )
             )
         }
 

@@ -47,11 +47,46 @@ package enum ContextBuilderDefaults {
     /// Default selected-context budget for plan, review, and question runs
     package static let analysisTokenBudget: Int = 120_000
 
+    /// Conservative window used when the selected model has no verified size.
+    package static let fallbackContextWindowTokens: Int = 200_000
+
+    /// Supported persisted/UI range for context-only token budgets.
+    package static let contextTokenBudgetRange: ClosedRange<Int> = 10000 ... 1_000_000
+
     /// Supported persisted/UI range for plan, review, and question token budgets.
-    package static let analysisTokenBudgetRange: ClosedRange<Int> = 40000 ... 200_000
+    package static let analysisTokenBudgetRange: ClosedRange<Int> = 40000 ... 1_000_000
+
+    package static func normalizedContextTokenBudget(_ value: Int) -> Int {
+        min(max(value, contextTokenBudgetRange.lowerBound), contextTokenBudgetRange.upperBound)
+    }
 
     package static func normalizedAnalysisTokenBudget(_ value: Int) -> Int {
         min(max(value, analysisTokenBudgetRange.lowerBound), analysisTokenBudgetRange.upperBound)
+    }
+
+    /// Slider upper bound follows the selected model's window without exceeding the product range.
+    package static func sliderUpperBound(
+        modelContextWindowTokens: Int,
+        lowerBound: Int
+    ) -> Int {
+        let window = max(modelContextWindowTokens, lowerBound)
+        return min(max(window, lowerBound), analysisTokenBudgetRange.upperBound)
+    }
+
+    package static func contextSliderRange(modelContextWindowTokens: Int) -> ClosedRange<Double> {
+        let upper = sliderUpperBound(
+            modelContextWindowTokens: modelContextWindowTokens,
+            lowerBound: contextTokenBudgetRange.lowerBound
+        )
+        return Double(contextTokenBudgetRange.lowerBound) ... Double(upper)
+    }
+
+    package static func analysisSliderRange(modelContextWindowTokens: Int) -> ClosedRange<Double> {
+        let upper = sliderUpperBound(
+            modelContextWindowTokens: modelContextWindowTokens,
+            lowerBound: analysisTokenBudgetRange.lowerBound
+        )
+        return Double(analysisTokenBudgetRange.lowerBound) ... Double(upper)
     }
 
     // MARK: - Enhancement Mode

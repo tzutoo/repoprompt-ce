@@ -31,6 +31,13 @@ struct ContextBuilderSettingsView: View {
         fontScale.preset
     }
 
+    private var selectedModelContextWindowTokens: Int {
+        ContextBuilderBudgetResolver.contextWindowTokens(
+            agentKind: contextBuilderVM.selectedAgent,
+            modelRaw: contextBuilderVM.selectedModelRaw
+        )
+    }
+
     @State private var showPromptsOverlay = false
     @State private var selectedPromptIDsForSettings: Set<UUID> = [] // Dummy binding for settings view
     @ObservedObject private var promptStorage = ContextBuilderPromptStorage.shared
@@ -110,13 +117,20 @@ struct ContextBuilderSettingsView: View {
                     }
                     Slider(
                         value: Binding(
-                            get: { Double(contextBuilderVM.contextTokenBudget) },
+                            get: {
+                                let range = ContextBuilderDefaults.contextSliderRange(
+                                    modelContextWindowTokens: selectedModelContextWindowTokens
+                                )
+                                return min(max(Double(contextBuilderVM.contextTokenBudget), range.lowerBound), range.upperBound)
+                            },
                             set: { contextBuilderVM.contextTokenBudget = Int($0) }
                         ),
-                        in: 10000 ... 200_000,
+                        in: ContextBuilderDefaults.contextSliderRange(
+                            modelContextWindowTokens: selectedModelContextWindowTokens
+                        ),
                         step: 5000
                     )
-                    Text("Sets the target size of the context package. Use ~160k for ChatGPT/web exports by default, or lower for a more token-efficient prompt.")
+                    Text("Sets the target size of the context package. The slider max follows the selected model's context window; switching models does not change the saved budget.")
                         .font(fontPreset.captionFont)
                         .foregroundColor(.secondary)
                 }
@@ -136,14 +150,19 @@ struct ContextBuilderSettingsView: View {
                     Slider(
                         value: Binding(
                             get: {
-                                Double(ContextBuilderDefaults.normalizedAnalysisTokenBudget(
-                                    contextBuilderVM.analysisTokenBudget
-                                ))
+                                let range = ContextBuilderDefaults.analysisSliderRange(
+                                    modelContextWindowTokens: selectedModelContextWindowTokens
+                                )
+                                return min(
+                                    max(Double(contextBuilderVM.analysisTokenBudget), range.lowerBound),
+                                    range.upperBound
+                                )
                             },
                             set: { contextBuilderVM.analysisTokenBudget = Int($0) }
                         ),
-                        in: Double(ContextBuilderDefaults.analysisTokenBudgetRange.lowerBound)
-                            ... Double(ContextBuilderDefaults.analysisTokenBudgetRange.upperBound),
+                        in: ContextBuilderDefaults.analysisSliderRange(
+                            modelContextWindowTokens: selectedModelContextWindowTokens
+                        ),
                         step: 5000
                     )
                     Text("Sets the target size of the context package when Context Builder will immediately produce a plan, review, or answer.")

@@ -105,7 +105,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         let fileURL = root.appendingPathComponent("Settings/globalSettings.json")
         let initialStore = GlobalSettingsFileStore(fileURL: fileURL)
         try initialStore.save(makeDocument(
-            contextBuilder: makeContextBuilderSettings(analysisTokenBudget: 250_000),
+            contextBuilder: makeContextBuilderSettings(analysisTokenBudget: 1_500_000),
             fileSystemGlobalIgnoreDefaults: "already-seeded"
         ))
         var rawRoot = try readJSONObject(at: fileURL)
@@ -152,7 +152,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
         try initialStore.save(makeDocument(
             workspaceID: workspaceID,
             includeLegacyChatSettings: true,
-            legacyAnalysisTokenBudget: 250_000,
+            legacyAnalysisTokenBudget: 1_500_000,
             fileSystemGlobalIgnoreDefaults: "already-seeded"
         ))
 
@@ -222,7 +222,7 @@ final class GlobalSettingsPersistenceSafetyTests: XCTestCase {
             workspaceID: workspaceID,
             includeLegacyChatSettings: true,
             includeAgentModelsProfile: true,
-            contextBuilder: makeContextBuilderSettings(analysisTokenBudget: 250_000),
+            contextBuilder: makeContextBuilderSettings(analysisTokenBudget: 1_500_000),
             fileSystemGlobalIgnoreDefaults: "keep"
         )
         let initialStore = GlobalSettingsFileStore(fileURL: fileURL)

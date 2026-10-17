@@ -15,6 +15,15 @@ final class ContextBuilderGlobalBehaviorSettingsTests: XCTestCase {
         XCTAssertEqual(ContextBuilderDefaults.normalizedAnalysisTokenBudget(range.upperBound + 1), range.upperBound)
     }
 
+    func testContextTokenBudgetNormalizationPreservesBoundsAndClampsOutsideValues() {
+        let range = ContextBuilderDefaults.contextTokenBudgetRange
+
+        XCTAssertEqual(ContextBuilderDefaults.normalizedContextTokenBudget(range.lowerBound - 1), range.lowerBound)
+        XCTAssertEqual(ContextBuilderDefaults.normalizedContextTokenBudget(range.lowerBound), range.lowerBound)
+        XCTAssertEqual(ContextBuilderDefaults.normalizedContextTokenBudget(range.upperBound), range.upperBound)
+        XCTAssertEqual(ContextBuilderDefaults.normalizedContextTokenBudget(range.upperBound + 1), range.upperBound)
+    }
+
     func testUIBudgetUsesContextBudgetWhenFollowUpAnalysisDisabled() {
         var settings = ContextBuilderDefaults.behaviorSettings
         settings.contextTokenBudget = 43210
@@ -31,6 +40,92 @@ final class ContextBuilderGlobalBehaviorSettingsTests: XCTestCase {
         settings.followUpAnalysisEnabled = true
 
         XCTAssertEqual(ContextBuilderBudgetResolver.resolveUIBudget(behaviorSettings: settings), 54321)
+    }
+
+    func testBudgetClampNeverRaisesAndCapsToModelWindow() {
+        XCTAssertEqual(ContextBuilderBudgetResolver.clamp(160_000, to: 500_000), 160_000)
+        XCTAssertEqual(ContextBuilderBudgetResolver.clamp(400_000, to: 262_144), 262_144)
+        XCTAssertEqual(ContextBuilderBudgetResolver.clamp(400_000, to: 200_000), 200_000)
+    }
+
+    func testBudgetResolverUsesSelectedModelWindowWithoutRaisingSavedBudget() {
+        var settings = ContextBuilderDefaults.behaviorSettings
+        settings.contextTokenBudget = 400_000
+        settings.analysisTokenBudget = 400_000
+        settings.followUpAnalysisEnabled = false
+
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.resolveUIBudget(
+                behaviorSettings: settings,
+                modelContextWindowTokens: 262_144
+            ),
+            262_144
+        )
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.resolveUIBudget(
+                behaviorSettings: settings,
+                modelContextWindowTokens: 500_000
+            ),
+            400_000
+        )
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.resolveMCPBudget(
+                wantsResponse: true,
+                behaviorSettings: settings,
+                modelContextWindowTokens: 200_000
+            ),
+            200_000
+        )
+    }
+
+    func testKnownDiscoveryWindowsMatchUserLargeContextModels() {
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.contextWindowTokens(
+                agentKind: .grokBuild,
+                modelRaw: "grok-4"
+            ),
+            500_000
+        )
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.contextWindowTokens(
+                agentKind: .openCode,
+                modelRaw: "deepseek-ai/deepseek-v4-flash"
+            ),
+            1_000_000
+        )
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.contextWindowTokens(
+                agentKind: .openCode,
+                modelRaw: "qwen38-27b-262k"
+            ),
+            262_144
+        )
+        XCTAssertEqual(
+            ContextBuilderBudgetResolver.contextWindowTokens(
+                agentKind: .openCode,
+                modelRaw: "anthropic/claude-sonnet-4-6"
+            ),
+            200_000
+        )
+    }
+
+    func testSliderMaxFollowsModelWindowWithoutExceedingProductCeiling() {
+        XCTAssertEqual(
+            ContextBuilderDefaults.contextSliderRange(modelContextWindowTokens: 262_144).upperBound,
+            262_144
+        )
+        XCTAssertEqual(
+            ContextBuilderDefaults.contextSliderRange(modelContextWindowTokens: 500_000).upperBound,
+            500_000
+        )
+        XCTAssertEqual(
+            ContextBuilderDefaults.contextSliderRange(modelContextWindowTokens: 2_000_000).upperBound,
+            Double(ContextBuilderDefaults.contextTokenBudgetRange.upperBound)
+        )
+        XCTAssertEqual(
+            ContextBuilderDefaults.analysisSliderRange(modelContextWindowTokens: 200_000).upperBound,
+            200_000
+        )
     }
 
     func testMCPBudgetUsesContextBudgetForOmittedAndClarify() {
@@ -336,7 +431,8 @@ final class ContextBuilderGlobalBehaviorSettingsTests: XCTestCase {
             isRunning: false,
             activeRunBehavior: nil,
             desiredSettings: desired,
-            selectedFollowUp: .plan
+            selectedFollowUp: .plan,
+            modelContextWindowTokens: range.upperBound
         )
         XCTAssertEqual(high.behavior?.tokenBudget, range.upperBound)
 
