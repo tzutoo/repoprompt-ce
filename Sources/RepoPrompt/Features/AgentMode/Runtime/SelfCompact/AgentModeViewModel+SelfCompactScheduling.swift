@@ -113,7 +113,7 @@ extension AgentModeViewModel {
         switch support {
         case .notSupported: return .blocked(reason: "not_supported")
         case .noProviderSession: return .blocked(reason: "no_provider_session")
-        case .codex, .claudeCode, .acpAdvertisedCommand: break
+        case .codex, .claudeCode, .pi, .acpAdvertisedCommand: break
         }
         var readiness = Self.agentSessionLinkDeliveryReadinessSnapshot(
             session: session, endpointMatchesGrant: true, isClosing: false

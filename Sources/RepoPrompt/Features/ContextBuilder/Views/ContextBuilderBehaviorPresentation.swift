@@ -1,3 +1,4 @@
+import Foundation
 import RepoPromptSettingsCore
 
 /// Read-only presentation authority for Context Builder behavior readouts.

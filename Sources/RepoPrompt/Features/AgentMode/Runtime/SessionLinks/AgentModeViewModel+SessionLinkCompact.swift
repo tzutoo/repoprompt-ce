@@ -17,6 +17,8 @@ enum AgentSessionLinkCompactSupport: String, Codable, Equatable {
     case codex
     /// Claude Code: the bare native `/compact` command in the existing provider conversation.
     case claudeCode
+    /// Pi: first-party RPC `compact` on the existing provider session, not a `/compact` user turn.
+    case pi
     /// An ACP session whose live controller currently advertises `compact` in the existing provider
     /// session: the bare `/compact` as the whole `session/prompt`. Live-unverified.
     case acpAdvertisedCommand
@@ -56,6 +58,9 @@ extension AgentModeViewModel {
         case .claudeCode:
             let conversation = session.providerSessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
             return conversation?.isEmpty == false ? .claudeCode : .noProviderSession
+        case .piAgent:
+            let conversation = session.providerSessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return conversation?.isEmpty == false ? .pi : .noProviderSession
         case .devin, .grokBuild, .antigravity:
             // Bind the exact stored conversation — it is what the controller's snapshot compares.
             guard let conversation = session.providerSessionID,
@@ -89,7 +94,7 @@ extension AgentModeViewModel {
             return advertised.names.contains(AgentProviderControlCommand.Kind.compact.rawValue)
                 ? .acpAdvertisedCommand
                 : .notSupported
-        case .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .openCode, .cursor, .piAgent:
+        case .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .openCode, .cursor:
             return .notSupported
         }
     }
@@ -142,7 +147,7 @@ extension AgentModeViewModel {
             return .blocked(.notSupported)
         case .noProviderSession:
             return .blocked(.noProviderSession)
-        case .codex, .claudeCode, .acpAdvertisedCommand:
+        case .codex, .claudeCode, .pi, .acpAdvertisedCommand:
             break
         }
 
@@ -289,8 +294,8 @@ extension AgentModeViewModel {
 
         // 8. The native command. Codex compacts its thread through the app-server control plane and
         //    never sends a message; Claude Code and an advertising ACP session receive exactly
-        //    `/compact` through their ordinary run pipelines, so status, events, and (for Claude) the
-        //    compaction boundary flow as for any turn.
+        //    `/compact` through their ordinary run pipelines; pi intercepts that same control command
+        //    and issues RPC `compact` instead of a user turn.
         let dispatch = await agentSessionLinkDispatchNativeCompact(
             session: liveSession,
             tabID: candidate.tabID,
@@ -356,7 +361,7 @@ extension AgentModeViewModel {
             case .notStarted: return .notStarted
             case .startFailed: return .startFailed
             }
-        case .claudeCode, .acpAdvertisedCommand:
+        case .claudeCode, .pi, .acpAdvertisedCommand:
             guard let conversation = session.providerSessionID,
                   let binding = session.persistentSessionBindingIdentity,
                   isStillAdmissible()

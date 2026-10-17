@@ -259,12 +259,13 @@ final class AgentSessionLinkCompactTransactionTests: XCTestCase {
 
     // MARK: - Support
 
-    func testOnlyClaudeCodeAndCodexWithAProviderConversationAreSupported() async throws {
+    func testOnlyClaudeCodeCodexAndPiWithAProviderConversationAreSupported() async throws {
         for agent in AgentProviderKind.allCases {
             let fixture = try makeFixture(agent: agent)
             let expected: AgentSessionLinkCompactSupport = switch agent {
             case .claudeCode: .claudeCode
             case .codexExec: .codex
+            case .piAgent: .pi
             case .devin, .grokBuild, .antigravity:
                 // A remembered ACP conversation with no live session yet is retryable, not
                 // incapable: one ordinary turn brings the provider session and its command
@@ -275,7 +276,7 @@ final class AgentSessionLinkCompactTransactionTests: XCTestCase {
             let support = await fixture.viewModel.agentSessionLinkCompactSupport(for: fixture.session)
             XCTAssertEqual(support, expected, "\(agent)")
         }
-        for agent in [AgentProviderKind.claudeCode, .codexExec] {
+        for agent in [AgentProviderKind.claudeCode, .codexExec, .piAgent] {
             let fixture = try makeFixture(agent: agent, providerConversation: false)
             let support = await fixture.viewModel.agentSessionLinkCompactSupport(for: fixture.session)
             XCTAssertEqual(
@@ -647,7 +648,7 @@ final class AgentSessionLinkCompactTransactionTests: XCTestCase {
         XCTAssertFalse(fixture.events.contains(.save))
     }
 
-    func testProviderControlOptionsSkipEveryUserAugmentationAndOnlyClaudeCodeDispatchesThem() {
+    func testProviderControlOptionsSkipEveryUserAugmentationAndOnlyNativeRuntimesDispatchThem() {
         let command = AgentProviderControlCommand.compact(
             expectedBinding: AgentPersistentSessionBindingIdentity(tabID: UUID(), sessionID: UUID()),
             expectedProviderConversation: "conversation"
@@ -662,7 +663,7 @@ final class AgentSessionLinkCompactTransactionTests: XCTestCase {
             session.selectedAgent = agent
             XCTAssertEqual(
                 AgentModeRunService.dispatchesProviderControlCommand(command, for: session),
-                agent == .claudeCode,
+                agent == .claudeCode || agent.usesPiNativeRuntime,
                 "\(agent) without a live advertising ACP session"
             )
         }
@@ -700,7 +701,8 @@ final class AgentSessionLinkCompactTransactionTests: XCTestCase {
             // relaunch) is retryable: it is not yet knowable whether the provider compacts.
             (.devin, true, .noProviderSession),
             (.claudeCode, false, .noProviderSession),
-            (.codexExec, false, .noProviderSession)
+            (.codexExec, false, .noProviderSession),
+            (.piAgent, false, .noProviderSession)
         ] {
             let fixture = try makeFixture(agent: agent, providerConversation: conversation)
             let before = fixture.session.items.count

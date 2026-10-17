@@ -112,9 +112,9 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertNil(claudeSession.selectedReasoningEffortRaw)
     }
 
-    func testLastUsedThinkingEffortPersistsByModelSlug() {
+    func testLastUsedThinkingEffortPersistsByModelSlug() throws {
         let suiteName = "PiThinkingPersistenceTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         PiAgentToolPreferences.setLastUsedThinkingEffort(.medium, forModelRaw: "openai/gpt-5", defaults: defaults)
         XCTAssertEqual(
@@ -139,7 +139,7 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         defer { PiAgentToolPreferences.setLastUsedThinkingEffort(previous) }
         PiAgentToolPreferences.setLastUsedThinkingEffort(.high, forModelRaw: "openai/gpt-5")
         let viewModel = AgentModeViewModel(
-            testWindowID: 99_013,
+            testWindowID: 99013,
             codexControllerFactory: { _, _, _, _, _, _ in
                 preconditionFailure("Pi thinking restore tests must not start Codex")
             },
@@ -181,6 +181,32 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
     func testSelfCompactAndControlCommandsAdmitPi() {
         XCTAssertTrue(AgentProviderKind.piAgent.usesPiNativeRuntime)
         XCTAssertFalse(AgentProviderControlCommand.acpRuntimeAdvertisesNativeCommands(.piAgent))
+        XCTAssertEqual(AgentSessionLinkCompactSupport.pi.rawValue, "pi")
+    }
+
+    @MainActor
+    func testSessionLinkCompactSupportTreatsPiLikeClaudeAndCodex() async {
+        let viewModel = AgentModeViewModel(
+            testWindowID: 99014,
+            codexControllerFactory: { _, _, _, _, _, _ in
+                preconditionFailure("Pi compact support tests must not start Codex")
+            },
+            claudeControllerFactory: { _, _, _, _ in
+                preconditionFailure("Pi compact support tests must not start Claude")
+            },
+            headlessProviderFactory: { _, _ in UnsupportedHeadlessAgentProvider(reason: "pi compact support test") },
+            mcpServerEnabler: { false },
+            testUsesProductionAgentDefaultsAndModelPolling: false
+        )
+        let tabID = UUID()
+        let session = viewModel.session(for: tabID)
+        session.selectedAgent = .piAgent
+        let withoutConversation = await viewModel.agentSessionLinkCompactSupport(for: session)
+        XCTAssertEqual(withoutConversation, .noProviderSession)
+
+        session.providerSessionID = "pi-session"
+        let withConversation = await viewModel.agentSessionLinkCompactSupport(for: session)
+        XCTAssertEqual(withConversation, .pi)
     }
 
     func testManagedPiMCPConfigCoversSubagentLifecycleWaits() {

@@ -281,6 +281,7 @@ final class AgentSelfCompactStateTests: XCTestCase {
         for provider in [
             AgentSessionLinkCompactSupport.claudeCode,
             .codex,
+            .pi,
             .acpAdvertisedCommand
         ] {
             var session = AgentSession(name: "Parked \(provider.rawValue)", autoEditEnabled: true)
