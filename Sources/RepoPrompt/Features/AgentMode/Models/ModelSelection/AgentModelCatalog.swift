@@ -1981,7 +1981,8 @@ enum AgentModelCatalog {
                 SelectionCandidate(agent: .codexExec, modelRaw: AgentModel.gpt54MiniMedium.rawValue),
                 SelectionCandidate(agent: .codexExec, modelRaw: AgentModel.codexMini.rawValue),
                 SelectionCandidate(agent: .cursor, modelRaw: AgentModel.cursorAuto.rawValue),
-                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue)
+                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue),
+                SelectionCandidate(agent: .piAgent, modelRaw: AgentModel.defaultModel.rawValue)
             ]
         case .engineer:
             [
@@ -1991,7 +1992,8 @@ enum AgentModelCatalog {
                 SelectionCandidate(agent: .kimiCode, modelRaw: AgentModel.kimiCode.rawValue),
                 SelectionCandidate(agent: .customClaudeCompatible, modelRaw: defaultCompatibleBackendModelRaw(for: .customClaudeCompatible)),
                 SelectionCandidate(agent: .cursor, modelRaw: AgentModel.cursorComposer2.rawValue),
-                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue)
+                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue),
+                SelectionCandidate(agent: .piAgent, modelRaw: AgentModel.defaultModel.rawValue)
             ]
         case .pair:
             [
@@ -2001,7 +2003,8 @@ enum AgentModelCatalog {
                 SelectionCandidate(agent: .kimiCode, modelRaw: AgentModel.kimiCode.rawValue),
                 SelectionCandidate(agent: .customClaudeCompatible, modelRaw: defaultCompatibleBackendModelRaw(for: .customClaudeCompatible)),
                 SelectionCandidate(agent: .cursor, modelRaw: AgentModel.cursorComposer2.rawValue),
-                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue)
+                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue),
+                SelectionCandidate(agent: .piAgent, modelRaw: AgentModel.defaultModel.rawValue)
             ]
         case .design:
             [
@@ -2011,7 +2014,8 @@ enum AgentModelCatalog {
                 SelectionCandidate(agent: .customClaudeCompatible, modelRaw: defaultCompatibleBackendModelRaw(for: .customClaudeCompatible)),
                 SelectionCandidate(agent: .cursor, modelRaw: AgentModel.cursorComposer2.rawValue),
                 SelectionCandidate(agent: .codexExec, modelRaw: solMedium),
-                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue)
+                SelectionCandidate(agent: .grokBuild, modelRaw: AgentModel.defaultModel.rawValue),
+                SelectionCandidate(agent: .piAgent, modelRaw: AgentModel.defaultModel.rawValue)
             ]
         }
     }

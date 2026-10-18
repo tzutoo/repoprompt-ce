@@ -4461,8 +4461,25 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 message = "Agent completed"
             }
             dedupeKey = "message-stop"
+        case "reasoning":
+            // Pi and other providers emit reasoning as its own stream type. Empty
+            // deltas must not become a synthetic "Unknown event" log row.
+            let reasoningMessage = result.reasoning ?? result.text ?? ""
+            guard shouldDisplayCompactStatusMessage(reasoningMessage) else { return nil }
+            entryType = .system
+            message = reasoningMessage
+            dedupeKey = "status:reasoning:\(normalizedLogKeyComponent(reasoningMessage))"
+        case "usage":
+            // Usage is accounted on message_stop. An empty usage event is not a status.
+            return nil
+        case "lifecycle":
+            let lifecycleMessage = result.text ?? ""
+            guard shouldDisplayCompactStatusMessage(lifecycleMessage) else { return nil }
+            entryType = .system
+            message = lifecycleMessage
+            dedupeKey = "status:lifecycle:\(normalizedLogKeyComponent(lifecycleMessage))"
         default:
-            let fallbackMessage = result.text ?? result.reasoning ?? "Unknown event"
+            let fallbackMessage = result.text ?? result.reasoning ?? ""
             guard shouldDisplayCompactStatusMessage(fallbackMessage) else { return nil }
             entryType = .system
             message = fallbackMessage
