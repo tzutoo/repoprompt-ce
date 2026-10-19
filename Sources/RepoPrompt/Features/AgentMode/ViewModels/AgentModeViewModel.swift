@@ -1911,15 +1911,14 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let agent = session?.selectedAgent ?? selectedAgent
         guard agent.usesPiNativeRuntime else { return }
         let options = PiModelRegistry.reasoningEffortOptions(forRaw: modelRaw)
-        let resolvedRaw: String?
-        if let current = CodexReasoningEffort.parse(currentEffortRaw), options.contains(current) {
-            resolvedRaw = current.rawValue
+        let resolvedRaw: String? = if let current = CodexReasoningEffort.parse(currentEffortRaw), options.contains(current) {
+            current.rawValue
         } else if let effort = PiAgentToolPreferences.lastUsedThinkingEffort(forModelRaw: modelRaw),
                   options.contains(effort)
         {
-            resolvedRaw = effort.rawValue
+            effort.rawValue
         } else {
-            resolvedRaw = nil
+            nil
         }
         guard let resolvedRaw else { return }
         if let session {
@@ -2800,8 +2799,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         }
         codexCoordinator.attach(viewModel: self)
         observeCodexComputerUseSetting()
+        let hostCapabilities = makeClaudeCoordinatorHostCapabilities()
         claudeCoordinator.installHostCapabilities(
-            makeClaudeCoordinatorHostCapabilities(),
+            hostCapabilities,
+            providerBindingService: providerBindingService
+        )
+        piCoordinator.installHostCapabilities(
+            hostCapabilities,
             providerBindingService: providerBindingService
         )
         runInteractionStateObserver = codexCoordinator
@@ -3045,8 +3049,13 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             providerBindingService = AgentModeProviderBindingService()
             codexCoordinator.attach(viewModel: self)
             observeCodexComputerUseSetting()
+            let hostCapabilities = makeClaudeCoordinatorHostCapabilities()
             claudeCoordinator.installHostCapabilities(
-                makeClaudeCoordinatorHostCapabilities(),
+                hostCapabilities,
+                providerBindingService: providerBindingService
+            )
+            piCoordinator.installHostCapabilities(
+                hostCapabilities,
                 providerBindingService: providerBindingService
             )
             runInteractionStateObserver = codexCoordinator
@@ -3733,8 +3742,9 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             }
         )
         let toolTrackingHooks = makeToolTrackingHooks()
-        // Wire hooks so per-tab Claude handlers get proper viewmodel callbacks.
+        // Wire hooks so per-tab Claude/pi handlers get proper viewmodel callbacks.
         claudeCoordinator.toolTrackingHooks = toolTrackingHooks
+        piCoordinator.toolTrackingHooks = toolTrackingHooks
         return AgentModeRunService(
             dependencies: dependencies,
             hooks: hooks,
@@ -9951,7 +9961,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
         let acpController = session.acpController
         let codexController = session.codexController
         if let controller = claudeController, await controller.hasTurnInFlight {
-            throw MCPError.invalidParams("The Claude runtime still has a turn in flight. Wait for it to settle before switching worktrees.")
+            let runtimeName = session.selectedAgent.usesPiNativeRuntime ? "pi" : "Claude"
+            throw MCPError.invalidParams("The \(runtimeName) runtime still has a turn in flight. Wait for it to settle before switching worktrees.")
         }
         if let controller = acpController, await controller.hasExecutionInFlight {
             throw MCPError.invalidParams("The ACP runtime still has execution in flight. Wait for it to settle before switching worktrees.")
@@ -10119,7 +10130,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
             await codexCoordinator.shutdownCodexSession(session)
             codexCoordinator.clearCodexSessionState(session)
         }
-        await claudeCoordinator.shutdownClaudeSessionIfNeeded(session)
+        await nativeCoordinator(for: session.selectedAgent).shutdownClaudeSessionIfNeeded(session)
         session.providerSessionID = nil
         session.providerCleanupHandle = nil
         session.contextUsageSnapshot = nil

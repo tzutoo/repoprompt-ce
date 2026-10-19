@@ -65,6 +65,30 @@ final class AgentWorktreeBindingAdmissionTests: XCTestCase {
         }
     }
 
+    func testPiOwnedTurnRejectsWithPiRuntimeIdleMessage() async throws {
+        let (viewModel, session, sessionID) = fixture()
+        session.selectedAgent = .piAgent
+        let native = MonitorFakeNativeController()
+        await native.setTurnInFlight(true)
+        session.claudeController = native
+        var committed = false
+        do {
+            _ = try await viewModel.transitionWorktreeBindings(
+                [], forSessionID: sessionID, intent: .externalManagement,
+                beforeCommit: { committed = true }
+            )
+            XCTFail("Provider-owned pi turn must block switching independently of UI state")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("pi runtime"))
+            XCTAssertFalse(error.localizedDescription.contains("Claude runtime"))
+            XCTAssertFalse(committed)
+            XCTAssertFalse(session.isChangingExecutionLocation)
+            XCTAssertEqual(session.worktreeBindings.count, 1)
+            let shutdownCount = await native.shutdownCount
+            XCTAssertEqual(shutdownCount, 0)
+        }
+    }
+
     func testActiveLifecycleOwnershipRejectsEvenWhenPublishedStateIsIdle() async {
         let (viewModel, session, sessionID) = fixture()
         _ = session.beginRunAttempt(source: "test")
@@ -486,9 +510,19 @@ final class AgentWorktreeBindingAdmissionTests: XCTestCase {
     // MARK: - Self relocation from a live turn
 
     func testSelfRelocationFromLiveTurnSchedulesWithoutTouchingRunningProvider() async throws {
+        try await assertSelfRelocationFromLiveTurnSchedulesWithoutTouchingRunningProvider()
+    }
+
+    func testPiSelfRelocationFromLiveTurnSchedulesWithoutTouchingRunningProvider() async throws {
+        try await assertSelfRelocationFromLiveTurnSchedulesWithoutTouchingRunningProvider(agent: .piAgent)
+    }
+
+    private func assertSelfRelocationFromLiveTurnSchedulesWithoutTouchingRunningProvider(
+        agent: AgentProviderKind = .claudeCode
+    ) async throws {
         let fixture = try await durableFixture()
         defer { fixture.git.cleanup() }
-        let turn = try await liveSelfTurn(fixture)
+        let turn = try await liveSelfTurn(fixture, agent: agent)
         let original = fixture.session.worktreeBindings
         let next = try makeNextBinding(fixture)
         var recorded = false
@@ -503,16 +537,40 @@ final class AgentWorktreeBindingAdmissionTests: XCTestCase {
         XCTAssertEqual(fixture.session.pendingSelfWorktreeRelocation, pending)
         XCTAssertEqual(fixture.session.worktreeBindings, original, "The running turn keeps its execution roots")
         XCTAssertEqual(fixture.session.runState, .running)
+        XCTAssertEqual(fixture.session.selectedAgent, agent)
         XCTAssertTrue(fixture.session.claudeController === turn.native)
         let shutdownCount = await turn.native.shutdownCount
         XCTAssertEqual(shutdownCount, 0)
     }
 
     func testSelfRelocationAppliesAtCompletedTerminalAndContinuesInNewLocation() async throws {
+        try await assertSelfRelocationAppliesAtCompletedTerminalAndContinuesInNewLocation()
+    }
+
+    func testPiSelfRelocationAppliesAtCompletedTerminalAndContinuesInNewLocation() async throws {
+        try await assertSelfRelocationAppliesAtCompletedTerminalAndContinuesInNewLocation(agent: .piAgent)
+    }
+
+    private func assertSelfRelocationAppliesAtCompletedTerminalAndContinuesInNewLocation(
+        agent: AgentProviderKind = .claudeCode
+    ) async throws {
         let fixture = try await durableFixture()
         defer { fixture.git.cleanup() }
-        let turn = try await liveSelfTurn(fixture)
+        let turn = try await liveSelfTurn(fixture, agent: agent)
         let next = try makeNextBinding(fixture)
+        let originLaunch = ClaudeAgentModeCoordinator.ControllerLaunchSettings(
+            runtimeVariant: .standard,
+            workspacePath: fixture.session.worktreeBindings[0].worktreeRootPath,
+            permissionMode: agent.usesPiNativeRuntime ? "full" : "bypassPermissions",
+            allowNativeBashTool: nil,
+            mcpStrictMode: nil
+        )
+        let ownerCoordinator = agent.usesPiNativeRuntime ? fixture.viewModel.piCoordinator : fixture.viewModel.claudeCoordinator
+        let otherCoordinator = agent.usesPiNativeRuntime ? fixture.viewModel.claudeCoordinator : fixture.viewModel.piCoordinator
+        ownerCoordinator.test_setControllerLaunchSettings(originLaunch, for: fixture.session)
+        otherCoordinator.test_setControllerLaunchSettings(originLaunch, for: fixture.session)
+        XCTAssertNotNil(ownerCoordinator.test_controllerLaunchSettings(for: fixture.session))
+        XCTAssertNotNil(otherCoordinator.test_controllerLaunchSettings(for: fixture.session))
         _ = try await fixture.viewModel.scheduleSelfWorktreeRelocation(
             [next], forSessionID: fixture.sessionID,
             originRunID: turn.runID, originRunAttemptID: turn.ownership.attemptID
@@ -542,6 +600,15 @@ final class AgentWorktreeBindingAdmissionTests: XCTestCase {
         XCTAssertEqual(fixture.session.worktreeBindings, [next])
         XCTAssertNil(fixture.session.pendingSelfWorktreeRelocation)
         XCTAssertNil(fixture.session.claudeController, "The old-root provider is retired, never rerouted")
+        XCTAssertEqual(fixture.session.selectedAgent, agent)
+        XCTAssertNil(
+            ownerCoordinator.test_controllerLaunchSettings(for: fixture.session),
+            "Teardown must clear the owning native coordinator's launch map"
+        )
+        XCTAssertNotNil(
+            otherCoordinator.test_controllerLaunchSettings(for: fixture.session),
+            "The sibling native coordinator must not own this session's worktree teardown"
+        )
         XCTAssertFalse(fixture.session.isChangingExecutionLocation)
         // The test starter does not start a run, so the reservation must not leak.
         for _ in 0 ..< 200 where fixture.session.mcpFollowUpRunPending {
@@ -714,9 +781,13 @@ final class AgentWorktreeBindingAdmissionTests: XCTestCase {
         let native: MonitorFakeNativeController
     }
 
-    private func liveSelfTurn(_ fixture: DurableFixture) async throws -> LiveSelfTurn {
+    private func liveSelfTurn(
+        _ fixture: DurableFixture,
+        agent: AgentProviderKind = .claudeCode
+    ) async throws -> LiveSelfTurn {
         let native = MonitorFakeNativeController()
         await native.setTurnInFlight(true)
+        fixture.session.selectedAgent = agent
         fixture.session.claudeController = native
         fixture.session.providerSessionID = "origin-provider-session"
         let runID = UUID()
