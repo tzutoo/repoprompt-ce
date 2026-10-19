@@ -1,8 +1,9 @@
 import Foundation
 
 /// MCP initialize `name` presented by pi's built-in MCP client (`runtime.js`:
-/// `new McpClient({ name: "pi", ... })`). Expected-PID routing and always-allow
-/// must match this exact name. This is not the adapter's `pi-mcp-<server>` form.
+/// `new McpClient({ name: "pi", ... })`). Expected-PID routing must match this
+/// exact name. It is not an admission principal and is not the adapter's
+/// `pi-mcp-<server>` form.
 public enum PiBuiltinMCPClientIdentity {
     public static let clientName = "pi"
 }

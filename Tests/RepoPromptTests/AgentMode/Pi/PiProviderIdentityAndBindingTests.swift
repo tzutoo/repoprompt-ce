@@ -10,7 +10,10 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         XCTAssertTrue(MCPClientIdentity.matches("pi", AgentProviderKind.piAgent.mcpClientNameHint))
         XCTAssertEqual(MCPClientIdentity.storageKey("pi"), "pi")
         XCTAssertFalse(MCPClientIdentity.sameFamily("pi", "grok-shell-RepoPromptCE"))
-        XCTAssertTrue(ServerController.isBuiltInAlwaysAllowedClient("pi"))
+        // The initialize name is a routing key, not an admission principal.
+        XCTAssertFalse(ServerController.isBuiltInAlwaysAllowedClient("pi"))
+        XCTAssertFalse(ServerController.canAutomaticallyApprove(clientName: "pi", bundledCLI: false))
+        XCTAssertFalse(ServerController.canAutomaticallyApprove(clientName: "pi", bundledCLI: true))
         // Retired adapter identity stays a distinct family so leftover entries do not
         // collapse onto the built-in client name.
         XCTAssertEqual(MCPClientIdentity.canonicalFamilyID("pi-mcp-RepoPromptCE"), "pi-mcp")

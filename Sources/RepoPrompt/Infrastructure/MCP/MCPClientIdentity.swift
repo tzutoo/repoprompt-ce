@@ -61,7 +61,7 @@ enum MCPClientIdentity {
         if normalized == "pi" {
             return "pi"
         }
-        // Retired adapter identity, kept so leftover always-allow entries still match.
+        // Retired adapter identity. Kept distinct so leftover display-name records do not collapse onto `pi`.
         if normalized == "pi-mcp" || normalized.hasPrefix("pi-mcp-") {
             return "pi-mcp"
         }
