@@ -32,6 +32,78 @@ final class WorkspaceCodemapUIPresentationTests: XCTestCase {
         XCTAssertEqual(disposition, .revoked)
     }
 
+    func testNonGitOptOutDoesNotShowIndeterminateCatalogDiscovery() {
+        let presentation = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .unavailable, unavailableReason: .nonGitOptOut)
+        )
+        XCTAssertEqual(presentation.state, .unavailable)
+        XCTAssertFalse(presentation.isActivelyMapping)
+        XCTAssertFalse(presentation.showsProgress)
+        XCTAssertTrue(presentation.tooltip.contains("plain folder"))
+
+        let summary = AgentWorkspaceCodemapSummary.make([presentation])
+        XCTAssertEqual(summary.state, .unavailable)
+        XCTAssertFalse(summary.showsIndeterminateProgress)
+        XCTAssertEqual(summary.detailText, "Code Maps unavailable")
+    }
+
+    func testMissingOrIdleStatusDoesNotShowIndeterminateCatalogDiscovery() {
+        let pending = AgentWorkspaceCodemapPresentation.make(nil)
+        XCTAssertEqual(pending.state, .notInitialized)
+        XCTAssertFalse(pending.isActivelyMapping)
+        XCTAssertFalse(pending.showsProgress)
+
+        let preparing = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .notInitialized)
+        )
+        XCTAssertEqual(preparing.state, .notInitialized)
+        XCTAssertFalse(preparing.isActivelyMapping)
+        XCTAssertFalse(preparing.showsProgress)
+
+        let summary = AgentWorkspaceCodemapSummary.make([pending, preparing])
+        XCTAssertEqual(summary.state, .unavailable)
+        XCTAssertFalse(summary.showsIndeterminateProgress)
+        XCTAssertEqual(summary.detailText, "Code Maps unavailable")
+    }
+
+    func testGitIndexingStillShowsActiveDiscovery() {
+        let presentation = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .indexing)
+        )
+        XCTAssertEqual(presentation.state, .indexing)
+        XCTAssertTrue(presentation.isActivelyMapping)
+        XCTAssertTrue(presentation.showsProgress)
+
+        let summary = AgentWorkspaceCodemapSummary.make([presentation])
+        XCTAssertEqual(summary.state, .indexing)
+        XCTAssertTrue(summary.showsIndeterminateProgress)
+    }
+
+    func testWorkspaceKeepsGitIndexingWhenAPlainFolderIsOptedOut() {
+        let git = AgentWorkspaceCodemapPresentation.make(makeStatus(availability: .indexing))
+        let plain = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .unavailable, unavailableReason: .nonGitOptOut)
+        )
+        XCTAssertTrue(git.isActivelyMapping)
+        XCTAssertFalse(plain.isActivelyMapping)
+
+        let summary = AgentWorkspaceCodemapSummary.make([git, plain])
+        XCTAssertEqual(summary.state, .indexing)
+        XCTAssertTrue(summary.showsIndeterminateProgress)
+    }
+
+    func testWorkspaceStaysMappedWhenAReadyGitRootSitsBesideAnOptedOutFolder() {
+        let git = AgentWorkspaceCodemapPresentation.make(makeStatus(availability: .ready))
+        let plain = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .unavailable, unavailableReason: .nonGitOptOut)
+        )
+
+        let summary = AgentWorkspaceCodemapSummary.make([git, plain])
+        XCTAssertEqual(summary.state, .ready)
+        XCTAssertFalse(summary.showsIndeterminateProgress)
+        XCTAssertEqual(summary.readyRootCount, 1)
+    }
+
     // The obsolete plain-folder "typed unavailable" preview contract was removed with non-Git
     // Code Map support. Positive preview coverage for a plain on-disk root now lives in
     // `CodemapAutomaticSelectionGraphNativeTests`
@@ -70,6 +142,38 @@ final class WorkspaceCodemapUIPresentationTests: XCTestCase {
             logicalPath: logicalPath,
             text: SwiftFixtureSource.emptyStruct("RenderedPreview", trailingNewline: false),
             tokenCount: 7
+        )
+    }
+
+    private func makeStatus(
+        availability: WorkspaceCodemapRootAvailability,
+        unavailableReason: WorkspaceCodemapRootStatusUnavailableReason? = nil
+    ) -> WorkspaceCodemapRootStatusSnapshot {
+        WorkspaceCodemapRootStatusSnapshot(
+            rootEpoch: WorkspaceCodemapRootEpoch(rootID: UUID(), rootLifetimeID: UUID()),
+            availability: availability,
+            isGenerationSuspended: false,
+            coverage: nil,
+            graphRevision: nil,
+            appliedGeneration: .init(rawValue: 0),
+            observedGeneration: .init(rawValue: 0),
+            updatesPending: false,
+            reconciliationAttempt: nil,
+            reconciliationDeadlineUptimeNanoseconds: nil,
+            commitCadence: WorkspaceCodemapGraphCommitCadence(
+                successfulCommitCount: 0,
+                resyncCommitCount: 0,
+                lastCommittedUptimeNanoseconds: nil,
+                lastCommitIntervalMilliseconds: nil
+            ),
+            diagnostics: WorkspaceCodemapGraphRootDiagnostics(
+                rejectedApplyCount: 0,
+                fencedFileCount: 0,
+                activeApply: false,
+                safetyCounter: 0,
+                revocationReason: nil
+            ),
+            unavailableReason: unavailableReason
         )
     }
 }

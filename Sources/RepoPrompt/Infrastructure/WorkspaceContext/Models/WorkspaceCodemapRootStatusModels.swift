@@ -17,6 +17,8 @@ enum WorkspaceCodemapRootStatusUnavailableReason: String, Hashable {
     case graphUnavailable
     case retryExhausted
     case workerRecoveryExhausted
+    /// Plain folder whose Code Map work is withheld until the non-Git opt-in is enabled.
+    case nonGitOptOut
 }
 
 struct WorkspaceCodemapGraphCommitCadence: Hashable {

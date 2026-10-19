@@ -11374,6 +11374,8 @@ actor WorkspaceFileContextStore {
             .retryExhausted
         } else if codemapGraphIndexWorkerRecoveryExhaustedRootEpochs.contains(rootEpoch) {
             .workerRecoveryExhausted
+        } else if isNonGitCodeMapOptOut(rootEpoch: rootEpoch) {
+            .nonGitOptOut
         } else {
             switch launchPhase {
             case .terminalUnavailable: .sourceRootUnavailable
@@ -13699,6 +13701,17 @@ actor WorkspaceFileContextStore {
         )
     }
 
+    /// True while a loaded plain folder is withheld from automatic Code Map work.
+    /// Git roots never match; enabling the non-Git opt-in admits later plain folders.
+    private func isNonGitCodeMapOptOut(rootEpoch: WorkspaceCodemapRootEpoch) -> Bool {
+        guard !nonGitCodeMapsEnabled,
+              let state = rootStatesByID[rootEpoch.rootID],
+              state.lifetimeID == rootEpoch.rootLifetimeID,
+              case .nonGitRoot = state.service.ignoreRulePolicy
+        else { return false }
+        return true
+    }
+
     /// Records launch state and creates the background task only. Git eligibility, runtime,
     /// integration-route, manifest, CAS, source, and graph work all begin in the task body.
     private func scheduleCodemapGraphIndexBuildAfterRootReady(
@@ -13709,10 +13722,7 @@ actor WorkspaceFileContextStore {
             guard codemapGraphIndexBuildLaunchPolicyForTesting == .enabled else { return }
         #endif
         // Legacy plain roots do no automatic Code Map work until the persisted opt-in is on.
-        if !nonGitCodeMapsEnabled,
-           let state = rootStatesByID[rootEpoch.rootID],
-           case .nonGitRoot = state.service.ignoreRulePolicy
-        {
+        if isNonGitCodeMapOptOut(rootEpoch: rootEpoch) {
             return
         }
         guard !codemapGenerationIsSuspended(rootEpoch: rootEpoch),

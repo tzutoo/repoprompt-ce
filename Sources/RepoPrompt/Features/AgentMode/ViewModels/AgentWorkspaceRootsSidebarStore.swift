@@ -31,6 +31,7 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
     let pendingCount: UInt64
     let updatesPending: Bool
     let graphRevision: UInt64?
+    let unavailableReason: WorkspaceCodemapRootStatusUnavailableReason?
 
     static let pending = Self(
         state: .notInitialized,
@@ -39,15 +40,16 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
         supportedCount: nil,
         pendingCount: 0,
         updatesPending: false,
-        graphRevision: nil
+        graphRevision: nil,
+        unavailableReason: nil
     )
 
     var tone: Tone {
         switch state {
-        case .notInitialized, .indexing, .updating: .accent
+        case .indexing, .updating: .accent
         case .reconciling, .recoveryExhausted: .warning
         case .ready: .success
-        case .paused, .unavailable, .revoked: .secondary
+        case .notInitialized, .paused, .unavailable, .revoked: .secondary
         }
     }
 
@@ -65,15 +67,15 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
 
     var isActivelyMapping: Bool {
         switch state {
-        case .notInitialized, .indexing, .updating, .reconciling: true
-        case .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
+        case .indexing, .updating, .reconciling: true
+        case .notInitialized, .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
         }
     }
 
     var showsProgress: Bool {
         switch state {
-        case .notInitialized, .indexing, .updating, .reconciling: true
-        case .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
+        case .indexing, .updating, .reconciling: true
+        case .notInitialized, .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
         }
     }
 
@@ -138,7 +140,11 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
         case .recoveryExhausted:
             "Code Map indexing stopped after repeated recovery attempts. Retry to resume indexing."
         case .unavailable:
-            "Code Maps are unavailable for this root."
+            if unavailableReason == .nonGitOptOut {
+                "Code Maps are off for this plain folder. Enable Code Maps in non-Git folders to index it."
+            } else {
+                "Code Maps are unavailable for this root."
+            }
         case .revoked:
             "Code Map graph authority was revoked and must be re-established."
         }
@@ -174,7 +180,8 @@ struct AgentWorkspaceCodemapPresentation: Equatable {
             supportedCount: stableSupportedCount,
             pendingCount: coverage?.pendingCount ?? 0,
             updatesPending: snapshot.updatesPending,
-            graphRevision: snapshot.graphRevision
+            graphRevision: snapshot.graphRevision,
+            unavailableReason: snapshot.availability == .unavailable ? snapshot.unavailableReason : nil
         )
     }
 }
@@ -266,10 +273,11 @@ struct AgentWorkspaceCodemapSummary: Equatable {
 
     static func make(_ presentations: [AgentWorkspaceCodemapPresentation]) -> Self {
         let availableRoots = presentations.filter(\.canToggle)
+        let idleRoots = availableRoots.filter { $0.state == .notInitialized }
         let activelyMappingRoots = availableRoots.filter {
             switch $0.state {
-            case .notInitialized, .indexing, .updating: true
-            case .reconciling, .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
+            case .indexing, .updating: true
+            case .notInitialized, .reconciling, .ready, .paused, .recoveryExhausted, .unavailable, .revoked: false
             }
         }
         let reconcilingRoots = availableRoots.filter { $0.state == .reconciling }
@@ -296,11 +304,11 @@ struct AgentWorkspaceCodemapSummary: Equatable {
             .reconciling
         } else if !recoveryExhaustedRoots.isEmpty {
             .recoveryExhausted
-        } else if availableRoots.isEmpty {
+        } else if availableRoots.isEmpty || idleRoots.count == availableRoots.count {
             .unavailable
         } else if pausedRoots.count == availableRoots.count {
             .paused
-        } else if readyRoots.count == availableRoots.count {
+        } else if readyRoots.count + idleRoots.count == availableRoots.count {
             .ready
         } else {
             .mixed

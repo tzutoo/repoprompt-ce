@@ -392,16 +392,41 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         XCTAssertNil(disabledPhase)
         XCTAssertTrue(fixture.builtSourceTexts.values.isEmpty)
         XCTAssertTrue(fixture.codeMapGitProcessAttempts.values.isEmpty)
+        let optedOutUpdate = await store.currentCodemapRootStatusUpdate()
+        let optedOutStatus = try XCTUnwrap(
+            optedOutUpdate.roots.first { $0.rootEpoch == rootEpoch }
+        )
+        XCTAssertEqual(optedOutStatus.availability, .unavailable)
+        XCTAssertEqual(optedOutStatus.unavailableReason, .nonGitOptOut)
+        let optedOutPresentation = AgentWorkspaceCodemapPresentation.make(optedOutStatus)
+        XCTAssertEqual(optedOutPresentation.state, .unavailable)
+        XCTAssertFalse(optedOutPresentation.isActivelyMapping)
+        XCTAssertFalse(optedOutPresentation.showsProgress)
+        let optedOutSummary = AgentWorkspaceCodemapSummary.make([optedOutPresentation])
+        XCTAssertEqual(optedOutSummary.state, .unavailable)
+        XCTAssertFalse(optedOutSummary.showsIndeterminateProgress)
 
         await store.setNonGitCodeMapsEnabled(true)
         let engine = try fixture.runtime().bindingEngine()
         let accounting = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
         XCTAssertEqual(accounting.progress.counts.processedCandidateCount, 1)
         XCTAssertFalse(fixture.builtSourceTexts.values.isEmpty)
+        let enabledUpdate = await store.currentCodemapRootStatusUpdate()
+        let enabledStatus = try XCTUnwrap(
+            enabledUpdate.roots.first { $0.rootEpoch == rootEpoch }
+        )
+        XCTAssertNotEqual(enabledStatus.availability, .unavailable)
+        XCTAssertNotEqual(enabledStatus.unavailableReason, .nonGitOptOut)
 
         await store.setNonGitCodeMapsEnabled(false)
         let revoked = await engine.selectionGraph(rootEpoch: rootEpoch)
         XCTAssertNil(revoked)
+        let revokedUpdate = await store.currentCodemapRootStatusUpdate()
+        let revokedStatus = try XCTUnwrap(
+            revokedUpdate.roots.first { $0.rootEpoch == rootEpoch }
+        )
+        XCTAssertEqual(revokedStatus.availability, .unavailable)
+        XCTAssertEqual(revokedStatus.unavailableReason, .nonGitOptOut)
     }
 
     func testSymlinkLoadedRootKeepsFilesystemSourceAuthorityBound() async throws {
