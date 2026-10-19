@@ -246,6 +246,8 @@ actor OpenCodeACPModelPollingService {
         case skipped
         case failed
         case cancelled
+        /// Current-process discovery could not find a launchable `opencode` / `opencode2` CLI.
+        case executableUnavailable
     }
 
     struct Snapshot: Equatable {
@@ -370,7 +372,11 @@ actor OpenCodeACPModelPollingService {
         } catch is CancellationError {
             return .cancelled
         } catch {
-            return Task.isCancelled ? .cancelled : .failed
+            if Task.isCancelled { return .cancelled }
+            if OpenCodeCLIAvailability.isMissingExecutable(error) {
+                return .executableUnavailable
+            }
+            return .failed
         }
     }
 

@@ -88,6 +88,43 @@ final class OpenCodeACPLaunchResolverTests: XCTestCase {
         XCTAssertTrue(reason.contains("missing"), reason)
         XCTAssertTrue(reason.contains("fallback PATH"), reason)
         XCTAssertTrue(reason.contains("PATH may not match Terminal"), reason)
+        XCTAssertTrue(OpenCodeCLIAvailability.looksLikeMissingExecutable(reason), reason)
+    }
+
+    func testMissingExecutableClassifierRejectsACPSupportAndAuthFailures() {
+        XCTAssertTrue(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                OpenCodeACPLaunchResolutionError.exactPathNotFound("opencode")
+            )
+        )
+        XCTAssertTrue(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                OpenCodeACPLaunchResolutionError.noValidLaunchCandidate("opencode", ["missing"], nil)
+            )
+        )
+        XCTAssertTrue(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                AIProviderError.invalidConfiguration(detail: OpenCodeCLIAvailability.missingExecutableUserMessage)
+            )
+        )
+        XCTAssertFalse(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                OpenCodeACPLaunchResolutionError.environmentDiscoveryRequired("opencode")
+            )
+        )
+        XCTAssertFalse(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                AIProviderError.invalidConfiguration(detail: "Installed OpenCode CLI does not advertise ACP support.")
+            )
+        )
+        XCTAssertFalse(
+            OpenCodeCLIAvailability.isMissingExecutable(
+                AIProviderError.invalidConfiguration(detail: "OpenCode CLI is not authenticated. Run `opencode auth login` in your terminal.")
+            )
+        )
+        XCTAssertFalse(
+            OpenCodeCLIAvailability.looksLikeMissingExecutable("offline")
+        )
     }
 
     func testOpenCodeHomeBinHintDoesNotLeakIntoNativeDefaultsOrOtherProviders() {

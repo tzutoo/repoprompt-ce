@@ -33,6 +33,49 @@ enum OpenCodeACPLaunchResolutionError: Error, Equatable, LocalizedError {
     }
 }
 
+/// Distinguishes a missing OpenCode CLI from ACP/auth/catalog failures.
+///
+/// Settings connection state may persist a stale `OpenCodeCLIConnected` hint. Only a current-process
+/// missing-executable diagnosis may clear that hint automatically; other probe failures keep it.
+enum OpenCodeCLIAvailability {
+    static let missingExecutableUserMessage =
+        "OpenCode CLI is not installed. Install it and ensure `opencode` is available on PATH."
+
+    static func isMissingExecutable(_ error: Error) -> Bool {
+        if let launchError = error as? OpenCodeACPLaunchResolutionError {
+            switch launchError {
+            case .exactPathNotFound, .noValidLaunchCandidate, .missingConfiguredCommand:
+                return true
+            case .environmentDiscoveryRequired:
+                return false
+            }
+        }
+        if let runnerError = error as? CLIProcessRunnerError, case .commandNotFound = runnerError {
+            return true
+        }
+        if let providerError = error as? AIProviderError,
+           case let .invalidConfiguration(detail) = providerError
+        {
+            return looksLikeMissingExecutable(detail)
+        }
+        return looksLikeMissingExecutable(error.localizedDescription)
+    }
+
+    static func looksLikeMissingExecutable(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        if lowered.contains("does not advertise acp") || lowered.contains("does not support acp") {
+            return false
+        }
+        return lowered.contains("not found as a valid executable")
+            || lowered.contains("cli is not installed")
+            || lowered.contains("cli not found")
+            || lowered.contains("command not found")
+            || lowered.contains("no such file")
+            || lowered.contains("not executable")
+            || lowered.contains("requires an `opencode` command")
+    }
+}
+
 final class OpenCodeACPLaunchResolver: @unchecked Sendable {
     typealias EnvironmentProvider = @Sendable (_ enableDebugLogging: Bool) async -> ACPLaunchEnvironment
 

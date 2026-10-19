@@ -60,6 +60,16 @@ final class OpenCodeACPModelDiscoveryTests: XCTestCase {
         let failedOutcome = await failed.refreshNow(workspacePath: nil)
         XCTAssertEqual(failedOutcome, .failed)
         await failed.shutdown()
+
+        let missing = OpenCodeACPModelPollingService(
+            client: RefreshClient(
+                result: nil,
+                failure: OpenCodeACPLaunchResolutionError.exactPathNotFound("opencode")
+            )
+        )
+        let missingOutcome = await missing.refreshNow(workspacePath: nil)
+        XCTAssertEqual(missingOutcome, .executableUnavailable)
+        await missing.shutdown()
     }
 
     /// The bootstrap catalog must reflect the REAL OpenCode exchange (live capture

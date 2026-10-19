@@ -1088,6 +1088,7 @@ public class APISettingsViewModel: ObservableObject {
     private let aiQueriesService: AIQueriesService
     private let keyManager: KeyManager
     private let cursorModelPollingService: CursorACPModelPollingService
+    private let openCodeModelPollingService: OpenCodeACPModelPollingService
     private let antigravityRuntimeInstalledProvider: @MainActor () -> Bool
     private let devinRuntimeInstalledProvider: @MainActor () -> Bool
     private let codexModelPollingService: CodexModelPollingService
@@ -1104,6 +1105,7 @@ public class APISettingsViewModel: ObservableObject {
         loadStoredDataOnInit: Bool = true,
         codexModelPollingService: CodexModelPollingService = .shared,
         cursorModelPollingService: CursorACPModelPollingService = .shared,
+        openCodeModelPollingService: OpenCodeACPModelPollingService = .shared,
         codexManagedAuthRecovery: any CodexManagedAuthRecovering = CodexManagedAuthRecoveryService.shared,
         codexSessionFence: CodexManagedSessionFence = .shared,
         codexExecutablePreflight: @escaping @MainActor @Sendable (CLIProcessLogCollector?) async -> CodexProviderHelpers.CodexExecutableResolution = { collector in
@@ -1124,6 +1126,7 @@ public class APISettingsViewModel: ObservableObject {
         self.devinRuntimeInstalledProvider = devinRuntimeInstalledProvider
         self.codexModelPollingService = codexModelPollingService
         self.cursorModelPollingService = cursorModelPollingService
+        self.openCodeModelPollingService = openCodeModelPollingService
         self.codexManagedAuthRecovery = codexManagedAuthRecovery
         self.codexSessionFence = codexSessionFence
         self.codexExecutablePreflight = codexExecutablePreflight
@@ -1441,13 +1444,21 @@ public class APISettingsViewModel: ObservableObject {
 
     private func probeCachedOpenCodeConnection(ifNeeded: Bool) async -> Bool {
         guard ifNeeded else { return false }
-        if let latest = await OpenCodeACPModelPollingService.shared.latestSnapshot(),
+        if let latest = await openCodeModelPollingService.latestSnapshot(),
            latest.isLiveDiscovery
         {
             return true
         }
-        let service = OpenCodeACPModelPollingService.shared
+        let service = openCodeModelPollingService
         let outcome = await service.refreshNow(workspacePath: nil)
+        if outcome == .executableUnavailable {
+            // A persisted connected hint is not proof the CLI is present. Clear it only when this
+            // process confirmed the executable is missing; other probe failures keep the hint.
+            clearStaleOpenCodeConnectedHint(
+                error: OpenCodeCLIAvailability.missingExecutableUserMessage
+            )
+            return false
+        }
         if outcome == .noModelsAdvertised {
             // Preserve the prior Boolean contract: empty discovery verified the connection only
             // when a usable retained registry snapshot existed.
@@ -3612,7 +3623,7 @@ public class APISettingsViewModel: ObservableObject {
         collector.append("Starting OpenCode ACP model discovery preflight")
 
         do {
-            let snapshot = try await OpenCodeACPModelPollingService.shared.discoverOnce(workspacePath: nil)
+            let snapshot = try await openCodeModelPollingService.discoverOnce(workspacePath: nil)
             guard let snapshot else {
                 throw AIProviderError.invalidConfiguration(detail: "OpenCode ACP preflight completed but no model metadata was discovered.")
             }
@@ -3634,30 +3645,30 @@ public class APISettingsViewModel: ObservableObject {
             return true
         } catch {
             collector.append("Connection test threw error: \(error.localizedDescription)")
-            isOpenCodeConnected = false
-            setContextBuilderProviderVerified(.openCode, verified: false)
-            openCodeError = friendlyOpenCodeMessage(for: error)
-            UserDefaults.standard.set(false, forKey: "OpenCodeCLIConnected")
-            stopOpenCodeModelsSubscription(clearModels: true)
+            applyOpenCodeDisconnectedState(error: friendlyOpenCodeMessage(for: error))
             await updateAvailableModels()
             let finalMessage = openCodeError ?? error.localizedDescription
             collector.append("User guidance: \(finalMessage)")
-            NotificationCenter.default.post(
-                name: .openCodeConnectionChanged,
-                object: nil,
-                userInfo: ["windowID": 0]
-            )
             throw error
         }
     }
 
     func disconnectOpenCode() {
+        applyOpenCodeDisconnectedState(error: nil)
+        Task { await updateAvailableModels() }
+    }
+
+    private func clearStaleOpenCodeConnectedHint(error: String) {
+        applyOpenCodeDisconnectedState(error: error)
+        Task { await updateAvailableModels() }
+    }
+
+    private func applyOpenCodeDisconnectedState(error: String?) {
         isOpenCodeConnected = false
         setContextBuilderProviderVerified(.openCode, verified: false)
-        openCodeError = nil
+        openCodeError = error
         UserDefaults.standard.set(false, forKey: "OpenCodeCLIConnected")
         stopOpenCodeModelsSubscription(clearModels: true)
-        Task { await updateAvailableModels() }
         NotificationCenter.default.post(
             name: .openCodeConnectionChanged,
             object: nil,
@@ -3666,6 +3677,9 @@ public class APISettingsViewModel: ObservableObject {
     }
 
     private func friendlyOpenCodeMessage(for error: Error) -> String {
+        if OpenCodeCLIAvailability.isMissingExecutable(error) {
+            return OpenCodeCLIAvailability.missingExecutableUserMessage
+        }
         if let providerError = error as? AIProviderError {
             switch providerError {
             case let .invalidConfiguration(detail):
@@ -3677,10 +3691,10 @@ public class APISettingsViewModel: ObservableObject {
             }
         }
         let message = error.localizedDescription
-        let lowered = message.lowercased()
-        if lowered.contains("not installed") || lowered.contains("no such file") || lowered.contains("command not found") {
-            return "OpenCode CLI is not installed. Install it and ensure `opencode` is available on PATH."
+        if OpenCodeCLIAvailability.looksLikeMissingExecutable(message) {
+            return OpenCodeCLIAvailability.missingExecutableUserMessage
         }
+        let lowered = message.lowercased()
         if lowered.contains("permission denied") {
             return "Permission denied. Ensure the `opencode` executable is accessible."
         }
@@ -3716,7 +3730,7 @@ public class APISettingsViewModel: ObservableObject {
         guard !hasPreparedForWindowClose else { return }
         guard openCodeModelsTask == nil else { return }
         openCodeModelsTask = Task { [weak self, workspacePath] in
-            let stream = await OpenCodeACPModelPollingService.shared.subscribe(workspacePath: workspacePath)
+            let stream = await openCodeModelPollingService.subscribe(workspacePath: workspacePath)
             for await snapshot in stream {
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
