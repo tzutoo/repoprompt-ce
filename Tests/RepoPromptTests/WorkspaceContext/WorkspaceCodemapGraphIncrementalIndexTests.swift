@@ -376,6 +376,72 @@ final class WorkspaceCodemapGraphIncrementalIndexTests: XCTestCase {
         XCTAssertEqual(followerAccounting.resyncCommitCount, 1, "A keeping-up consumer never resyncs")
     }
 
+    /// An edit invalidates a path and shadows it as pending. The index then re-reads that path and
+    /// publishes strictly newer generations. That classification is authoritative and must
+    /// supersede the shadow: otherwise the shadow pins the path to pending forever and the root
+    /// can never return to complete coverage, which is the reported "stuck at 96%" stall.
+    func testNewerIndexPublicationSupersedesStaleModifiedShadow() async throws {
+        let harness = try await CodemapGraphIndexHarness(seed: 0x91)
+        let files = try harness.makeFiles(count: 2)
+        let edited = files[0]
+        let untouched = files[1]
+        let published = await harness.publish(
+            [edited.contributed, untouched.contributed],
+            projectedTotal: 2,
+            enumerationFinished: true
+        )
+        XCTAssertTrue(published)
+        _ = await harness.pull()
+        let complete = await harness.graph.incrementalAccounting()
+        XCTAssertEqual(complete.coverage?.isComplete, true)
+        XCTAssertEqual(complete.coverage?.pendingCount, 0)
+
+        let invalidated = await harness.overlay.invalidatePaths(
+            rootEpoch: harness.rootEpoch,
+            standardizedRelativePaths: [edited.path],
+            reason: .modified
+        )
+        XCTAssertEqual(invalidated, 1)
+        _ = await harness.pull()
+        let unsealed = await harness.graph.incrementalAccounting()
+        XCTAssertEqual(unsealed.coverage?.isComplete, false)
+        XCTAssertEqual(unsealed.coverage?.pendingCount, 1)
+
+        // A page read before the edit still carries the invalidated generations. The shadow must
+        // keep masking it, so pre-edit symbols never surface for post-edit bytes.
+        let preEdit = try harness.makeSlot(
+            fileID: edited.fileID,
+            path: edited.path,
+            definitions: ["Type0"],
+            references: ["Type1"]
+        )
+        let preEditPublished = await harness.publish([preEdit], enumerationFinished: true)
+        XCTAssertTrue(preEditPublished)
+        _ = await harness.pull()
+        let stillPending = await harness.graph.incrementalAccounting()
+        XCTAssertEqual(stillPending.coverage?.pendingCount, 1)
+        XCTAssertEqual(stillPending.coverage?.isComplete, false)
+
+        // The re-read after the edit publishes newer generations, so it must win.
+        let reclassified = try harness.makeSlot(
+            fileID: edited.fileID,
+            path: edited.path,
+            definitions: ["Type0", "Renamed"],
+            references: ["Type1"],
+            requestGeneration: 2,
+            pathGeneration: 2
+        )
+        let reclassifiedPublished = await harness.publish([reclassified], enumerationFinished: true)
+        XCTAssertTrue(reclassifiedPublished)
+        _ = await harness.pull()
+        let recovered = await harness.graph.incrementalAccounting()
+        XCTAssertEqual(recovered.coverage?.pendingCount, 0)
+        XCTAssertEqual(recovered.coverage?.isComplete, true)
+        let snapshot = try await harness.latestSnapshot()
+        let node = try XCTUnwrap(snapshot.nodesByFileID[edited.fileID])
+        XCTAssertTrue(node.contribution.sortedUniqueDefinitions.contains("Renamed"))
+    }
+
     func testFenceReentrancyRevokesIdenticallyInBothModes() async throws {
         for mode in [WorkspaceCodemapGraphReconcileMode.incremental, .alwaysFull] {
             let harness = try await CodemapGraphIndexHarness(seed: 0x51, mode: mode)

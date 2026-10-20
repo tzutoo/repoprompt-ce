@@ -104,6 +104,30 @@ final class WorkspaceCodemapUIPresentationTests: XCTestCase {
         XCTAssertEqual(summary.readyRootCount, 1)
     }
 
+    func testMappedRootKeepsPauseAsAGenerationSwitch() {
+        let presentation = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(availability: .ready)
+        )
+        XCTAssertEqual(presentation.state, .ready)
+        XCTAssertTrue(presentation.canToggle)
+        XCTAssertFalse(presentation.canRetry)
+        XCTAssertFalse(presentation.isPaused)
+    }
+
+    func testWorkerRecoveryExhaustionOffersRetryInsteadOfFrozenIndexing() {
+        let presentation = AgentWorkspaceCodemapPresentation.make(
+            makeStatus(
+                availability: .unavailable,
+                unavailableReason: .workerRecoveryExhausted
+            )
+        )
+        XCTAssertEqual(presentation.state, .recoveryExhausted)
+        XCTAssertTrue(presentation.canRetry)
+        XCTAssertFalse(presentation.canToggle)
+        XCTAssertFalse(presentation.isActivelyMapping)
+        XCTAssertEqual(presentation.statusText, "Retry needed")
+    }
+
     // The obsolete plain-folder "typed unavailable" preview contract was removed with non-Git
     // Code Map support. Positive preview coverage for a plain on-disk root now lives in
     // `CodemapAutomaticSelectionGraphNativeTests`

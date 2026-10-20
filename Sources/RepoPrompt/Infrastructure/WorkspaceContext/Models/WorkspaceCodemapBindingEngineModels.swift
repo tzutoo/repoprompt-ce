@@ -56,6 +56,9 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
     let manifestWriterDeferredRetryMilliseconds: UInt64
     let graphIndexRetryInitialMilliseconds: UInt64
     let graphIndexRetryMaximumMilliseconds: UInt64
+    /// Upper bound for the self-driving recovery poll that restarts an incomplete coverage whose
+    /// worker has stopped.
+    let graphIndexSupervisionMaximumMilliseconds: UInt64
     let graphIndexRetryJitterPercent: UInt64
     let graphIndexWorkerNoProgressTimeoutMilliseconds: UInt64
     let maximumGraphIndexWorkerRecoveryCount: UInt64
@@ -106,6 +109,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         manifestWriterDeferredRetryMilliseconds: UInt64 = 100,
         graphIndexRetryInitialMilliseconds: UInt64 = 250,
         graphIndexRetryMaximumMilliseconds: UInt64 = 30000,
+        graphIndexSupervisionMaximumMilliseconds: UInt64 = 2000,
         graphIndexRetryJitterPercent: UInt64 = 20,
         graphIndexWorkerNoProgressTimeoutMilliseconds: UInt64 = 120_000,
         maximumGraphIndexWorkerRecoveryCount: UInt64 = 3
@@ -164,6 +168,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         precondition(graphIndexRetryInitialMilliseconds > 0)
         precondition(graphIndexRetryMaximumMilliseconds >= graphIndexRetryInitialMilliseconds)
         precondition(graphIndexRetryJitterPercent <= 100)
+        precondition(graphIndexSupervisionMaximumMilliseconds >= graphIndexRetryInitialMilliseconds)
         precondition(graphIndexWorkerNoProgressTimeoutMilliseconds > 0)
         precondition(maximumGraphIndexWorkerRecoveryCount > 0)
         self.maximumRootCount = maximumRootCount
@@ -216,6 +221,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         self.graphIndexRetryInitialMilliseconds = graphIndexRetryInitialMilliseconds
         self.graphIndexRetryMaximumMilliseconds = graphIndexRetryMaximumMilliseconds
         self.graphIndexRetryJitterPercent = graphIndexRetryJitterPercent
+        self.graphIndexSupervisionMaximumMilliseconds = graphIndexSupervisionMaximumMilliseconds
         self.graphIndexWorkerNoProgressTimeoutMilliseconds = graphIndexWorkerNoProgressTimeoutMilliseconds
         self.maximumGraphIndexWorkerRecoveryCount = maximumGraphIndexWorkerRecoveryCount
     }
@@ -838,6 +844,8 @@ enum WorkspaceCodemapGraphIndexWorkerCompletionReason: String, Hashable {
 enum WorkspaceCodemapGraphIndexWorkerRecoveryState: Hashable {
     case available
     case exhausted
+    /// Graph-index stopped incomplete because a resource budget rejected further work.
+    case budgetLimited
 }
 
 enum WorkspaceCodemapGraphIndexWatchdogDisposition: Hashable {

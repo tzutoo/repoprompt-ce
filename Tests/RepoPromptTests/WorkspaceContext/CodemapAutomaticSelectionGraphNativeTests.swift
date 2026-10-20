@@ -1283,6 +1283,286 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         XCTAssertFalse(fixture.builtSourceTexts.values.contains { $0.contains("OuterBlobOnly") })
     }
 
+    func testBudgetLimitedGraphIndexRestartsFromPrioritizeAndPathInvalidation() async throws {
+        let workspace = try PlainWorkspaceFixture(name: #function)
+        try workspace.write(
+            "export interface RestartCardProps {\n  id: string;\n}\n",
+            to: "src/Restart.ts"
+        )
+        let fixture = try CodemapStoreFixture(name: #function, forbidCodeMapGitProcesses: true)
+        let store = fixture.makeProductionStore()
+        let loaded = try await store.loadRoot(path: workspace.rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            workspace.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let installedBudgetLimit = await engine.debugSetGraphIndexTerminalPhaseForTesting(
+            rootEpoch: completed.rootEpoch,
+            phase: .budgetLimited
+        )
+        XCTAssertTrue(installedBudgetLimit)
+        let maybeStalled = await engine.debugGraphIndexWorkerRecoveryStateForTesting(
+            rootEpoch: completed.rootEpoch
+        )
+        let stalled = try XCTUnwrap(maybeStalled)
+        XCTAssertTrue(stalled.exhausted)
+        XCTAssertFalse(stalled.workerPresent)
+        try await AsyncTestWait.waitUntil("budget-limited stall offers Retry", timeout: 10) {
+            let status = await store.currentCodemapRootStatusUpdate().roots.first {
+                $0.rootEpoch.rootID == loaded.id
+            }
+            return AgentWorkspaceCodemapPresentation.make(status).canRetry
+        }
+
+        let restarted = await store.prioritizeCodemapGraphIndexNow(rootID: loaded.id)
+        XCTAssertEqual(restarted, .restarted)
+        let afterRetry = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        XCTAssertEqual(afterRetry.phase, .complete)
+        XCTAssertNotEqual(afterRetry.jobID, completed.jobID)
+
+        let files = await store.files(inRoot: loaded.id)
+        let file = try XCTUnwrap(
+            files.first { $0.standardizedRelativePath == "src/Restart.ts" }
+        )
+        let jobIDBeforeEdit = afterRetry.jobID
+        try workspace.write(
+            "export interface RestartCardProps {\n  id: string;\n  label: string;\n}\n",
+            to: "src/Restart.ts"
+        )
+        await store.replayObservedFileSystemDeltas(
+            rootID: loaded.id,
+            deltas: [.fileModified(file.standardizedRelativePath, Date())]
+        )
+        try await AsyncTestWait.waitUntil("path invalidation restarts graph-index", timeout: 20) {
+            let accounting = await engine.accounting()
+            guard let root = accounting.graphIndexRoots.first(where: {
+                $0.rootEpoch.rootID == loaded.id
+            }) else { return false }
+            return root.jobID != jobIDBeforeEdit || root.phase != .complete
+        }
+        _ = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+    }
+
+    /// An edit must restore complete coverage on its own. Nothing in this test issues a live
+    /// demand for the edited file, so the index pass plus shadow resolution is the only path back
+    /// to a mapped root.
+    func testGitRootEditReturnsToCompleteCoverageWithoutALiveDemand() async throws {
+        let repository = try ReviewGitRepositoryFixture(name: #function)
+        let rootURL = try repository.makeRepository(
+            named: "root",
+            files: ["Sources/Edited.swift": "struct Edited { let value: Int }\n"]
+        )
+        let fixture = try CodemapStoreFixture(name: #function)
+        let store = fixture.makeStore()
+        let loaded = try await store.loadRoot(path: rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            repository.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let maybeGraph = await engine.selectionGraph(rootEpoch: completed.rootEpoch)
+        let graph = try XCTUnwrap(maybeGraph)
+        let initial = await graph.incrementalAccounting()
+        XCTAssertEqual(initial.coverage?.isComplete, true)
+
+        try repository.write(
+            "struct Edited { let value: Int; let label: String }\n",
+            to: "Sources/Edited.swift",
+            at: rootURL
+        )
+        await store.replayObservedFileSystemDeltas(
+            rootID: loaded.id,
+            deltas: [.fileModified("Sources/Edited.swift", Date())]
+        )
+
+        try await AsyncTestWait.waitUntil("edited root returns to complete coverage", timeout: 30) {
+            await graph.incrementalAccounting().coverage?.isComplete == true
+        }
+        let recovered = await graph.incrementalAccounting()
+        XCTAssertEqual(recovered.coverage?.pendingCount, 0)
+        XCTAssertFalse(recovered.reconciling)
+        try await AsyncTestWait.waitUntil("edited root reports a mapped root", timeout: 10) {
+            await store.currentCodemapRootStatusUpdate().roots.first {
+                $0.rootEpoch.rootID == loaded.id
+            }?.availability == .ready
+        }
+    }
+
+    /// Supervision restarts a root that stopped without finishing, but it must never override the
+    /// user's Pause: an explicit cancel leaves the root alone until something reschedules it.
+    func testExplicitCancelSuppressesGraphIndexSupervisionUntilRescheduled() async throws {
+        let workspace = try PlainWorkspaceFixture(name: #function)
+        try workspace.write(
+            "export interface SuspendCardProps {\n  id: string;\n}\n",
+            to: "src/Suspend.ts"
+        )
+        let fixture = try CodemapStoreFixture(name: #function, forbidCodeMapGitProcesses: true)
+        let store = fixture.makeProductionStore()
+        let loaded = try await store.loadRoot(path: workspace.rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            workspace.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let maybeGraph = await engine.selectionGraph(rootEpoch: completed.rootEpoch)
+        let graph = try XCTUnwrap(maybeGraph)
+        _ = await graph.beginWatcherGapReconciliation()
+        let overlayUnsealed = await engine.overlayBeginGraphReconciliationForTesting(
+            rootEpoch: completed.rootEpoch
+        )
+        XCTAssertTrue(overlayUnsealed)
+        try await AsyncTestWait.waitUntil("unsealed coverage is incomplete", timeout: 10) {
+            await graph.incrementalAccounting().coverage?.isComplete != true
+        }
+
+        // Starting and then explicitly cancelling gives supervision a real opportunity to restart
+        // an incomplete root, which is exactly what Pause must prevent.
+        _ = await engine.scheduleGraphIndex(rootEpoch: completed.rootEpoch)
+        await engine.cancelGraphIndex(rootEpoch: completed.rootEpoch)
+        try await Task.sleep(for: .milliseconds(700))
+
+        let accounting = await engine.accounting()
+        XCTAssertNil(
+            accounting.graphIndexRoots.first { $0.rootEpoch.rootID == loaded.id },
+            "Supervision must not recreate a job for an explicitly cancelled root"
+        )
+        XCTAssertEqual(accounting.counters.graphIndexRetries, 0)
+    }
+
+    func testCompleteJobRestartsWhenCoverageIsUnsealed() async throws {
+        let workspace = try PlainWorkspaceFixture(name: #function)
+        try workspace.write(
+            "export interface UnsealedCardProps {\n  id: string;\n}\n",
+            to: "src/Unsealed.ts"
+        )
+        let fixture = try CodemapStoreFixture(name: #function, forbidCodeMapGitProcesses: true)
+        let store = fixture.makeProductionStore()
+        let loaded = try await store.loadRoot(path: workspace.rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            workspace.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        XCTAssertEqual(completed.phase, .complete)
+        let maybeGraph = await engine.selectionGraph(rootEpoch: completed.rootEpoch)
+        let graph = try XCTUnwrap(maybeGraph)
+        let reconciliation = await graph.beginWatcherGapReconciliation()
+        XCTAssertEqual(reconciliation, .started(attempt: 1))
+        let overlayUnsealed = await engine.overlayBeginGraphReconciliationForTesting(
+            rootEpoch: completed.rootEpoch
+        )
+        XCTAssertTrue(overlayUnsealed)
+        try await AsyncTestWait.waitUntil("unsealed coverage is incomplete", timeout: 10) {
+            await graph.incrementalAccounting().coverage?.isComplete != true
+        }
+        // A reconciliation pass unseals coverage while the graph latch stays raised for the whole
+        // incomplete episode. Status must report one continuous Indexing episode instead of
+        // alternating with the reconciling latch over unchanged progress.
+        try await AsyncTestWait.waitUntil("store observes the reconciliation latch", timeout: 10) {
+            await store.currentCodemapRootStatusUpdate().roots.first {
+                $0.rootEpoch.rootID == loaded.id
+            }?.reconciliationAttempt != nil
+        }
+        let unsealedUpdate = await store.currentCodemapRootStatusUpdate()
+        let unsealedStatus = try XCTUnwrap(
+            unsealedUpdate.roots.first { $0.rootEpoch.rootID == loaded.id }
+        )
+        XCTAssertFalse(unsealedStatus.coverage?.isComplete ?? true)
+        XCTAssertEqual(unsealedStatus.availability, .indexing)
+        XCTAssertEqual(
+            AgentWorkspaceCodemapPresentation.make(unsealedStatus).state,
+            .indexing
+        )
+        let schedule = await engine.scheduleGraphIndex(rootEpoch: completed.rootEpoch)
+        XCTAssertEqual(schedule, .handedOff)
+        let afterRestart = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        XCTAssertEqual(afterRestart.phase, .complete)
+        XCTAssertNotEqual(afterRestart.jobID, completed.jobID)
+    }
+
+    func testCheckpointedJobWithoutWorkerRestartsWhenCoverageIsIncomplete() async throws {
+        let workspace = try PlainWorkspaceFixture(name: #function)
+        try workspace.write(
+            "export interface CheckpointCardProps {\n  id: string;\n}\n",
+            to: "src/Checkpoint.ts"
+        )
+        let fixture = try CodemapStoreFixture(name: #function, forbidCodeMapGitProcesses: true)
+        let store = fixture.makeProductionStore()
+        let loaded = try await store.loadRoot(path: workspace.rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            workspace.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let maybeGraph = await engine.selectionGraph(rootEpoch: completed.rootEpoch)
+        let graph = try XCTUnwrap(maybeGraph)
+        let overlayUnsealed = await engine.overlayBeginGraphReconciliationForTesting(
+            rootEpoch: completed.rootEpoch
+        )
+        XCTAssertTrue(overlayUnsealed)
+        try await AsyncTestWait.waitUntil("unsealed coverage is incomplete", timeout: 10) {
+            await graph.incrementalAccounting().coverage?.isComplete != true
+        }
+        let installedCheckpoint = await engine.debugSetGraphIndexTerminalPhaseForTesting(
+            rootEpoch: completed.rootEpoch,
+            phase: .checkpointed
+        )
+        XCTAssertTrue(installedCheckpoint)
+        let restarted = await store.prioritizeCodemapGraphIndexNow(rootID: loaded.id)
+        XCTAssertEqual(restarted, .restarted)
+        let afterRetry = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        XCTAssertEqual(afterRetry.phase, .complete)
+        XCTAssertNotEqual(afterRetry.jobID, completed.jobID)
+    }
+
+    func testLastPageFlushWaiterResumesWhenAbandonedDuringRollback() async throws {
+        let workspace = try PlainWorkspaceFixture(name: #function)
+        try workspace.write(
+            "export interface FlushCardProps {\n  id: string;\n}\n",
+            to: "src/Flush.ts"
+        )
+        let fixture = try CodemapStoreFixture(name: #function, forbidCodeMapGitProcesses: true)
+        let store = fixture.makeProductionStore()
+        let loaded = try await store.loadRoot(path: workspace.rootURL.path)
+        addTeardownBlock {
+            await store.unloadRoot(id: loaded.id)
+            await fixture.shutdown()
+            workspace.cleanup()
+        }
+
+        let engine = try fixture.runtime().bindingEngine()
+        let completed = try await waitForGraphCompletion(engine: engine, rootID: loaded.id)
+        let waiter = Task {
+            await engine.debugInstallGraphFlushWaiterForTesting(rootEpoch: completed.rootEpoch)
+        }
+        try await AsyncTestWait.waitUntil("last-page flush waiter is installed", timeout: 5) {
+            await engine.debugGraphFlushWaiterCountForTesting(rootEpoch: completed.rootEpoch) == 1
+        }
+        await engine.debugAbandonGraphFlushWaitersForTesting(rootEpoch: completed.rootEpoch)
+        let flushed = await waiter.value
+        XCTAssertFalse(flushed)
+        let remainingWaiters = await engine.debugGraphFlushWaiterCountForTesting(
+            rootEpoch: completed.rootEpoch
+        )
+        XCTAssertEqual(remainingWaiters, 0)
+    }
+
     /// Presentation readiness does not imply that the graph has committed its publication.
     /// Wait for the captured overlay generation, not for particular symbols or full coverage:
     /// a pending or incorrect slot at that generation must still fail the caller's assertions.
@@ -1325,16 +1605,27 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
     ) async throws -> WorkspaceCodemapBindingEngineGraphIndexRootAccounting {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
+        var lastPhase = "none"
+        var lastCoverage = "none"
         while clock.now < deadline {
             let accounting = await engine.accounting()
-            if let root = accounting.graphIndexRoots.first(where: { $0.rootEpoch.rootID == rootID }),
-               root.phase == .complete
-            {
-                return root
+            if let root = accounting.graphIndexRoots.first(where: { $0.rootEpoch.rootID == rootID }) {
+                lastPhase = String(describing: root.phase)
+                if root.phase == .complete {
+                    return root
+                }
+                if let graph = await engine.selectionGraph(rootEpoch: root.rootEpoch) {
+                    let coverage = await graph.incrementalAccounting().coverage
+                    lastCoverage = coverage.map { coverage in
+                        "classified=\(coverage.classifiedCount) supported=\(coverage.supportedCount) "
+                            + "pending=\(coverage.pendingCount) "
+                            + "state=\(String(describing: coverage.enumerationState))"
+                    } ?? "nil"
+                }
             }
             try await Task.sleep(for: .milliseconds(25))
         }
-        throw GraphWaitError.timedOut
+        throw GraphWaitError.timedOut(phase: lastPhase, coverage: lastCoverage)
     }
 
     private func requireReadySnapshot(
@@ -1439,7 +1730,7 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
 }
 
 private enum GraphWaitError: Error {
-    case timedOut
+    case timedOut(phase: String, coverage: String)
     case snapshotPending
     case snapshotRevoked(String)
 }

@@ -78,9 +78,17 @@ actor WorkspaceCodemapLiveOverlay {
         let relativePath: String
     }
 
+    /// The pre-invalidation publication a shadow masks. A publication that is strictly newer was
+    /// read after the invalidation, so it must win instead of being forced back to pending.
+    private struct ShadowFence: Equatable {
+        let requestGeneration: UInt64
+        let pathGeneration: UInt64
+    }
+
     private struct Shadow {
         let reason: WorkspaceCodemapLiveOverlayInvalidationReason
         var accessOrdinal: UInt64
+        var fence: ShadowFence?
     }
 
     /// A file-ID keyed graph-slot layer with a path index, so path-scoped reconciliation finds
@@ -1040,7 +1048,14 @@ actor WorkspaceCodemapLiveOverlay {
             root.shadows[ShadowKey(
                 pipelineIdentity: pending.ticket.token.pipelineIdentity,
                 relativePath: path
-            )] = Shadow(reason: .modified, accessOrdinal: takeAccessOrdinal())
+            )] = Shadow(
+                reason: .modified,
+                accessOrdinal: takeAccessOrdinal(),
+                fence: ShadowFence(
+                    requestGeneration: pending.ticket.token.requestGeneration,
+                    pathGeneration: pending.ticket.token.sourceExpectation.sourceAuthority.pathGeneration
+                )
+            )
             advanceAllManifestInvalidationGenerations(&root, rootEpoch: rootEpoch)
             advanceContributionGeneration(&root, rootEpoch: rootEpoch)
         } else {
@@ -1082,7 +1097,14 @@ actor WorkspaceCodemapLiveOverlay {
                     root.shadows[ShadowKey(
                         pipelineIdentity: pending.ticket.token.pipelineIdentity,
                         relativePath: path
-                    )] = Shadow(reason: .modified, accessOrdinal: takeAccessOrdinal())
+                    )] = Shadow(
+                        reason: .modified,
+                        accessOrdinal: takeAccessOrdinal(),
+                        fence: ShadowFence(
+                            requestGeneration: pending.ticket.token.requestGeneration,
+                            pathGeneration: pending.ticket.token.sourceExpectation.sourceAuthority.pathGeneration
+                        )
+                    )
                     advanceAllManifestInvalidationGenerations(&root, rootEpoch: rootEpoch)
                 } else {
                     root.liveByFileID[fileID] = .pending(pending)
@@ -1340,11 +1362,13 @@ actor WorkspaceCodemapLiveOverlay {
                     }
                 }
             }
-            if let manifestSlot = root.manifestGraphSlotsByRelativePath.removeValue(forKey: relativePath) {
-                affectedPipelines.insert(manifestSlot.pipelineIdentity)
+            let removedManifestSlot = root.manifestGraphSlotsByRelativePath.removeValue(forKey: relativePath)
+            if let removedManifestSlot {
+                affectedPipelines.insert(removedManifestSlot.pipelineIdentity)
             }
             let removedGraphSlot = !graphIndexFileIDs.isEmpty || !retainedFileIDs.isEmpty
-            let removedClean = root.cleanByRelativePath.removeValue(forKey: relativePath) != nil
+            let removedCleanEntry = root.cleanByRelativePath.removeValue(forKey: relativePath)
+            let removedClean = removedCleanEntry != nil
             if let pipelineIdentity = root.cleanPipelineByRelativePath.removeValue(forKey: relativePath),
                var pipeline = root.pipelines[pipelineIdentity]
             {
@@ -1353,6 +1377,9 @@ actor WorkspaceCodemapLiveOverlay {
                 root.pipelines[pipelineIdentity] = pipeline
             }
             let liveFileID = root.liveFileIDByRelativePath[relativePath]
+            let removedLiveSlot = liveFileID.flatMap { fileID in
+                root.liveByFileID[fileID].flatMap { liveGraphSlot(rootEpoch: rootEpoch, entry: $0) }
+            }
             if let liveFileID, let live = root.liveByFileID[liveFileID] {
                 affectedPipelines.insert(live.pipelineIdentity)
                 removeLiveEntry(fileID: liveFileID, from: &root)
@@ -1370,11 +1397,49 @@ actor WorkspaceCodemapLiveOverlay {
             }
             if removedGraphSlot || removedClean || liveFileID != nil || !affectedPipelines.isEmpty {
                 invalidated = addingSaturating(invalidated, 1)
+                // Record the publication this invalidation masks. A later index pass that re-read
+                // the path publishes strictly newer generations, and the shadow must then yield:
+                // otherwise every classification after the edit is forced back to pending and the
+                // root can never return to complete coverage. Every layer that was removed is a
+                // candidate: an unfenced shadow would mask later work without bound.
+                var fenceCandidates = removedGraphSlots
+                if let removedLiveSlot {
+                    fenceCandidates.append(removedLiveSlot)
+                }
+                if let removedManifestSlot {
+                    fenceCandidates.append(removedManifestSlot)
+                }
+                if let removedCleanEntry,
+                   let removedCleanSlot = graphSlot(rootEpoch: rootEpoch, ready: removedCleanEntry)
+                {
+                    fenceCandidates.append(removedCleanSlot)
+                }
+                var fence: ShadowFence?
+                for slot in fenceCandidates {
+                    let candidate = ShadowFence(
+                        requestGeneration: slot.requestGeneration,
+                        pathGeneration: slot.pathGeneration
+                    )
+                    if let current = fence,
+                       current.requestGeneration > candidate.requestGeneration ||
+                       (
+                           current.requestGeneration == candidate.requestGeneration &&
+                               current.pathGeneration >= candidate.pathGeneration
+                       )
+                    {
+                        continue
+                    }
+                    fence = candidate
+                }
                 for pipelineIdentity in affectedPipelines {
                     root.shadows[ShadowKey(
                         pipelineIdentity: pipelineIdentity,
                         relativePath: relativePath
-                    )] = Shadow(reason: reason, accessOrdinal: takeAccessOrdinal())
+                    )] = Shadow(
+                        reason: reason,
+                        accessOrdinal: takeAccessOrdinal(),
+                        fence: fence
+                    )
                 }
             }
         }
@@ -2620,7 +2685,7 @@ actor WorkspaceCodemapLiveOverlay {
             guard let slot = slotsByPath[key.relativePath],
                   slot.pipelineIdentity == key.pipelineIdentity
             else { continue }
-            slotsByPath[key.relativePath] = shadowedGraphSlot(slot, reason: shadow.reason, rootEpoch: rootEpoch)
+            slotsByPath[key.relativePath] = shadowedGraphSlot(slot, shadow: shadow, rootEpoch: rootEpoch)
         }
 
         var slots: [UUID: WorkspaceCodemapGraphSlot] = [:]
@@ -2701,7 +2766,7 @@ actor WorkspaceCodemapLiveOverlay {
                 pipelineIdentity: resolved.pipelineIdentity,
                 relativePath: path
             )] {
-                guard let shadowed = shadowedGraphSlot(resolved, reason: shadow.reason, rootEpoch: rootEpoch) else {
+                guard let shadowed = shadowedGraphSlot(resolved, shadow: shadow, rootEpoch: rootEpoch) else {
                     continue
                 }
                 resolved = shadowed
@@ -2820,10 +2885,23 @@ actor WorkspaceCodemapLiveOverlay {
 
     private func shadowedGraphSlot(
         _ slot: WorkspaceCodemapGraphSlot,
-        reason: WorkspaceCodemapLiveOverlayInvalidationReason,
+        shadow: Shadow,
         rootEpoch: WorkspaceCodemapRootEpoch
     ) -> WorkspaceCodemapGraphSlot? {
-        switch reason {
+        // A shadow only masks state published at or before its invalidation. A strictly newer
+        // publication was read after that invalidation, so it is authoritative and must not be
+        // rewritten to pending. The shadow stays registered and is self-disabling because
+        // generations never move backwards.
+        if let fence = shadow.fence,
+           slot.requestGeneration > fence.requestGeneration ||
+           (
+               slot.requestGeneration == fence.requestGeneration &&
+                   slot.pathGeneration > fence.pathGeneration
+           )
+        {
+            return slot
+        }
+        return switch shadow.reason {
         case .modified, .watcherGap, .evicted:
             graphSlot(
                 rootEpoch: rootEpoch,

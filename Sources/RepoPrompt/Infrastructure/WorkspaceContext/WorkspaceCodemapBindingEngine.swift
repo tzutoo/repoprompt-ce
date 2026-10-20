@@ -550,8 +550,10 @@ actor WorkspaceCodemapBindingEngine {
     }
 
     private struct GraphFlushWaiter {
+        let id: UUID
         let target: WorkspaceCodemapSelectionGraphContributionGeneration
         let continuation: CheckedContinuation<Bool, Never>
+        var timeoutTask: Task<Void, Never>?
     }
 
     private enum GraphIndexCandidateResolution {
@@ -720,6 +722,15 @@ actor WorkspaceCodemapBindingEngine {
     private var graphIndexAdmissionQueue: [GraphIndexAdmissionWaiter] = []
     private var activeGraphIndexJobIDs: Set<UUID> = []
     private var graphIndexWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    /// Self-driving recovery for a root whose coverage is incomplete but whose worker has stopped.
+    /// Leftover-job detection alone is poke-driven, so a stall could wait forever for an unrelated
+    /// invalidation to reschedule it.
+    private var graphIndexSupervisionTasks: [
+        WorkspaceCodemapRootEpoch: (token: UUID, task: Task<Void, Never>)
+    ] = [:]
+    /// Epochs whose graph index was explicitly cancelled by the user (Pause, or a global Code Map
+    /// disable). Supervision must never restart those; only an explicit reschedule lifts it.
+    private var graphIndexSuspendedRootEpochs: Set<WorkspaceCodemapRootEpoch> = []
     private var graphIndexWorkerRecoveryContinuations: [
         UUID: (
             rootEpoch: WorkspaceCodemapRootEpoch,
@@ -1206,7 +1217,10 @@ actor WorkspaceCodemapBindingEngine {
     }
 
     /// Waits until the root's selection graph has applied at least the overlay's current
-    /// contribution generation. Returns false if the graph or its pull loop went away first.
+    /// contribution generation. Returns false if the graph or its pull loop went away first,
+    /// the waiter is cancelled, or the bounded flush timeout elapses. A rollback can cancel the
+    /// worker while it is waiting here; without a timeout that continuation never resumes and the
+    /// leftover job cannot restart.
     private func flushSelectionGraph(rootEpoch: WorkspaceCodemapRootEpoch) async -> Bool {
         guard let graph = selectionGraphsByRootEpoch[rootEpoch],
               graphPullTasksByRootEpoch[rootEpoch] != nil,
@@ -1214,16 +1228,49 @@ actor WorkspaceCodemapBindingEngine {
         else { return false }
         if await graph.incrementalAccounting().appliedGeneration >= target { return true }
         guard graphPullTasksByRootEpoch[rootEpoch] != nil else { return false }
-        return await withCheckedContinuation { continuation in
-            graphFlushWaiters[rootEpoch, default: []].append(
-                GraphFlushWaiter(target: target, continuation: continuation)
-            )
-            // Wake a paused loop now, and a loop idle on notifications through a fresh wakeup;
-            // either way it pulls and settles this waiter after the flush was registered.
-            endGraphPullPause(rootEpoch: rootEpoch)
-            let overlay = overlay
-            Task { await overlay.requestGraphChangeNotification(rootEpoch: rootEpoch) }
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                    return
+                }
+                graphFlushWaiters[rootEpoch, default: []].append(
+                    GraphFlushWaiter(
+                        id: waiterID,
+                        target: target,
+                        continuation: continuation,
+                        timeoutTask: nil
+                    )
+                )
+                // Wake a paused loop now, and a loop idle on notifications through a fresh wakeup;
+                // either way it pulls and settles this waiter after the flush was registered.
+                endGraphPullPause(rootEpoch: rootEpoch)
+                let overlay = overlay
+                Task { await overlay.requestGraphChangeNotification(rootEpoch: rootEpoch) }
+                let timeoutTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await self?.failGraphFlushWaiter(id: waiterID, rootEpoch: rootEpoch)
+                }
+                if let index = graphFlushWaiters[rootEpoch]?.firstIndex(where: { $0.id == waiterID }) {
+                    graphFlushWaiters[rootEpoch]?[index].timeoutTask = timeoutTask
+                } else {
+                    timeoutTask.cancel()
+                }
+            }
+        } onCancel: {
+            Task { await self.failGraphFlushWaiter(id: waiterID, rootEpoch: rootEpoch) }
         }
+    }
+
+    private func failGraphFlushWaiter(id: UUID, rootEpoch: WorkspaceCodemapRootEpoch) {
+        guard var waiters = graphFlushWaiters[rootEpoch],
+              let index = waiters.firstIndex(where: { $0.id == id })
+        else { return }
+        var waiter = waiters.remove(at: index)
+        waiter.timeoutTask?.cancel()
+        graphFlushWaiters[rootEpoch] = waiters.isEmpty ? nil : waiters
+        waiter.continuation.resume(returning: false)
     }
 
     private func settleGraphFlushWaiters(
@@ -1237,6 +1284,7 @@ actor WorkspaceCodemapBindingEngine {
         let remaining = waiters.filter { $0.target > applied }
         graphFlushWaiters[rootEpoch] = remaining.isEmpty ? nil : remaining
         for waiter in settled {
+            waiter.timeoutTask?.cancel()
             waiter.continuation.resume(returning: true)
         }
     }
@@ -1244,6 +1292,7 @@ actor WorkspaceCodemapBindingEngine {
     private func abandonGraphFlushWaiters(rootEpoch: WorkspaceCodemapRootEpoch) {
         endGraphPullPause(rootEpoch: rootEpoch)
         for waiter in graphFlushWaiters.removeValue(forKey: rootEpoch) ?? [] {
+            waiter.timeoutTask?.cancel()
             waiter.continuation.resume(returning: false)
         }
     }
@@ -1277,7 +1326,7 @@ actor WorkspaceCodemapBindingEngine {
             _ = await graph.recordWatcherGapReconciliationFailure()
             return
         }
-        let launch = scheduleGraphIndex(rootEpoch: rootEpoch)
+        let launch = await scheduleGraphIndex(rootEpoch: rootEpoch)
         if launch != .handedOff {
             _ = await graph.recordWatcherGapReconciliationFailure()
         }
@@ -1317,6 +1366,8 @@ actor WorkspaceCodemapBindingEngine {
     private func detachGraphRoot(rootEpoch: WorkspaceCodemapRootEpoch) -> DetachedGraphRoot {
         // Settle the old epoch's waiters before any shutdown await can admit a replacement.
         abandonGraphFlushWaiters(rootEpoch: rootEpoch)
+        cancelGraphIndexSupervision(rootEpoch: rootEpoch)
+        graphIndexSuspendedRootEpochs.remove(rootEpoch)
         return DetachedGraphRoot(
             graph: selectionGraphsByRootEpoch.removeValue(forKey: rootEpoch),
             pull: graphPullTasksByRootEpoch.removeValue(forKey: rootEpoch)
@@ -1358,22 +1409,30 @@ actor WorkspaceCodemapBindingEngine {
     @discardableResult
     func scheduleGraphIndex(
         rootEpoch: WorkspaceCodemapRootEpoch
-    ) -> WorkspaceCodemapGraphIndexLaunchPhase {
+    ) async -> WorkspaceCodemapGraphIndexLaunchPhase {
         guard !manifestPublicationDisabled, !isShuttingDown else { return .cancelled }
         guard case let .eligible(session)? = roots[rootEpoch] else { return .superseded }
+        // An explicit schedule is a legitimate restart request, so it lifts the barrier that keeps
+        // supervision from overriding a user Pause.
+        graphIndexSuspendedRootEpochs.remove(rootEpoch)
         if let existing = graphIndexJobs[rootEpoch] {
             guard graphIndexJobIsCurrent(existing) else {
                 _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .superseded)
-                return scheduleGraphIndex(rootEpoch: rootEpoch)
+                return await scheduleGraphIndex(rootEpoch: rootEpoch)
+            }
+            if existing.task == nil,
+               graphIndexJobLooksStalled(existing),
+               await graphIndexCoverageNeedsReenumeration(rootEpoch: rootEpoch)
+            {
+                _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .cancelled)
+                return await scheduleGraphIndex(rootEpoch: rootEpoch)
             }
             switch existing.phase {
             case .complete:
                 return .handedOff
-            case .budgetLimited:
-                return .handedOff
-            case .cancelled, .superseded:
+            case .budgetLimited, .cancelled, .superseded:
                 _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: existing.phase)
-                return scheduleGraphIndex(rootEpoch: rootEpoch)
+                return await scheduleGraphIndex(rootEpoch: rootEpoch)
             case .scheduled, .waitingForAdmission, .readingCatalogPage, .loadingEnvelopes,
                  .classifyingBatch, .resolvingArtifacts, .stagingManifestCache,
                  .publishingGraphChanges, .checkpointed, .persistingManifestCache, .suspendedBusy:
@@ -1492,25 +1551,30 @@ actor WorkspaceCodemapBindingEngine {
     @discardableResult
     func prioritizeGraphIndexNow(
         rootEpoch: WorkspaceCodemapRootEpoch
-    ) -> WorkspaceCodemapGraphIndexPrioritizeDisposition {
+    ) async -> WorkspaceCodemapGraphIndexPrioritizeDisposition {
         guard !isShuttingDown,
               case .eligible? = roots[rootEpoch]
         else { return .unavailable }
         guard var job = graphIndexJobs[rootEpoch] else {
-            return scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .scheduled : .unavailable
+            return await scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .scheduled : .unavailable
         }
         guard graphIndexJobIsCurrent(job) else {
             _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .superseded)
-            return scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .scheduled : .unavailable
+            return await scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .scheduled : .unavailable
+        }
+        if job.task == nil,
+           graphIndexJobLooksStalled(job),
+           await graphIndexCoverageNeedsReenumeration(rootEpoch: rootEpoch)
+        {
+            _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .cancelled)
+            return await scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .restarted : .unavailable
         }
         switch job.phase {
         case .complete:
             return .alreadyComplete
-        case .cancelled, .superseded:
+        case .cancelled, .superseded, .budgetLimited:
             _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: job.phase)
-            return scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .scheduled : .unavailable
-        case .budgetLimited:
-            return .unavailable
+            return await scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff ? .restarted : .unavailable
         case .scheduled, .waitingForAdmission, .readingCatalogPage, .loadingEnvelopes,
              .classifyingBatch, .resolvingArtifacts, .stagingManifestCache,
              .publishingGraphChanges, .checkpointed, .persistingManifestCache, .suspendedBusy:
@@ -1561,6 +1625,8 @@ actor WorkspaceCodemapBindingEngine {
     }
 
     func cancelGraphIndex(rootEpoch: WorkspaceCodemapRootEpoch) {
+        graphIndexSuspendedRootEpochs.insert(rootEpoch)
+        cancelGraphIndexSupervision(rootEpoch: rootEpoch)
         _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .cancelled)
     }
 
@@ -1741,6 +1807,10 @@ actor WorkspaceCodemapBindingEngine {
         let reconciliation = await graph.beginWatcherGapReconciliation()
         if case .coalesced = reconciliation {
             _ = await overlay.beginGraphReconciliation(rootEpoch: rootEpoch)
+            // A coalesced gap unseals coverage. The in-flight or leftover complete job must
+            // restart, or the chip stays Indexing with no worker and no Retry.
+            _ = cancelGraphIndexJob(rootEpoch: rootEpoch, terminalPhase: .cancelled)
+            _ = await scheduleGraphIndex(rootEpoch: rootEpoch)
             emit(.invalidation, rootEpoch: rootEpoch, invalidationReason: .watcherGap)
             return WorkspaceCodemapBindingInvalidationResult(
                 revokedOverlayCount: 0,
@@ -1763,7 +1833,7 @@ actor WorkspaceCodemapBindingEngine {
         await cancelOverlayAssociations(cancellationBatch.overlayCancellations)
 
         guard await overlay.beginGraphReconciliation(rootEpoch: rootEpoch),
-              scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff
+              await scheduleGraphIndex(rootEpoch: rootEpoch) == .handedOff
         else {
             _ = await graph.recordWatcherGapReconciliationFailure()
             return await invalidateRootAuthority(rootEpoch: rootEpoch, reason: .watcherGap)
@@ -1931,6 +2001,11 @@ actor WorkspaceCodemapBindingEngine {
             task.cancel()
         }
         graphIndexWatchdogTasks.removeAll()
+        for supervision in graphIndexSupervisionTasks.values {
+            supervision.task.cancel()
+        }
+        graphIndexSupervisionTasks.removeAll()
+        graphIndexSuspendedRootEpochs.removeAll()
         prioritizedGraphIndexRootEpoch = nil
         drainingGraphIndexTasks.removeAll()
         drainingGraphIndexResources.removeAll()
@@ -2030,10 +2105,41 @@ actor WorkspaceCodemapBindingEngine {
         }
     }
 
+    /// True when the root's catalog authority was invalidated and must be re-enumerated.
+    ///
+    /// A sealed catalog means the index already finished enumerating, so reading it again cannot
+    /// change anything: remaining pending slots are deferred work owned by another layer, and a
+    /// restart would repeat the same walk. Only an unsealed catalog proves the walk must restart.
+    private func graphIndexCoverageNeedsReenumeration(
+        rootEpoch: WorkspaceCodemapRootEpoch
+    ) async -> Bool {
+        guard let graph = selectionGraphsByRootEpoch[rootEpoch] else { return false }
+        return await graph.incrementalAccounting().coverage?.isCatalogSealed != true
+    }
+
+    private func graphIndexJobLooksStalled(_ job: GraphIndexJob) -> Bool {
+        switch job.phase {
+        case .complete, .checkpointed, .persistingManifestCache,
+             .cancelled, .superseded, .budgetLimited:
+            true
+        case .scheduled, .waitingForAdmission, .readingCatalogPage, .loadingEnvelopes,
+             .classifyingBatch, .resolvingArtifacts, .stagingManifestCache,
+             .publishingGraphChanges, .suspendedBusy:
+            false
+        }
+    }
+
     private func graphIndexWorkerRecoveryState(
         rootEpoch: WorkspaceCodemapRootEpoch
     ) -> WorkspaceCodemapGraphIndexWorkerRecoveryState {
-        graphIndexJobs[rootEpoch]?.workerRecoveryExhausted == true ? .exhausted : .available
+        guard let job = graphIndexJobs[rootEpoch] else { return .available }
+        if job.phase == .budgetLimited || job.lastWorkerCompletionReason == .budgetLimited {
+            return .budgetLimited
+        }
+        if job.workerRecoveryExhausted {
+            return .exhausted
+        }
+        return .available
     }
 
     private func publishGraphIndexWorkerRecoveryState(rootEpoch: WorkspaceCodemapRootEpoch) {
@@ -2045,6 +2151,64 @@ actor WorkspaceCodemapBindingEngine {
 
     private func removeGraphIndexWorkerRecoveryContinuation(_ id: UUID) {
         graphIndexWorkerRecoveryContinuations.removeValue(forKey: id)
+    }
+
+    /// Arms bounded self-driving recovery for a root whose worker stopped before finishing.
+    ///
+    /// Recovery must not depend on an external reschedule: a cancelled worker, a lost currentness
+    /// check, or a spent admission attempt would otherwise sit at "Indexing" with no worker and
+    /// no Retry. The pass stops as soon as a worker is live, coverage is complete, or the
+    /// worker-recovery budget is spent, which is the state that honestly offers Retry.
+    private func ensureGraphIndexSupervision(rootEpoch: WorkspaceCodemapRootEpoch) {
+        guard !isShuttingDown, graphIndexSupervisionTasks[rootEpoch] == nil else { return }
+        guard case .eligible? = roots[rootEpoch] else { return }
+        let token = UUID()
+        let initialMilliseconds = policy.graphIndexRetryInitialMilliseconds
+        let maximumMilliseconds = policy.graphIndexSupervisionMaximumMilliseconds
+        let task = Task(priority: .utility) { [weak self] in
+            var delayMilliseconds = initialMilliseconds
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard await graphIndexSupervisionPass(rootEpoch: rootEpoch) else { break }
+                try? await Task.sleep(nanoseconds: delayMilliseconds * 1_000_000)
+                delayMilliseconds = min(delayMilliseconds * 2, maximumMilliseconds)
+            }
+            await self?.endGraphIndexSupervision(rootEpoch: rootEpoch, token: token)
+        }
+        graphIndexSupervisionTasks[rootEpoch] = (token, task)
+    }
+
+    /// Returns true while supervision must keep polling.
+    private func graphIndexSupervisionPass(
+        rootEpoch: WorkspaceCodemapRootEpoch
+    ) async -> Bool {
+        guard !isShuttingDown, case .eligible? = roots[rootEpoch] else { return false }
+        guard !graphIndexSuspendedRootEpochs.contains(rootEpoch) else { return false }
+        guard let graph = selectionGraphsByRootEpoch[rootEpoch] else { return false }
+        if graphIndexJobs[rootEpoch]?.task != nil { return false }
+        guard await graph.incrementalAccounting().coverage?.isComplete != true else {
+            return false
+        }
+        if let job = graphIndexJobs[rootEpoch],
+           job.workerRecoveryExhausted ||
+           job.workerRecoveryCount >= policy.maximumGraphIndexWorkerRecoveryCount
+        {
+            return false
+        }
+        _ = await scheduleGraphIndex(rootEpoch: rootEpoch)
+        return graphIndexJobs[rootEpoch]?.task == nil
+    }
+
+    private func endGraphIndexSupervision(
+        rootEpoch: WorkspaceCodemapRootEpoch,
+        token: UUID
+    ) {
+        guard graphIndexSupervisionTasks[rootEpoch]?.token == token else { return }
+        graphIndexSupervisionTasks.removeValue(forKey: rootEpoch)
+    }
+
+    private func cancelGraphIndexSupervision(rootEpoch: WorkspaceCodemapRootEpoch) {
+        graphIndexSupervisionTasks.removeValue(forKey: rootEpoch)?.task.cancel()
     }
 
     func accounting() -> WorkspaceCodemapBindingEngineAccounting {
@@ -2286,6 +2450,12 @@ actor WorkspaceCodemapBindingEngine {
             accounting().graphIndexRoots.first { $0.rootEpoch == rootEpoch }
         }
 
+        func overlayBeginGraphReconciliationForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) async -> Bool {
+            await overlay.beginGraphReconciliation(rootEpoch: rootEpoch)
+        }
+
         func debugSimulateGraphIndexWorkerExitForTesting(
             rootEpoch: WorkspaceCodemapRootEpoch,
             reason: WorkspaceCodemapGraphIndexWorkerCompletionReason
@@ -2340,16 +2510,53 @@ actor WorkspaceCodemapBindingEngine {
             return true
         }
 
+        func debugInstallGraphFlushWaiterForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) async -> Bool {
+            await withCheckedContinuation { continuation in
+                graphFlushWaiters[rootEpoch, default: []].append(
+                    GraphFlushWaiter(
+                        id: UUID(),
+                        target: WorkspaceCodemapSelectionGraphContributionGeneration(rawValue: .max),
+                        continuation: continuation,
+                        timeoutTask: nil
+                    )
+                )
+            }
+        }
+
+        func debugGraphFlushWaiterCountForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) -> Int {
+            graphFlushWaiters[rootEpoch]?.count ?? 0
+        }
+
+        func debugAbandonGraphFlushWaitersForTesting(
+            rootEpoch: WorkspaceCodemapRootEpoch
+        ) {
+            abandonGraphFlushWaiters(rootEpoch: rootEpoch)
+        }
+
         func debugSetGraphIndexTerminalPhaseForTesting(
             rootEpoch: WorkspaceCodemapRootEpoch,
             phase: WorkspaceCodemapGraphIndexPhase
         ) -> Bool {
-            guard graphIndexJobPhaseIsTerminal(phase),
+            let allowedStallPhase = phase == .checkpointed || phase == .persistingManifestCache
+            guard graphIndexJobPhaseIsTerminal(phase) || allowedStallPhase,
                   var job = graphIndexJobs[rootEpoch]
             else { return false }
             job.phase = phase
             job.phaseEnteredUptimeNanoseconds = uptimeNanoseconds()
+            job.task = nil
+            job.workerID = nil
+            if phase == .budgetLimited {
+                job.lastWorkerCompletionReason = .budgetLimited
+                job.workerRecoveryExhausted = true
+            }
             graphIndexJobs[rootEpoch] = job
+            if phase == .budgetLimited || allowedStallPhase {
+                publishGraphIndexWorkerRecoveryState(rootEpoch: rootEpoch)
+            }
             return true
         }
 
@@ -3725,8 +3932,12 @@ actor WorkspaceCodemapBindingEngine {
         case .accepted, .exactDuplicate:
             // The graph applies publications on its own pull loop. Completion is observable, so
             // it is only reported once the graph has applied the completing publication: a
-            // caller that sees `.complete` then reads a snapshot with full coverage.
+            // caller that sees `.complete` then reads a snapshot with full coverage. A rollback
+            // can cancel this waiter; `abandonGraphFlushWaiters` and the bounded timeout resume it.
             _ = await flushSelectionGraph(rootEpoch: rootEpoch)
+            if Task.isCancelled {
+                return .cancelled
+            }
         case .stale, .superseded, .budget, .unavailable, .busy:
             break
         }
@@ -5594,7 +5805,10 @@ actor WorkspaceCodemapBindingEngine {
         job.retry = nil
         job.budget = budget
         job.checkpoint = makeGraphIndexCheckpoint(job)
+        job.lastWorkerCompletionReason = .budgetLimited
+        job.workerRecoveryExhausted = true
         graphIndexJobs[rootEpoch] = job
+        publishGraphIndexWorkerRecoveryState(rootEpoch: rootEpoch)
         emit(
             .graphIndexBudget,
             rootEpoch: rootEpoch,
@@ -5799,8 +6013,14 @@ actor WorkspaceCodemapBindingEngine {
         job.isActiveBatch = false
         job.resources = .zero
         job.checkpoint = makeGraphIndexCheckpoint(job)
+        if reason == .budgetLimited {
+            job.workerRecoveryExhausted = true
+        }
         graphIndexJobs[rootEpoch] = job
-        if terminalCompletionReconciledRecovery {
+        if terminalCompletionReconciledRecovery ||
+            reason == .budgetLimited ||
+            (job.task == nil && graphIndexJobPhaseIsTerminal(job.phase) == false)
+        {
             publishGraphIndexWorkerRecoveryState(rootEpoch: rootEpoch)
         }
         #if DEBUG
@@ -5837,6 +6057,22 @@ actor WorkspaceCodemapBindingEngine {
         }
         scheduleQueuedRequests()
         scheduleGraphIndexAdmissions()
+        // A worker that stops without finishing leaves incomplete coverage with nobody to drive
+        // it, so recovery must not wait for an unrelated reschedule. Normal completion is
+        // excluded: a plain-folder root can legitimately keep deferred pending slots, and running
+        // the index again would not resolve them.
+        let stoppedWithoutFinishing = switch job.lastWorkerCompletionReason {
+        case .some(.cancelled), .some(.superseded), .some(.currentnessLost),
+             .some(.watchdogNoProgress), .some(.watchdogRecoveryExhausted),
+             .some(.retryCancelled), .some(.generationResetRejected),
+             .some(.checkpointTransitionRejected), .some(.admissionUnavailable):
+            true
+        case .some(.complete), .some(.budgetLimited), .some(.prioritizeRestart), .none:
+            false
+        }
+        if stoppedWithoutFinishing {
+            ensureGraphIndexSupervision(rootEpoch: rootEpoch)
+        }
     }
 
     private func graphIndexJobPhaseIsTerminal(_ phase: WorkspaceCodemapGraphIndexPhase) -> Bool {
@@ -5927,6 +6163,9 @@ actor WorkspaceCodemapBindingEngine {
             drainingGraphIndexTasks[job.id] = task
             drainingGraphIndexResources[job.id] = job.resources
             drainingGraphIndexRootEpochs[job.id] = rootEpoch
+            // An admitted last-page worker may be blocked in `flushSelectionGraph`. Waking that
+            // waiter lets it drain so a leftover restart can start; it does not preempt publication.
+            abandonGraphFlushWaiters(rootEpoch: rootEpoch)
         }
         if !wasActive {
             scheduleGraphIndexAdmissions()
@@ -9988,6 +10227,11 @@ actor WorkspaceCodemapBindingEngine {
             numericValue: UInt64(revoked),
             invalidationReason: reason
         )
+        // Path edits cancel the current job. Watcher-gap already restarts here; without a
+        // matching restart the overlay stays incomplete and a handed-off store launch is a no-op.
+        if case .eligible? = roots[rootEpoch] {
+            _ = await scheduleGraphIndex(rootEpoch: rootEpoch)
+        }
         return WorkspaceCodemapBindingInvalidationResult(
             revokedOverlayCount: revoked,
             cancelledRequestCount: cancellationBatch.cancelledRequestCount,

@@ -2028,7 +2028,7 @@ actor WorkspaceFileContextStore {
             switch state {
             case .available:
                 codemapGraphIndexWorkerRecoveryExhaustedRootEpochs.remove(rootEpoch)
-            case .exhausted:
+            case .exhausted, .budgetLimited:
                 codemapGraphIndexWorkerRecoveryExhaustedRootEpochs.insert(rootEpoch)
             }
             publishCodemapRootStatusesIfChanged()
@@ -11396,10 +11396,15 @@ actor WorkspaceFileContextStore {
             case .notScheduled, .cancelled, .superseded, nil:
                 .notInitialized
             }
+        } else if accounting?.coverage?.isComplete != true {
+            // Coverage completeness outranks the reconciliation latch. One incomplete-coverage
+            // episode spans many reconciliation passes, and the latch is raised and cleared per
+            // pass, so letting it win alternated the chip between Indexing and Reconciling over
+            // unchanged progress. `.reconciling` now means a usable graph whose coverage is
+            // already complete.
+            .indexing
         } else if accounting?.reconciling == true {
             .reconciling
-        } else if accounting?.coverage?.isComplete != true {
-            .indexing
         } else if accounting?.activeApply == true || accounting?.updatesPending == true {
             .updating
         } else {
@@ -13734,8 +13739,15 @@ actor WorkspaceFileContextStore {
             switch existing.phase {
             case .cancelled, .superseded, .transientRetry:
                 break
+            case .handedOff:
+                // A prior launch can remain handed-off after the engine job was cancelled.
+                // Poke the engine instead of treating that record as proof a worker is running.
+                if let engine = codemapSessionsByRootEpoch[rootEpoch]?.engine {
+                    Task { _ = await engine.scheduleGraphIndex(rootEpoch: rootEpoch) }
+                }
+                return
             case .notScheduled, .eligibilityQueued, .setupJoining, .engineScheduling,
-                 .handedOff, .terminalUnavailable, .retryExhausted:
+                 .terminalUnavailable, .retryExhausted:
                 return
             }
         }
@@ -16211,6 +16223,13 @@ actor WorkspaceFileContextStore {
               codemapAuthorityIsCurrent(authority)
         else { return }
         codemapGraphAccountingByRootEpoch[authority.rootEpoch] = accounting
+        if accounting.coverage?.isComplete == true {
+            _ = acceptCodemapGraphIndexWorkerRecoveryState(
+                .available,
+                authority: authority,
+                engine: engine
+            )
+        }
         publishCodemapRootStatusesIfChanged()
     }
 
@@ -16227,7 +16246,7 @@ actor WorkspaceFileContextStore {
         let changed = switch state {
         case .available:
             codemapGraphIndexWorkerRecoveryExhaustedRootEpochs.remove(authority.rootEpoch) != nil
-        case .exhausted:
+        case .exhausted, .budgetLimited:
             codemapGraphIndexWorkerRecoveryExhaustedRootEpochs.insert(authority.rootEpoch).inserted
         }
         if changed {
