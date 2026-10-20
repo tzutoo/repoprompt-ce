@@ -689,9 +689,12 @@ actor InteractiveMCPClientSession {
             // Connect and initialize. Avoid returning Initialize.Result through a
             // throwing task group: Swift 6.2 release builds can abort in
             // swift_task_dealloc when that timeout race tears down a child task.
+            // A cancelled Task does not close the Unix FD; on timeout we must
+            // disconnect the transport so client.connect can unblock.
             let initResult = try await Self.awaitInitialization(
                 timeoutNanoseconds: 10_000_000_000,
-                timeoutSleep: timeoutSleep
+                timeoutSleep: timeoutSleep,
+                onTimeout: { await transport.disconnect() }
             ) {
                 try await client.connect(transport: transport)
             }
@@ -724,6 +727,7 @@ actor InteractiveMCPClientSession {
     private static func awaitInitialization(
         timeoutNanoseconds: UInt64,
         timeoutSleep: @escaping TimeoutSleep,
+        onTimeout: (@Sendable () async -> Void)? = nil,
         operation: @escaping @Sendable () async throws -> Initialize.Result
     ) async throws -> Initialize.Result {
         let settlement = MCPInitializationSettlementState()
@@ -737,6 +741,9 @@ actor InteractiveMCPClientSession {
                 return
             }
             if settlement.claim(.timedOut) {
+                if let onTimeout {
+                    await onTimeout()
+                }
                 connectionTask.cancel()
             }
         }
@@ -775,11 +782,13 @@ actor InteractiveMCPClientSession {
         static func debugAwaitInitialization(
             timeoutNanoseconds: UInt64,
             timeoutSleep: @escaping TimeoutSleep,
+            onTimeout: (@Sendable () async -> Void)? = nil,
             operation: @escaping @Sendable () async throws -> Initialize.Result
         ) async throws -> Initialize.Result {
             try await awaitInitialization(
                 timeoutNanoseconds: timeoutNanoseconds,
                 timeoutSleep: timeoutSleep,
+                onTimeout: onTimeout,
                 operation: operation
             )
         }

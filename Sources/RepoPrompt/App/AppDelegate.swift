@@ -247,6 +247,9 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
             // so child processes are terminated and reaped rather than orphaned on quit.
             await WindowStatesManager.shared.shutdownAllAgentSessions()
             await WindowStatesManager.shared.stopAllServers()
+            // Window stop disables per-window tools; the process listener owns the
+            // well-known bootstrap socket and must unlink it on quit.
+            await WindowState.sharedMCPService.fullShutdown()
             await shutdownDomainRuntimeForTermination()
             await NotificationService.shared.prepareForTermination()
             sender.reply(toApplicationShouldTerminate: true)

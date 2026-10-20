@@ -404,10 +404,11 @@ package actor ExecMCPService: Service {
             """, stderr)
         case .bootstrapResponseTimeout:
             fputs("""
-            Error: RepoPrompt did not respond to the bootstrap handshake
+            Error: RepoPrompt did not complete MCP initialize
 
-            The app accepted the socket connection too slowly or is wedged.
-            If RepoPrompt recently crashed under the debugger, restart it and try again.
+            The app accepted the socket, but initialize did not finish in time.
+            Bring RepoPrompt to the front and approve the MCP connection if a dialog is showing, then retry.
+            If the app recently crashed, restart it so a leftover bootstrap socket is not left behind.
 
             """, stderr)
         default:

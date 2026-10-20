@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import MCP
+import os
 @testable import RepoPromptApp
 import RepoPromptSecureStorage
 import RepoPromptShared
@@ -75,6 +76,21 @@ final class MCPStateSubscriptionTests: XCTestCase {
         XCTAssertEqual(snapshotsA.count, 4)
         XCTAssertEqual(snapshotsB.count, 4)
         XCTAssertEqual(snapshotsA, snapshotsB)
+    }
+
+    func testFullShutdownInvokesControllerFullShutdown() async {
+        let runs = OSAllocatedUnfairLock(initialState: 0)
+        let service = MCPService(
+            hostBootstrapOperation: {},
+            controllerStartOperation: {},
+            controllerFullShutdownOperation: {
+                runs.withLock { $0 += 1 }
+            }
+        )
+        await service.fullShutdown()
+        XCTAssertEqual(runs.withLock { $0 }, 1)
+        await service.fullShutdown()
+        XCTAssertEqual(runs.withLock { $0 }, 2)
     }
 
     /// A subscriber that joins after state changed must observe the current
