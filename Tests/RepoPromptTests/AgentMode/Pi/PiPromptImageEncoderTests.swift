@@ -22,7 +22,7 @@ final class PiPromptImageEncoderTests: XCTestCase {
         let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02])
         try png.write(to: url)
         let encoded = try PiPromptImageEncoder.encode(
-            AgentImageAttachment(source: .localFile(path: url.path), title: "icon")
+            AgentFileAttachment(source: .localFile(path: url.path), title: "icon", kind: .image, fileName: "icon.png")
         )
         XCTAssertEqual(encoded.mimeType, "image/png")
         XCTAssertEqual(encoded.data, png)
@@ -32,7 +32,7 @@ final class PiPromptImageEncoderTests: XCTestCase {
         let url = directory.appendingPathComponent("notes.txt")
         try Data("hello".utf8).write(to: url)
         XCTAssertThrowsError(
-            try PiPromptImageEncoder.encode(AgentImageAttachment(source: .localFile(path: url.path)))
+            try PiPromptImageEncoder.encode(AgentFileAttachment(source: .localFile(path: url.path), kind: .image, fileName: "notes.txt"))
         ) { error in
             guard case PiPromptImageEncoder.EncoderError.unsupportedType = error else {
                 return XCTFail("Expected unsupportedType, got \(error)")
@@ -43,7 +43,7 @@ final class PiPromptImageEncoderTests: XCTestCase {
     func testRejectsRemoteURL() {
         XCTAssertThrowsError(
             try PiPromptImageEncoder.encode(
-                AgentImageAttachment(source: .url("https://example.com/a.png"))
+                AgentFileAttachment(source: .url("https://example.com/a.png"), kind: .image, fileName: "a.png")
             )
         ) { error in
             guard case PiPromptImageEncoder.EncoderError.remoteURLNotSupported = error else {
@@ -56,7 +56,7 @@ final class PiPromptImageEncoderTests: XCTestCase {
         let url = directory.appendingPathComponent("icon.png")
         try Data([0x89, 0x50, 0x4E, 0x47]).write(to: url)
         let attachments = (0 ..< 9).map { _ in
-            AgentImageAttachment(source: .localFile(path: url.path))
+            AgentFileAttachment(source: .localFile(path: url.path), kind: .image, fileName: "icon.png")
         }
         XCTAssertThrowsError(try PiPromptImageEncoder.encode(attachments)) { error in
             guard case PiPromptImageEncoder.EncoderError.tooManyImages = error else {

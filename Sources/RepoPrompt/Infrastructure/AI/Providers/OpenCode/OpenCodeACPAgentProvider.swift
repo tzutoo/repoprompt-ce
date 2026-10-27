@@ -78,7 +78,8 @@ struct OpenCodeACPAgentProvider: ACPAgentProvider {
             workingDirectory: workingDirectory,
             additionalPathHints: resolvedLaunch.additionalPathHints,
             enableDebugLogging: config.enableDebugLogging,
-            expectedExecutableIdentity: resolvedLaunch.executableIdentity
+            expectedExecutableIdentity: resolvedLaunch.executableIdentity,
+            explicitEnvironmentKeys: Set(environment.keys)
         )
     }
 
@@ -121,7 +122,7 @@ struct OpenCodeACPAgentProvider: ACPAgentProvider {
         return try ACPPromptContentBuilder.blocks(
             text: text,
             attachments: request.attachments,
-            transientImages: message.transientImages
+            oracleAttachments: message.attachments
         )
     }
 

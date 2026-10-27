@@ -49,6 +49,7 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
     // Configuration
     private let baseURL: String
     private let apiKey: String
+    private let httpCredentialConsentEndpoint: String?
     private let defaultModel: String
     private let defaultTemperature: Double
     private let customHeaders: [String: String]
@@ -162,11 +163,13 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
         configuredMaxTokens: Int? = nil,
         includeContentTypeHeader: Bool = false,
         apiVersion: String? = nil,
+        httpCredentialConsentEndpoint: String? = nil,
         httpClient: HTTPClient = DefaultHTTPClient.aiClient,
         streamingHttpClient: HTTPClient = DefaultHTTPClient.aiStreamingClient
     ) {
         self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         self.apiKey = apiKey
+        self.httpCredentialConsentEndpoint = httpCredentialConsentEndpoint
         self.defaultModel = defaultModel
         self.defaultTemperature = defaultTemperature
         self.customHeaders = customHeaders
@@ -177,11 +180,12 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
         self.streamingHttpClient = streamingHttpClient
     }
 
-    private func urlFor(path: String) -> URL? {
+    private func urlFor(path: String) throws -> URL? {
+        try ProviderEndpointConsent.validate(baseURL, credentialBearing: ProviderEndpointConsent.hasCredentials(apiKey: apiKey, customHeaders: customHeaders), consentEndpoint: httpCredentialConsentEndpoint)
         if let v = apiVersion, !v.isEmpty {
-            URL(string: "\(baseURL)/\(v)/\(path)")
+            return URL(string: "\(baseURL)/\(v)/\(path)")
         } else {
-            URL(string: "\(baseURL)/\(path)")
+            return URL(string: "\(baseURL)/\(path)")
         }
     }
 
@@ -202,7 +206,9 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
             }
         }
 
-        headers["Authorization"] = "Bearer \(apiKey)"
+        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers["Authorization"] = "Bearer \(apiKey)"
+        }
         headers.merge(customHeaders) { _, new in new }
         return headers
     }
@@ -339,7 +345,7 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
     }
 
     func getAvailableModels() async throws -> [String] {
-        guard let url = urlFor(path: "models") else {
+        guard let url = try urlFor(path: "models") else {
             throw CustomOpenAIProviderError.invalidResponse(message: "Invalid base URL: \(baseURL)")
         }
 
@@ -369,22 +375,22 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
     // ---------------------------------------
     // NEW: createMessages(for:)
     // ---------------------------------------
-    private func createMessages(for aiMessage: AIMessage) -> [CompletionParams.Message] {
-        CustomOpenAIMessageBuilder.messages(for: aiMessage)
+    private func createMessages(for aiMessage: AIMessage) throws -> [CompletionParams.Message] {
+        try CustomOpenAIMessageBuilder.messages(for: aiMessage)
     }
 
     #if DEBUG
         func serializedMessagesForTesting(
             _ aiMessage: AIMessage
-        ) -> [CompletionParams.Message] {
-            createMessages(for: aiMessage)
+        ) throws -> [CompletionParams.Message] {
+            try createMessages(for: aiMessage)
         }
     #endif
 
     /// completeMessage now accepts temperature as a param
     func completeMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens: Int?) async throws -> AICompletionResult {
         // Build message array using new approach
-        let messages = createMessages(for: aiMessage)
+        let messages = try createMessages(for: aiMessage)
 
         // Ensure there's at least a system prompt
         guard !messages.isEmpty else {
@@ -433,7 +439,7 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
         }
 
         // Build message array once (outside the retry loop for efficiency)
-        let messages = createMessages(for: aiMessage)
+        let messages = try createMessages(for: aiMessage)
         guard !messages.isEmpty else {
             throw AIProviderError.invalidSystemPrompt
         }
@@ -592,7 +598,7 @@ class CustomOpenAIProvider: AIProvider, AIModelGetter {
         maxTokens: Int? = nil,
         temperature: Double? = nil
     ) throws -> URLRequest {
-        guard let url = urlFor(path: "chat/completions") else {
+        guard let url = try urlFor(path: "chat/completions") else {
             throw CustomOpenAIProviderError.invalidResponse(message: "Invalid base URL: \(baseURL)")
         }
 

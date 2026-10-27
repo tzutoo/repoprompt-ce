@@ -104,7 +104,8 @@ struct CursorACPAgentProvider: ACPAgentProvider {
             additionalPathHints: resolvedLaunch.additionalPathHints,
             enableDebugLogging: config.enableDebugLogging,
             cleanupArtifact: cleanupArtifact,
-            expectedExecutableIdentity: resolvedLaunch.executableIdentity
+            expectedExecutableIdentity: resolvedLaunch.executableIdentity,
+            explicitEnvironmentKeys: Set(environment.keys)
         )
     }
 
@@ -147,7 +148,7 @@ struct CursorACPAgentProvider: ACPAgentProvider {
         return try ACPPromptContentBuilder.blocks(
             text: text,
             attachments: request.attachments,
-            transientImages: message.transientImages
+            oracleAttachments: message.attachments
         )
     }
 

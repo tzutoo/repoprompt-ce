@@ -42,15 +42,16 @@ enum PiPromptImageEncoder {
         }
     }
 
-    static func encode(_ attachments: [AgentImageAttachment]) throws -> [NativeAgentRuntimeImage] {
-        guard !attachments.isEmpty else { return [] }
-        guard attachments.count <= maximumImageCount else {
-            throw EncoderError.tooManyImages(count: attachments.count)
+    static func encode(_ attachments: [AgentFileAttachment]) throws -> [NativeAgentRuntimeImage] {
+        let images = attachments.filter { $0.kind == .image }
+        guard !images.isEmpty else { return [] }
+        guard images.count <= maximumImageCount else {
+            throw EncoderError.tooManyImages(count: images.count)
         }
-        return try attachments.map(encode)
+        return try images.map(encode)
     }
 
-    static func encode(_ attachment: AgentImageAttachment) throws -> NativeAgentRuntimeImage {
+    static func encode(_ attachment: AgentFileAttachment) throws -> NativeAgentRuntimeImage {
         switch attachment.source {
         case let .url(rawURL):
             throw EncoderError.remoteURLNotSupported(rawURL)

@@ -19,6 +19,7 @@ enum WorkspaceCodemapRootStatusUnavailableReason: String, Hashable {
     case workerRecoveryExhausted
     /// Plain folder whose Code Map work is withheld until the non-Git opt-in is enabled.
     case nonGitOptOut
+    case budgetLimited
 }
 
 struct WorkspaceCodemapGraphCommitCadence: Hashable {
@@ -71,6 +72,7 @@ struct WorkspaceCodemapRootStatusSnapshot: Hashable {
     let commitCadence: WorkspaceCodemapGraphCommitCadence
     let diagnostics: WorkspaceCodemapGraphRootDiagnostics
     let unavailableReason: WorkspaceCodemapRootStatusUnavailableReason?
+    var graphIndexBudget: WorkspaceCodemapGraphIndexBudget?
 }
 
 struct WorkspaceCodemapRootStatusUpdate: Hashable {

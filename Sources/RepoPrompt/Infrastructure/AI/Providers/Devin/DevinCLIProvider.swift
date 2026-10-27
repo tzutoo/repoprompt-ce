@@ -61,7 +61,7 @@ final class DevinCLIProvider: AIProvider {
                 defer { activeRuns.remove(runID) }
                 do {
                     let modelName = devinModelName(for: model)
-                    if aiMessage.transientImages.isEmpty {
+                    if aiMessage.attachments.isEmpty {
                         let text = try await runOneShot(aiMessage, modelName: modelName)
                         continuation.yield(AIStreamResult(type: "content", text: text))
                         continuation.yield(AIStreamResult(type: "message_stop", text: nil))
@@ -191,7 +191,7 @@ final class DevinCLIProvider: AIProvider {
                 ? noToolsInstruction
                 : systemPrompt + "\n\n" + noToolsInstruction,
             userMessage: conversationText(from: message),
-            transientImages: message.transientImages,
+            attachments: message.attachments,
             resumeSessionID: nil
         )
     }
@@ -240,6 +240,7 @@ final class DevinCLIProvider: AIProvider {
             command: launch.command,
             workingDirectory: directory.path,
             environment: launch.environment.merging(integration.environment) { _, overlay in overlay },
+            environmentFilter: ProviderEnvironmentFiltering.cliFilter(for: .devin, explicitOverrides: integration.environment),
             additionalPaths: [],
             enableDebugLogging: config.enableDebugLogging,
             resolveCandidates: [(launch.command as NSString).lastPathComponent],

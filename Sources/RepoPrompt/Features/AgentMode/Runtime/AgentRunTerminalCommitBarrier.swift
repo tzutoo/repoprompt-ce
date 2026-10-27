@@ -61,6 +61,7 @@ final class AgentRunTerminalCommitBarrier {
         let supportsFollowUp: Bool
         let providerSuccessor: ProviderSuccessor?
         let notifyTurnComplete: Bool
+        let classifiesQuietCheckIn: Bool
         let providerDrainGeneration: UInt64
         let providerBuffersAreDrained: () -> Bool
         let prepareProviderState: () -> (@MainActor () async -> Void)?
@@ -81,6 +82,7 @@ final class AgentRunTerminalCommitBarrier {
             supportsFollowUp: Bool,
             providerSuccessor: ProviderSuccessor? = nil,
             notifyTurnComplete: Bool,
+            classifiesQuietCheckIn: Bool = false,
             providerDrainGeneration: UInt64 = 0,
             providerBuffersAreDrained: @escaping () -> Bool = { true },
             prepareProviderState: @escaping () -> (@MainActor () async -> Void)? = { nil },
@@ -100,6 +102,7 @@ final class AgentRunTerminalCommitBarrier {
             self.supportsFollowUp = supportsFollowUp
             self.providerSuccessor = providerSuccessor
             self.notifyTurnComplete = notifyTurnComplete
+            self.classifiesQuietCheckIn = classifiesQuietCheckIn
             self.providerDrainGeneration = providerDrainGeneration
             self.providerBuffersAreDrained = providerBuffersAreDrained
             self.prepareProviderState = prepareProviderState
@@ -267,6 +270,10 @@ final class AgentRunTerminalCommitBarrier {
             return nil
         }
 
+        binding.hooks.sealQuietCheckIn(
+            request.ownership, request.terminalState, request.classifiesQuietCheckIn,
+            queuedInstruction != nil || providerSuccessor != nil
+        )
         let attemptTeardown = lifecycle.claimTerminalTeardown(
             ownership: request.ownership,
             terminalState: request.terminalState
@@ -324,7 +331,7 @@ final class AgentRunTerminalCommitBarrier {
             binding.hooks.notifyAgentTurnComplete()
         } else if request.terminalState == .failed {
             // Successors and queued follow-ups only exist for completed turns, so a failure is final.
-            binding.hooks.notifyAgentTurnFailed(request.errorText)
+            binding.hooks.notifyAgentTurnFailed(request.errorText ?? binding.latestFailureText)
         }
         binding.hooks.scheduleSave()
         let publicationResult = await binding.hooks.publishTerminalCommit(

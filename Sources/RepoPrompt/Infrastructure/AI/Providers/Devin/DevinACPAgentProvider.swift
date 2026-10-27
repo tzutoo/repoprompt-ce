@@ -68,7 +68,8 @@ struct DevinACPAgentProvider: ACPAgentProvider {
             additionalPathHints: resolvedLaunch.additionalPathHints,
             enableDebugLogging: config.enableDebugLogging,
             cleanupArtifact: integration.cleanupArtifact,
-            expectedExecutableIdentity: resolvedLaunch.executableIdentity
+            expectedExecutableIdentity: resolvedLaunch.executableIdentity,
+            explicitEnvironmentKeys: Set(integration.environment.keys)
         )
     }
 
@@ -111,7 +112,7 @@ struct DevinACPAgentProvider: ACPAgentProvider {
         return try ACPPromptContentBuilder.blocks(
             text: text,
             attachments: request.attachments,
-            transientImages: message.transientImages
+            oracleAttachments: message.attachments
         )
     }
 

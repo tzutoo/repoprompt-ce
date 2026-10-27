@@ -124,7 +124,7 @@ struct ACPRunRequest {
     let modelString: String?
     let workspacePath: String?
     let resumeSessionID: String?
-    let attachments: [AgentImageAttachment]
+    let attachments: [AgentFileAttachment]
     let taskLabelKind: AgentModelCatalog.TaskLabelKind?
     let sessionModeID: String?
     let autoApproveAllToolPermissions: Bool
@@ -139,7 +139,7 @@ struct ACPRunRequest {
         modelString: String?,
         workspacePath: String?,
         resumeSessionID: String?,
-        attachments: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         taskLabelKind: AgentModelCatalog.TaskLabelKind?,
         sessionModeID: String? = nil,
         autoApproveAllToolPermissions: Bool = false,
@@ -180,6 +180,8 @@ struct ACPLaunchConfiguration: Equatable {
     let enableDebugLogging: Bool
     let cleanupArtifact: ACPLaunchCleanupArtifact?
     let expectedExecutableIdentity: ExecutableFileIdentity?
+    /// Names of intentional launch additions, excluding any copied ambient snapshot.
+    let explicitEnvironmentKeys: Set<String>
 
     init(
         providerID: ACPProviderID,
@@ -190,7 +192,8 @@ struct ACPLaunchConfiguration: Equatable {
         additionalPathHints: [String],
         enableDebugLogging: Bool,
         cleanupArtifact: ACPLaunchCleanupArtifact? = nil,
-        expectedExecutableIdentity: ExecutableFileIdentity? = nil
+        expectedExecutableIdentity: ExecutableFileIdentity? = nil,
+        explicitEnvironmentKeys: Set<String>? = nil
     ) {
         self.providerID = providerID
         self.command = command
@@ -201,6 +204,7 @@ struct ACPLaunchConfiguration: Equatable {
         self.enableDebugLogging = enableDebugLogging
         self.cleanupArtifact = cleanupArtifact
         self.expectedExecutableIdentity = expectedExecutableIdentity
+        self.explicitEnvironmentKeys = explicitEnvironmentKeys ?? []
     }
 }
 

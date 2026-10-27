@@ -453,6 +453,7 @@ actor CodexAppServerClient {
     private let writeFrameHandler: @Sendable (Int32, Data) throws -> Void
     private let livenessProbe: @Sendable (SpawnedProcess) -> Bool
     private let processSpawnPreparation: @Sendable () async throws -> Void
+    private let computerUseRuntimeUnavailableMessage: @Sendable (URL) -> String?
     private let processEnvironmentBuilder: @Sendable (ProcessEnvironmentRequest) async -> ProcessEnvironmentResult
     private let runtimeStatePreparer: @Sendable (CodexRuntimeAuthority.Runtime) throws -> Void
     private let launchSnapshot: CodexRuntimeAuthority.LaunchSnapshot
@@ -476,6 +477,7 @@ actor CodexAppServerClient {
             CodexAppServerClient.defaultProcessAppearsAlive(process)
         },
         processSpawnPreparation: @escaping @Sendable () async throws -> Void = {},
+        computerUseRuntimeUnavailableMessage: @escaping @Sendable (URL) -> String? = { CodexComputerUseWorkflow.runtimeUnavailableMessage(executableURL: $0) },
         processEnvironmentBuilder: @escaping @Sendable (ProcessEnvironmentRequest) async -> ProcessEnvironmentResult = {
             await ProcessEnvironmentBuilder.build($0)
         },
@@ -493,6 +495,7 @@ actor CodexAppServerClient {
         self.writeFrameHandler = writeFrameHandler
         self.livenessProbe = livenessProbe
         self.processSpawnPreparation = processSpawnPreparation
+        self.computerUseRuntimeUnavailableMessage = computerUseRuntimeUnavailableMessage
         self.processEnvironmentBuilder = processEnvironmentBuilder
         self.runtimeStatePreparer = runtimeStatePreparer
         self.launchSnapshot = launchSnapshot
@@ -529,9 +532,10 @@ actor CodexAppServerClient {
             )
         )
         var environment = environmentResult.environment
+        let probeEnvironment = await ProviderEnvironmentFiltering.filter(environment, for: .codexExec)
         let resolution = CodexProviderHelpers.resolveCodexExecutable(
             commandName: config.commandName,
-            environment: environment,
+            environment: probeEnvironment,
             additionalPathHints: config.additionalPathHints,
             launchSnapshot: launchSnapshot,
             logger: config.enableDebugLogging ? { print("[CodexAppServer] \($0)") } : nil
@@ -1607,8 +1611,13 @@ actor CodexAppServerClient {
         guard let launchContext = preparedRuntimeLaunchContext else {
             throw ClientError.executableUnavailable("RepoPrompt could not start Codex: prepared runtime launch context was unavailable.")
         }
-        let environment = Self.processEnvironmentForCurrentLaunch(launchContext.environment)
         let resolution = launchContext.resolution
+        let filtered = await ProviderEnvironmentFiltering.filter(
+            launchContext.environment,
+            for: .codexExec,
+            explicitOverrides: resolution.environmentOverrides
+        )
+        let environment = Self.processEnvironmentForCurrentLaunch(filtered)
         if provisionsRepoPromptMCPOnStart {
             let provisioning = CodexIntegrationConfiguration.ensureServerForDiscovery(runtime: runtime)
             guard provisioning.success else {
@@ -1628,6 +1637,11 @@ actor CodexAppServerClient {
         try Task.checkCancellation()
         try ensureStartupAuthority(startupAuthority)
         if config.processFeaturePolicy.computerUseEnabled {
+            // Probe the actual executable afresh, including external selections. Do not
+            // infer its signer from DEBUG, bundle provenance, or cached UI admission.
+            if let message = computerUseRuntimeUnavailableMessage(runtime.executableURL) {
+                throw ClientError.executableUnavailable(message)
+            }
             // No suspension between presence-dependent overrides and spawn. This does not
             // claim atomicity against independent writers of the owned configuration.
             // Read the actual armed launch runtime, not a personal/default home. A reserved

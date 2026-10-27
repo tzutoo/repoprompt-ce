@@ -21,6 +21,8 @@ protocol NativeAgentRuntimeControlling: Actor {
         systemPromptOverride: String?
     ) async throws -> NativeAgentRuntimeSessionRef
     func currentSessionRef() async -> NativeAgentRuntimeSessionRef
+    /// Cached command metadata from this runtime's initialize response; never starts a process.
+    func availableSlashCommands() async -> [NativeAgentRuntimeSlashCommand]
     func applyModelAndEffort(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws
     /// Unlike the legacy live-update helper, this proves the complete requested configuration.
     func applyModelAndEffortWithProof(model: String?, effortLevel: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication
@@ -45,6 +47,10 @@ protocol NativeAgentRuntimeControlling: Actor {
 }
 
 extension NativeAgentRuntimeControlling {
+    func availableSlashCommands() async -> [NativeAgentRuntimeSlashCommand] {
+        []
+    }
+
     /// Fail closed for runtimes that have not implemented application proof. In particular,
     /// an old no-op fake must not accidentally certify provider application.
     func applyModelAndEffortWithProof(model _: String?, effortLevel _: NativeAgentRuntimeEffortLevel?) async throws -> NativeAgentRuntimeConfigurationApplication {
@@ -103,6 +109,14 @@ struct NativeAgentRuntimeRuntimeInitStatus: Equatable {
             let name: String
             let description: String
             let argumentHint: String
+            let builtin: Bool
+
+            init(name: String, description: String, argumentHint: String, builtin: Bool = false) {
+                self.name = name
+                self.description = description
+                self.argumentHint = argumentHint
+                self.builtin = builtin
+            }
         }
 
         struct Agent: Equatable {
@@ -220,6 +234,7 @@ enum NativeAgentRuntimeControllerError: Error, LocalizedError {
 /// level sets (for example pi's per-model thinking levels) are mapped into
 /// these values by each provider adapter.
 typealias NativeAgentRuntimeEffortLevel = ClaudeCodeEffortLevel
+typealias NativeAgentRuntimeSlashCommand = NativeAgentRuntimeRuntimeInitStatus.InitializeResponseSnapshot.Command
 
 // MARK: - Claude-compatible conformance
 

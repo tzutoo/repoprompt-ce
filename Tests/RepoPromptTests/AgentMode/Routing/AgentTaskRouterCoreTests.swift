@@ -133,7 +133,8 @@ final class AgentTaskRoutingCandidateBuilderPolicyTests: XCTestCase {
             CodexModelSpecifier(raw: $0.target.modelRaw).baseModel == "gpt-6-luna"
         }))
         XCTAssertEqual(lunaCandidate.utilityTier, "gpt-6-luna")
-        XCTAssertTrue(lunaCandidate.descriptor.targetDescription.contains("efficient, high-volume"))
+        XCTAssertTrue(lunaCandidate.descriptor.targetDescription.contains("light, high-volume"))
+        XCTAssertTrue(lunaCandidate.descriptor.targetDescription.contains("not intended for substantive implementation"))
         XCTAssertTrue(lunaCandidate.descriptor.targetDescription.contains("$0.10 input / $0.50 output"))
         XCTAssertNil(lunaCandidate.target.reasoningEffortRaw)
         XCTAssertFalse(lunaCandidate.descriptor.targetDescription.contains("Effort:"))
@@ -292,19 +293,48 @@ final class AgentTaskRoutingCandidateBuilderPolicyTests: XCTestCase {
 
         let candidates = try builder.build(snapshot: snapshot)
 
+        // Strongest-first within each provider so judge position bias and truncation favor capability.
         XCTAssertEqual(candidates.map(\.target.modelRaw), [
-            "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-astra",
-            "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1"
+            "gpt-6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-6-luna",
+            "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"
         ])
         XCTAssertEqual(candidates.map(\.utilityTier), [
-            "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-astra",
-            "claude-haiku", "claude-sonnet", "claude-opus", "claude-fable"
+            "gpt-6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-6-luna",
+            "claude-opus", "claude-fable", "claude-sonnet", "claude-haiku"
         ])
         XCTAssertFalse(candidates.contains { $0.target.agentRaw == AgentProviderKind.openCode.rawValue })
-        XCTAssertTrue(candidates.first { $0.utilityTier == "gpt-6-luna" }?.descriptor.rubric.contains("Do not choose it merely because the prompt is short") == true)
-        XCTAssertTrue(candidates.first { $0.utilityTier == "gpt-5.6-terra" }?.descriptor.rubric.contains("no preference from its market tier") == true)
-        XCTAssertTrue(candidates.first { $0.target.modelRaw == "gpt-6-sol" }?.descriptor.rubric.contains("missed findings or retries") == true)
+        XCTAssertTrue(candidates.first { $0.utilityTier == "gpt-6-luna" }?.descriptor.rubric.contains("Not suitable for implementation") == true)
+        XCTAssertTrue(candidates.first { $0.utilityTier == "gpt-5.6-terra" }?.descriptor.rubric.contains("previous-generation") == true)
+        XCTAssertTrue(candidates.first { $0.target.modelRaw == "gpt-6-sol" }?.descriptor.rubric.contains("missed findings and retries") == true)
         XCTAssertTrue(candidates.first { $0.utilityTier == "gpt-6-astra" }?.descriptor.rubric.contains("premium price") == true)
+        XCTAssertFalse(candidates.contains { $0.descriptor.rubric.contains("no preference from its market tier") })
+    }
+
+    func testPrimarySessionFloorExcludesLightAndBalancedFamiliesBeforeTruncation() throws {
+        let availability = AgentModelCatalog.AvailabilityContext(
+            claudeCodeAvailable: true,
+            codexAvailable: true,
+            openCodeAvailable: false
+        )
+        let builder = candidateBuilder(codexOptions: Self.advertisedCodexOptions)
+        let snapshot = builder.capture(allowedProviders: [.claudeCode, .codexExec], availability: availability)
+
+        let primary = try builder.build(
+            snapshot: snapshot,
+            usagePeerClasses: AgentTaskRoutingCandidateBuilder.primarySessionUsagePeerClasses
+        )
+        XCTAssertEqual(primary.map(\.utilityTier), ["gpt-6-sol", "gpt-6-astra", "claude-opus", "claude-fable"])
+        XCTAssertTrue(primary.allSatisfy { ["strong", "frontier"].contains($0.usagePeerClass) })
+
+        let truncated = try builder.build(
+            snapshot: snapshot,
+            maximumChoices: 2,
+            usagePeerClasses: AgentTaskRoutingCandidateBuilder.primarySessionUsagePeerClasses
+        )
+        XCTAssertEqual(truncated.map(\.utilityTier), ["gpt-6-sol", "gpt-6-astra"], "Excluded tiers must not consume choice capacity")
+
+        let subagent = try builder.build(snapshot: snapshot)
+        XCTAssertTrue(subagent.contains { $0.utilityTier == "gpt-6-luna" }, "Subagent routing keeps the full curated frontier")
     }
 
     func testUnknownFamiliesDoNotEnableAutomaticRouter() {
@@ -1038,6 +1068,51 @@ final class AgentTaskRouterRuntimeTests: XCTestCase {
         }
     }
 
+    func testBootstrapSnapshotCannotOvertakeOrderedReadinessUpdates() async throws {
+        let source = RuntimeTestDemandSource(.init(routerEnabled: true, selectedBackendRawValue: "jev", autoEffortEnabled: false, routerRevision: 0))
+        let ready = DecisionReadiness.ready(generation: 1, policyVersion: "test")
+        let jev = RuntimeTestController(bootstrapReadiness: ready)
+        let runtime = try makeRuntime(source, jev, RuntimeTestController())
+        await jev.waitUntilObserved()
+        await runtime.reconcileDemand()
+        // The controller's final snapshot is already ready, while stream delivery is held.
+        // It must not publish ahead of the ordered validating -> ready updates.
+        XCTAssertEqual(runtime.backendReadiness(.jev), .needsConfiguration(generation: 0, reason: "test"))
+        let calls = await jev.calls
+        XCTAssertEqual(calls, 1)
+        await jev.set(.validating(generation: 1))
+        try await waitForReadiness(.validating(generation: 1), id: .jev, runtime: runtime)
+        await jev.set(ready)
+        try await waitForReadiness(ready, id: .jev, runtime: runtime)
+        XCTAssertTrue(runtime.isBackendReady(.jev))
+        await runtime.teardown()
+    }
+
+    func testReadyAdmissionSnapshotSettlesWithoutWaitingForHeldReadinessStream() async throws {
+        let source = RuntimeTestDemandSource(.init(routerEnabled: true, selectedBackendRawValue: "jev", autoEffortEnabled: false, routerRevision: 0))
+        let jev = RuntimeTestController(gateAdmission: true)
+        let runtime = try makeRuntime(source, jev, RuntimeTestController())
+        await jev.waitUntilObserved()
+        await jev.waitUntilAdmission()
+        let ready = DecisionReadiness.ready(generation: 1, policyVersion: "test")
+        await jev.setSnapshotWithoutPublishing(ready)
+        let reconciled = expectation(description: "ready admission needs no bootstrap or stream delivery")
+        let reconciliation = Task {
+            await runtime.reconcileDemand()
+            reconciled.fulfill()
+        }
+        await jev.releaseAdmission()
+        let result = await XCTWaiter.fulfillment(of: [reconciled], timeout: 15)
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(runtime.backendReadiness(.jev), .needsConfiguration(generation: 0, reason: "test"))
+        let calls = await jev.calls
+        XCTAssertEqual(calls, 0)
+        await jev.set(ready)
+        await reconciliation.value
+        try await waitForReadiness(ready, id: .jev, runtime: runtime)
+        await runtime.teardown()
+    }
+
     func testEnabledLegacyProductionIntentBootstrapsJevWithoutSettingsVM() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1263,9 +1338,11 @@ private actor RuntimeTestController: DecisionServiceConfigurationController {
     private var gateAdmission: Bool
     private var admissionWaiters: [CheckedContinuation<Void, Never>] = []
     private var releases: [CheckedContinuation<Void, Never>] = []
-    init(state: DecisionReadiness = .needsConfiguration(generation: 0, reason: "test"), gateAdmission: Bool = false) {
+    private let bootstrapReadiness: DecisionReadiness?
+    init(state: DecisionReadiness = .needsConfiguration(generation: 0, reason: "test"), gateAdmission: Bool = false, bootstrapReadiness: DecisionReadiness? = nil) {
         self.state = state
         self.gateAdmission = gateAdmission
+        self.bootstrapReadiness = bootstrapReadiness
     }
 
     func readinessSnapshot() async -> DecisionReadiness {
@@ -1304,12 +1381,17 @@ private actor RuntimeTestController: DecisionServiceConfigurationController {
         continuation?.yield(state)
     }
 
+    func setSnapshotWithoutPublishing(_ state: DecisionReadiness) {
+        self.state = state
+    }
+
     func perform(_ action: DecisionServiceSettingsAction) -> DecisionServiceSettingsActionResult {
         .succeeded("test")
     }
 
     func bootstrapStoredConfigurationIfNeeded() {
         calls += 1
+        if let bootstrapReadiness { state = bootstrapReadiness }
     }
 
     func cancelAndAdvanceGeneration() {
@@ -1550,9 +1632,12 @@ final class RoutingModelProfileResolverTests: XCTestCase {
             claudeCodeAvailable: false, codexAvailable: true, openCodeAvailable: false
         )
         let candidates = try builder.build(allowedProviders: [.codexExec], availability: availability)
-        XCTAssertEqual(candidates.map(\.target.modelRaw), ["gpt-6-luna", "gpt-6-sol"])
-        XCTAssertTrue(candidates[0].descriptor.targetDescription.contains("No audited benchmark or pricing profile"))
-        XCTAssertTrue(candidates[1].descriptor.targetDescription.contains("Exact audited annotation"))
+        // Curated candidates are ordered strongest-first within a provider.
+        XCTAssertEqual(candidates.map(\.target.modelRaw), ["gpt-6-sol", "gpt-6-luna"])
+        let luna = try XCTUnwrap(candidates.first { $0.target.modelRaw == "gpt-6-luna" })
+        let sol = try XCTUnwrap(candidates.first { $0.target.modelRaw == "gpt-6-sol" })
+        XCTAssertTrue(luna.descriptor.targetDescription.contains("No audited benchmark or pricing profile"))
+        XCTAssertTrue(sol.descriptor.targetDescription.contains("Exact audited annotation"))
         XCTAssertFalse(candidates.contains { $0.target.modelRaw == "known" || $0.target.modelRaw == "new-model" })
     }
 

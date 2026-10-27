@@ -20,6 +20,51 @@ Records contain receipt time, byte count, sanitized CLI version, and only five-h
 
 Managed settings can override the probe. Zero invocations are inconclusive without a known-working authorized interactive control, and results apply only to the tested CLI version/configuration. Keep the output private; remove the temporary directory manually after inspection. The `claimed` marker is intentionally not automatically reset, including after a failed launch.
 
+## Agent admission slow-phase diagnostics
+
+Agent identity admission automatically emits `event=agentAdmission.slow` through the
+`WorkspaceAgentAdmission` OSLog category when a completed admission scope takes at
+least five seconds (including rejection, cancellation, and thrown failure). It uses
+`SuspendingClock`, excluding machine sleep like the coordinator's `DispatchTime`
+uptime measurements. It adds no timers, sleeps, retries, or asynchronous operations.
+It intentionally ships in release (see the [source-layout exception](architecture/source-layout.md#app-visible-diagnostics-retained-in-the-repopromptapp-target)).
+There is no setting to enable and no persisted diagnostic state to clean up.
+
+`workspace=` and `correlation=` use exactly the coordinator's `redactedID` hashes,
+so a slow report can be joined to its queue/acquire/release events without exposing
+raw IDs. `kind=` is one of `fresh_tab`, `existing_tab`, `recovery`, `discard`;
+`outcome=` is `committed`, `rejected`, `cancelled`, or `threw`. Committed means the
+scope accepted its result, not that a provider turn succeeded. Other fields contain
+only fixed phase names, millisecond durations, and counts. Titles, paths, prompt
+text, raw identifiers, and raw errors are never included.
+
+`queue_wait` covers lease acquisition; `refresh` covers canonical snapshot read,
+decode, and reconciliation; `catalog_refresh` separately covers catalog adoption
+awaits (including conflict replay). `save` covers admission persistence and own-save
+waits/convergence; `other` covers remaining lease-held preparation/projection and
+recovery. Durations are exclusive, so nested save waits are not also refresh time.
+`holdMS` aggregates all phases except queue wait. `refreshCount` excludes no-op
+baseline checks and recursive re-entry. `saveAttempts` counts actual persistence
+attempts, including the second attempt on a pre-commit conflict replay, separately
+from save phase entries. Logging happens after releasing this admission's lease;
+a queued successor may already hold the workspace by the time the report emits.
+
+For a future 44-second stall, correlation keys join the phase report to coordinator
+events, while kind/outcome distinguish admission, recovery and discard scopes.
+**MainActor contention is not separable by these phases**: it can inflate any
+phase spanning a suspension, including queue resumption. These are elapsed times,
+not CPU measurements or proof of an underlying cause. A scope that never exits
+still emits no slow report; existing coordinator events remain complementary.
+No threshold enforcement or admission behavior changes are implied.
+
+Deterministic coverage uses an injected clock at the real admission entry points:
+`make dev-test FILTER='WorkspaceAgentAdmissionTimingTests|ConcurrentSameWorkspaceAgentRunAdmissionTests|AgentAdmissionRecoveryTests'`.
+It exercises fresh/existing-tab persistence scopes, the real canonical refresh's
+own-save wait, threshold/outcome/correlation accounting, and emission after lease
+release without wall-clock timing assertions.
+No live launch is required for these tests; capturing a real slow admission still
+requires a separately authorized running-app investigation.
+
 ## Quality gate before adding a test
 
 Add a test only when all four answers are concrete:
@@ -114,16 +159,16 @@ Feature map (app-backed only):
 
 | Reach / drive | Observable proof | Prerequisites / traps |
 | --- | --- | --- |
-| App-backed CE MCP `oracle_send`, or Agent Mode-bound `ask_oracle`, with `images:[{path,title?}]` | Correct description of a pattern absent from filename/title/question; thumbnail visible, saved and restored without original bytes/path; persisted `ask_oracle.images` / `oracle_send.images` redacted; outside-root path rejected with indexed error and no new turn | Already-running matching debug artifact/CLI with verified repository/worktree, commit and dirty-patch provenance (CLI version alone is insufficient), exclusive coordination for the singleton app, loaded authorized fixture root, supported credentials and inspected **entire** Oracle roster. Coordinator approval immediately before uploads/paid prompts; lifecycle approval separately. |
-| Paste/drop an image into an Agent Mode composer (Devin, Codex and Grok receive its path as a text note; `@path` agents already see it), then ask the agent to consult the Oracle | Agent passes the listed attachment path in `ask_oracle.images`; every lane describes the pasted pattern; transcripts keep thumbnails only | Only the owning agent session's own files in the managed `agent_attachments` store are authorized, at their exact path; sibling attachments and other outside-root paths stay rejected. Consumed attachment files are deleted when the turn ends, so only in-flight turn images are reliably available. Same app/approval prerequisites as above. |
+| App-backed CE MCP `oracle_send`, or Agent Mode-bound `ask_oracle`, with `attachments:[{path,title?}]` | Correct description of a pattern absent from filename/title/question; thumbnail visible, saved and restored without original bytes/path; persisted `ask_oracle.attachments` / `oracle_send.attachments` redacted; outside-root path rejected with indexed error and no new turn | Already-running matching debug artifact/CLI with verified repository/worktree, commit and dirty-patch provenance (CLI version alone is insufficient), exclusive coordination for the singleton app, loaded authorized fixture root, supported credentials and inspected **entire** Oracle roster. Coordinator approval immediately before uploads/paid prompts; lifecycle approval separately. |
+| Paste/drop an image into an Agent Mode composer (Devin, Codex and Grok receive its path as a text note; `@path` agents already see it), then ask the agent to consult the Oracle | Agent passes the listed attachment path in `ask_oracle.attachments`; every lane describes the pasted pattern; transcripts keep thumbnails only | Only the owning agent session's own files in the managed `agent_attachments` store are authorized, at their exact path; sibling attachments and other outside-root paths stay rejected. Consumed attachment files are deleted when the turn ends, so only in-flight turn images are reliably available. Same app/approval prerequisites as above. |
 
-Tool discovery and CLI help (`rpce-cli-debug -l` / `-e 'describe oracle_send'`; `describe ask_oracle` on the owning Agent Mode connection) consume the app's tool schema; direct-headless discovery uses the canonical schema and explicitly rejects images. The generated reference is `docs/spec/mcp-domain-canonical-tool-definitions.generated.json`. Neither CLI adds automatic attachment forwarding: the agent must supply `images:[{path,title?}]`.
+Tool discovery and CLI help (`rpce-cli-debug -l` / `-e 'describe oracle_send'`; `describe ask_oracle` on the owning Agent Mode connection) consume the app's tool schema; direct-headless discovery uses the canonical schema and explicitly rejects `attachments`. The generated reference is `docs/spec/mcp-domain-canonical-tool-definitions.generated.json`. Neither CLI adds automatic attachment forwarding: the agent must supply `attachments:[{path,title?}]`.
 
-`make dev-test FILTER='OracleGroupBoundaryTests|OracleImageContractTests|MCPAskOracleWorktreeTests|OracleImageAttachmentLoaderTests'` exercises image loading, start/continuation dispatch, invalid-path rejection, and transcript redaction. The dispatch fixture captures original bytes without a provider call; it is not live image-delivery proof.
+`make dev-test FILTER='OracleGroupBoundaryTests|OracleAttachmentContractTests|MCPAskOracleWorktreeTests|OracleImageAttachmentLoaderTests'` exercises image loading, start/continuation dispatch, invalid-path rejection, and transcript redaction. The dispatch fixture captures original bytes without a provider call; it is not live image-delivery proof.
 
 Ordinary smoke and packaged initialize/tools-list are **not image-delivery proof**.
 Ordinary CLI connections use `oracle_send`; `ask_oracle` requires an owning Agent Mode session. Both accept images on starts and continuations, and apply the same workspace-root, exact session-attachment, and provider capability checks. Supply a fresh `mode:"chat"`,
-`new_chat:true`, `message`, and nonempty `images` JSON request. Do not include keys,
+`new_chat:true`, `message`, and nonempty `attachments` JSON request (the deprecated image-only `images` alias is also accepted). Do not include keys,
 raw image bytes or base64. Inspect roster/settings before approval: `model` changes
 only the primary lane; additional Oracle lanes can multiply uploads and cost.
 Use a small generated PNG in a disposable loaded root (neutral filename/title),
@@ -139,7 +184,7 @@ root only with approval; expect indexed loader rejection and no added Oracle tur
 Unit regressions prove pre-read/pre-dispatch ordering; screenshots cannot prove it.
 Clean up only the created fixtures/session/workspace after evidence capture (use
 `trash` for files); do not stop a visible app. No production profile or keys should be
-copied into fixtures. Direct-headless Oracle rejects images. Originals are this-turn-only;
+copied into fixtures. Direct-headless Oracle rejects `attachments`. Originals are this-turn-only;
 continuations do not automatically resend them or use saved thumbnails. Missing
 credentials, unsupported negotiated capabilities or unapproved uploads mean **not run**,
 not PASS.
@@ -280,6 +325,37 @@ never commit raw test/conductor output. The harness clears values and scoped
 recorders at each trial; it makes no preference changes and creates no files.
 Unrelated test-runner output is not a privacy-safe shareable report: extract only
 the typed matrix records. Ordinary test runs skip the diagnostic unless opted in.
+
+## Agent transcript pipeline timing diagnostics
+
+This is an opt-in diagnostic, not a CI timing gate. Treat its output as evidence
+only, not a pass/fail result, until an acceptance threshold is added: import and
+compaction are currently super-linear in turn count, so any bound today would only
+restate the current numbers.
+
+`AgentTranscriptProjectionTimingDiagnostics` builds a synthetic Agent Mode session
+of 50, 150, 300 and 1000 turns (per turn: user request, assistant opener, four tool
+call/result pairs with ~1.5 KB JSON results, markdown conclusion) and times legacy
+import, compaction/retention, full projection, the default tail window, and the
+persistence pipeline. Each stage is a single monotonic wall-clock sample with no
+warmup, in the Debug test build, so compare samples only on the same machine,
+configuration and fixture parameters. It is self-contained in
+`Tests/RepoPromptTests/AgentMode/Transcript/AgentRetentionCompactionTests.swift` and
+uses only pre-existing transcript APIs, so the file can be copied onto another
+revision for a controlled comparison.
+
+```sh
+RPCE_RUN_SCALE_TESTS=1 ./conductor test \
+  --filter RepoPromptTests.AgentTranscriptProjectionTimingDiagnostics/testTranscriptPipelineTimingAcrossSessionSizes \
+  --async --request-key transcript-timing
+./conductor job wait --request-key transcript-timing
+```
+
+The conductor log carries one `TRANSCRIPT_TIMING` and one `TRANSCRIPT_BYTES` line per
+size, each prefixed with the fixture parameters (`turns`, `itemsPerTurn`,
+`toolCallsPerTurn`, `toolResultPayloadBytes`, `items`). The only assertions are
+fixture contracts (every synthetic turn imported and retained, projections
+non-empty). Ordinary test runs skip it unless opted in.
 
 ## Codemap-sensitive changes
 
