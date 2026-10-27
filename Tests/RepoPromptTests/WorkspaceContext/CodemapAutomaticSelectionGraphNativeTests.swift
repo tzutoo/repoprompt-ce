@@ -128,7 +128,7 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         guard let budget = budgets.values.last else {
             let accounting = await engine.accounting()
             XCTFail("Missing terminal budget; graph roots: \(accounting.graphIndexRoots)")
-            throw GraphWaitError.timedOut
+            throw GraphWaitError.timedOut(phase: "budget", coverage: "missing")
         }
         return budget
     }
@@ -333,6 +333,7 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
                 pendingCount: 1,
                 updatesPending: false,
                 graphRevision: 1,
+                unavailableReason: nil,
                 graphIndexBudget: budget
             )
         }

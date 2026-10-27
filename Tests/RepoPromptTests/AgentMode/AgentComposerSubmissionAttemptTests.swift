@@ -1731,6 +1731,14 @@ private actor SlashSuggestionRuntime: NativeAgentRuntimeControlling {
         preconditionFailure("Slash suggestions must not start a provider")
     }
 
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) -> UUID {
+        preconditionFailure("Slash suggestions must not send provider messages")
+    }
+
+    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) -> UUID {
+        preconditionFailure("Slash suggestions must not send provider messages")
+    }
+
     func sendUserMessage(_ text: String) -> UUID {
         preconditionFailure("Slash suggestions must not send provider messages")
     }

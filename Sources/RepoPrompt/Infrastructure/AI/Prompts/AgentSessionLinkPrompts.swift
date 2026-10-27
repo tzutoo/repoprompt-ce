@@ -26,7 +26,7 @@ enum AgentSessionLinkPrompts {
         case .codexExec, .claudeCode: true
         // Devin stays disabled for BOTH classification and future copy until exact own-echo U4 proof exists.
         case .devin, .unselected, .claudeCodeGLM, .kimiCode, .customClaudeCompatible,
-             .openCode, .cursor, .grokBuild, .antigravity: false
+             .openCode, .cursor, .grokBuild, .piAgent, .antigravity: false
         }
     }
 

@@ -769,7 +769,12 @@ private enum TipHistoryZIPFixture {
             central += integer(UInt32(item.link ? 0xA1FF_0000 : 0x81A4_0000)) + integer(offset)
             central += name + item.extra
         }
-        let end = integer(UInt32(0x0605_4B50)) + integer(UInt16(0)) + integer(UInt16(0)) + integer(UInt16(items.count)) + integer(UInt16(items.count)) + integer(UInt32(central.count)) + integer(UInt32(local.count)) + integer(UInt16(0))
+        let signature = integer(UInt32(0x0605_4B50))
+        let diskNumbers = integer(UInt16(0)) + integer(UInt16(0))
+        let counts = integer(UInt16(items.count)) + integer(UInt16(items.count))
+        let sizes = integer(UInt32(central.count)) + integer(UInt32(local.count))
+        let commentLength = integer(UInt16(0))
+        let end = signature + diskNumbers + counts + sizes + commentLength
         return local + central + end
     }
 }
