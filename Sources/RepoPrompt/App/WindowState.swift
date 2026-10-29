@@ -591,6 +591,14 @@ class WindowState: ObservableObject {
     /// Accepted restore execution and the protection session capture relies on. See
     /// `WindowRestoreLifetime` for why the two lifetimes stay independent.
     private var restoreLifetime = WindowRestoreLifetime()
+    var hasUnfinishedRestoreExecution: Bool {
+        restoreLifetime.hasUnfinishedExecution
+    }
+
+    var abandonedRestoreCount: Int {
+        restoreLifetime.abandonedRestoreCount
+    }
+
     private(set) var claimedInitialRefreshDeferralID: UUID?
     private(set) var claimedInitialRefreshDeferralWaiterID: UUID?
 
@@ -1289,6 +1297,47 @@ class WindowState: ObservableObject {
         }
     }
 
+    /// Stops the current session's active run through the same guarded target as the composer
+    /// Stop button. Returns `false` when there is nothing to stop.
+    @discardableResult
+    func stopAgentRunFromShortcut() -> Bool {
+        let viewModel = agentModeViewModel
+        guard viewModel.isAgentModeActive,
+              let target = viewModel.composerRunCancelTarget(tabID: viewModel.currentTabID)
+        else { return false }
+        Task { _ = await viewModel.cancelAgentRun(target: target) }
+        return true
+    }
+
+    /// Moves focus to the current session's composer. Ending the current field's editing first
+    /// matches clicking into the composer; the composer still validates its tab and window.
+    func focusAgentComposerFromShortcut() {
+        let viewModel = agentModeViewModel
+        guard viewModel.isAgentModeActive, let tabID = viewModel.currentTabID, let nsWindow else { return }
+        if nsWindow.firstResponder !== nsWindow { nsWindow.makeFirstResponder(nil) }
+        viewModel.repromptUIStore.requestComposerFocus(tabID: tabID)
+    }
+
+    /// Restores the most recently stashed session, like reopening the last closed tab.
+    func reopenLastStashedAgentSessionFromShortcut() {
+        guard let workspace = workspaceManager.activeWorkspace, !workspace.isSystemWorkspace,
+              agentModeViewModel.canPerformDirectSidebarCommand(workspaceID: workspace.id),
+              let stashed = workspace.stashedTabs.max(by: { $0.stashedAt < $1.stashedAt })
+        else { return }
+        Task { await promptManager.unstashTab(stashed.id) }
+    }
+
+    /// Switches to the next session in sidebar order with an unseen attention badge.
+    func focusNextAttentionAgentSessionFromShortcut() {
+        guard workspaceManager.activeWorkspace?.isSystemWorkspace == false,
+              let tabID = agentModeViewModel.nextAttentionSidebarSessionTabID(
+                  from: promptManager.activeComposeTabID,
+                  in: promptManager.currentComposeTabs
+              )
+        else { return }
+        Task { await promptManager.switchComposeTab(tabID) }
+    }
+
     func requestClose(authorization: WindowCloseAuthorization? = nil) {
         if let authorization {
             closeCoordinator.enqueueAuthorization(authorization)
@@ -1811,6 +1860,7 @@ class WindowState: ObservableObject {
         // before the restore (or failed startup) runs. The newer state is installed before the
         // displaced completion runs so reentrant capture or explicit intent sees it.
         let displacedCompletion = restoreLifetime.accept(entry, completion: completion)
+        windowStatesManager?.windowRestoreExecutionDidChange()
         displacedCompletion?()
         StartupPhaseLog.mark(.restoreEntryAssigned, window: windowID)
         applyPendingRestoreEntryIfPossible()
@@ -1820,6 +1870,7 @@ class WindowState: ObservableObject {
     /// is untouched, so session capture keeps the requested entry if explicit intent is refused.
     private func retirePendingRestoreEntry() {
         let completion = restoreLifetime.retirePending()
+        windowStatesManager?.windowRestoreExecutionDidChange()
         completion?()
     }
 
@@ -1851,7 +1902,10 @@ class WindowState: ObservableObject {
                 return
             }
             guard let dispatch = self.restoreLifetime.takePendingForDispatch() else { return }
+            self.windowStatesManager?.windowRestoreExecutionDidChange()
             await self.restoreWorkspace(from: dispatch.entry, acceptanceSequence: dispatch.acceptanceSequence)
+            self.restoreLifetime.finishDispatch(acceptanceSequence: dispatch.acceptanceSequence)
+            self.windowStatesManager?.windowRestoreExecutionDidChange()
             // The dispatch owns this acceptance's completion, even if a newer acceptance
             // arrived while it ran.
             dispatch.completion?()
@@ -1863,7 +1917,11 @@ class WindowState: ObservableObject {
     /// identity, and a later accepted catalog still dispatches it.
     private func releasePendingRestoreCompletionIfCatalogFailed() {
         guard workspaceManager.workspaceChooserPresentation.failure != nil else { return }
+        let previouslyAbandoned = restoreLifetime.abandonedRestoreCount
         let completion = restoreLifetime.releasePendingCompletion()
+        if restoreLifetime.abandonedRestoreCount != previouslyAbandoned {
+            windowStatesManager?.windowRestoreExecutionDidChange()
+        }
         completion?()
     }
 
