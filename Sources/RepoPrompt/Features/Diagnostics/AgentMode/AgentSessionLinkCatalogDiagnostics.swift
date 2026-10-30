@@ -193,7 +193,7 @@ enum AgentSessionLinkCatalogDiagnostics {
         tabID: UUID, reserved: Bool, candidate: Bool, routingGeneration: UInt64?,
         definition: ReturnedDefinition, serverProof: Bool, ordinary: Bool, qualified: Bool
     ) -> Bool {
-        guard logger.isEnabled(type: .default) else { return false }
+        guard OSLog(subsystem: Bundle.main.bundleIdentifier ?? "RepoPrompt", category: "AgentSessionLinkCatalog").isEnabled(type: .default) else { return false }
         logger.notice("event=quiet-qualification tab=\(hashedID(tabID), privacy: .public) reserved=\(reserved, privacy: .public) candidate=\(candidate, privacy: .public) routingGeneration=\(routingGeneration.map(String.init) ?? "nil", privacy: .public) definition=\(definition.rawValue, privacy: .public) serverProof=\(serverProof, privacy: .public) ordinaryOccurrence=\(ordinary, privacy: .public) qualified=\(qualified, privacy: .public)")
         return true
     }
