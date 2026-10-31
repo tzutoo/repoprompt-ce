@@ -2524,15 +2524,36 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         return true
     }
 
+    /// A Computer-Use-including controller retirement still in flight, or an
+    /// ownership-transition hold, is a transient admission fence: it resolves on its own.
+    private func computerUseTransientFenceActive(session: AgentTabSession) -> Bool {
+        !session.codexComputerUseOwnershipTransitionHolds.isEmpty
+            || codexControllerRetirementTaskByTabID[session.tabID]?.includesComputerUse == true
+    }
+
     private func computerUseForNextTurn(session: AgentTabSession) async throws -> Bool {
         guard let activation = session.pendingCodexComputerUseActivation else { return false }
-        guard session.pendingCodexComputerUseActivation?.id == activation.id,
-              computerUseAdmissionMessage(session: session) == nil
-        else {
-            if session.pendingCodexComputerUseActivation?.id == activation.id {
-                session.codexComputerUseArmingRequestID = nil
-                session.pendingCodexComputerUseActivation = nil
+        // A transient fence waits and re-evaluates; it never disarms. Any other refusal is
+        // structural and behaves exactly as before. A superseded attempt leaves the armed
+        // activation for its successor to evaluate.
+        while session.pendingCodexComputerUseActivation?.id == activation.id,
+              computerUseAdmissionMessage(session: session) == CodexComputerUseWorkflow.ineligibleMessage,
+              computerUseTransientFenceActive(session: session),
+              !Task.isCancelled
+        {
+            await awaitCodexComputerUseRetirement(for: session.tabID)
+            if !session.codexComputerUseOwnershipTransitionHolds.isEmpty {
+                try? await Task.sleep(nanoseconds: 10_000_000)
             }
+        }
+        // A vanished activation or superseded attempt reports not-admitted; teardown and the
+        // successor own the outcome. A live activation that refused disarms.
+        guard !Task.isCancelled, session.pendingCodexComputerUseActivation?.id == activation.id else {
+            return false
+        }
+        guard computerUseAdmissionMessage(session: session) == nil else {
+            session.codexComputerUseArmingRequestID = nil
+            session.pendingCodexComputerUseActivation = nil
             throw CodexAppServerClient.ClientError.executableUnavailable(
                 computerUseAdmissionMessage(session: session) ?? CodexComputerUseWorkflow.ineligibleMessage
             )
@@ -5309,7 +5330,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 failure: completion.failure
             ),
             session: session,
-            sourceController: controller
+            sourceController: controller,
+            dispatchedOnEventTask: false
         )
         return true
     }
@@ -5467,10 +5489,19 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 return .unrecoverable(recoveryFailureMessage(for: trigger))
             }
             do {
-                let snapshot = try await probeController.readThreadSnapshot(
-                    includeTurns: true,
-                    timeout: codexRecoveryProbeTimeout
-                )
+                let snapshot: CodexNativeSessionController.ThreadSnapshot = if hasSoftLocalToolLiveness(for: session),
+                                                                               let toolTurnID = currentAuthoritativeNativeToolTurnID(for: session)
+                {
+                    try await probeController.readNativeToolProbeSnapshot(
+                        expectedTurnID: toolTurnID,
+                        timeout: codexRecoveryProbeTimeout
+                    )
+                } else {
+                    try await probeController.readThreadSnapshot(
+                        includeTurns: true,
+                        timeout: codexRecoveryProbeTimeout
+                    )
+                }
                 guard codexWatchdogAttemptRemainsCurrent(
                     session: session,
                     controller: probeController,
@@ -5901,7 +5932,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         for session: AgentTabSession,
         issue: CodexNativeSessionController.ServerRequestIssue?,
         message: String,
-        sourceController: (any CodexSessionControlling)?
+        sourceController: (any CodexSessionControlling)?,
+        cancelEventTask: Bool = true
     ) async -> Bool {
         guard session.selectedAgent == .codexExec, session.runState.isActive else { return false }
         // The in-flight startup owns its provider response and any auth failure until readiness settles.
@@ -5963,6 +5995,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
             session: session,
             expectedController: sourceController,
             source: "managed-auth-recovery",
+            cancelEventTask: cancelEventTask,
             preserveRunID: true
         )
         await ensureCodexNativeSession(
@@ -6036,7 +6069,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 routeReadiness
             }
             let inputRouteIsCurrent = viewModel?.agentSessionLinkHasCurrentProviderInputRoute(for: session, qualification: finalReadiness) == true
-            guard session.runID == runID,
+            guard session.runState.isActive,
+                  session.runID == runID,
                   let activeController = session.codexController,
                   Self.sameCodexControllerInstance(activeController, controller),
                   inputRouteIsCurrent
@@ -7048,7 +7082,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                             break
                         }
                         logCodex("[AgentModeVM] Event task: received event \(event)")
-                        await handleCodexNativeEvent(event, session: session, sourceController: controller)
+                        await handleCodexNativeEvent(event, session: session, sourceController: controller, dispatchedOnEventTask: true)
+                        // Recovery may have replaced this controller; leave the retired stream.
+                        guard let activeController = session.codexController,
+                              Self.sameCodexControllerInstance(activeController, controller)
+                        else {
+                            break
+                        }
                     }
                     logCodex("[AgentModeVM] Event task: events stream ended")
                     cancelCodexTransportClosedFallback(for: session.tabID)
@@ -7057,6 +7097,13 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                     // If the task was cancelled (intentional teardown) or run has moved on, do nothing.
                     guard !Task.isCancelled else { return }
                     guard session.runID == taskRunID else { return }
+                    // A controller replacement (reconnect, managed-auth recovery) installs a new
+                    // listener; a torn-down listener must not run stream-end recovery for it.
+                    guard let activeController = session.codexController,
+                          Self.sameCodexControllerInstance(activeController, controller)
+                    else {
+                        return
+                    }
 
                     guard session.runState.isActive else {
                         guard invalidateCodexControllerForReconnect(
@@ -9725,7 +9772,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
     private func handleCodexNativeEvent(
         _ event: CodexNativeSessionController.Event,
         session: AgentTabSession,
-        sourceController: (any CodexSessionControlling)? = nil
+        sourceController: (any CodexSessionControlling)? = nil,
+        dispatchedOnEventTask: Bool
     ) async {
         AgentModeViewModel.logCodexDebug("[AgentModeVM][CodexUI] handleEvent \(debugCodexEventSummary(event)) tab=\(session.tabID)")
         if let sourceController {
@@ -9977,7 +10025,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 for: session,
                 issue: issue,
                 message: issue.message,
-                sourceController: sourceController
+                sourceController: sourceController,
+                cancelEventTask: !dispatchedOnEventTask
             ) {
                 return
             }
@@ -10250,7 +10299,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                    for: session,
                    issue: nil,
                    message: failureMessage,
-                   sourceController: sourceController
+                   sourceController: sourceController,
+                   cancelEventTask: !dispatchedOnEventTask
                )
             {
                 return
@@ -10361,7 +10411,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 for: session,
                 issue: nil,
                 message: notification.message,
-                sourceController: sourceController
+                sourceController: sourceController,
+                cancelEventTask: !dispatchedOnEventTask
             ) {
                 return
             }
@@ -10391,7 +10442,8 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 for: session,
                 issue: nil,
                 message: message,
-                sourceController: sourceController
+                sourceController: sourceController,
+                cancelEventTask: !dispatchedOnEventTask
             ) {
                 return
             }
@@ -11362,12 +11414,14 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
         func test_handleCodexNativeEvent(
             _ event: CodexNativeSessionController.Event,
             session: AgentTabSession,
-            sourceController: (any CodexSessionControlling)? = nil
+            sourceController: (any CodexSessionControlling)? = nil,
+            dispatchedOnEventTask: Bool = false
         ) async {
             await handleCodexNativeEvent(
                 event,
                 session: session,
-                sourceController: sourceController
+                sourceController: sourceController,
+                dispatchedOnEventTask: dispatchedOnEventTask
             )
         }
 
@@ -12728,7 +12782,7 @@ final class CodexAgentModeCoordinator: AgentModeRunInteractionStateObserving {
                 appendedOutput: appendedOutput.isEmpty ? nil : appendedOutput,
                 sealsAssistantBoundary: sealsAssistantBoundary
             )
-            await handleCodexNativeEvent(.commandExecutionRunning(update), session: session)
+            await handleCodexNativeEvent(.commandExecutionRunning(update), session: session, dispatchedOnEventTask: false)
         }
     }
 #endif
