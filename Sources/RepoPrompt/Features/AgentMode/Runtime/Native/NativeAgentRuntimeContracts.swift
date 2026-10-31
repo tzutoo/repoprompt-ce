@@ -173,6 +173,8 @@ enum NativeAgentRuntimeEvent {
     case approvalRequest(AgentApprovalRequest)
     case approvalCancelled(requestID: String)
     case turnCompleted(turnID: UUID, status: NativeAgentRuntimeTurnStatus)
+    /// Keyed answer group, including singleton groups. Legacy positional answers use turnCompleted.
+    case turnsCompleted(turnIDs: [UUID], status: NativeAgentRuntimeTurnStatus)
     case error(String)
 }
 
