@@ -148,6 +148,9 @@ struct NativeAgentRuntimeRuntimeInitStatus: Equatable {
     let tools: [String]
     let mcpServerStatuses: [String: String]
     let initializeResponse: InitializeResponseSnapshot?
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from Claude's final launch environment.
+    /// Other native runtimes, including pi, leave this nil.
+    var autoCompactWindowTokens: Int? = nil
 
     var repoPromptServerStatus: String? {
         mcpServerStatuses.first {

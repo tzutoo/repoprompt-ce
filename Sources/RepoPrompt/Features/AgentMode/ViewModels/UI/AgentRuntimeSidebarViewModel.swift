@@ -49,11 +49,12 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             return usedTokens != nil ? usageSource.label : "Estimated"
         }
 
-        /// Context window with agent-specific fallback when the provider hasn't reported one yet.
+        /// Context window with a known model or provider fallback when the provider hasn't reported
+        /// one yet; nil when the window is unknown, so the UI never presents a guess as fact.
         /// With a known agent, encoded selections (`base:effort`) resolve through
         /// `resolvedModel(forRaw:agentKind:)`; without one, only an exact raw match
         /// can be trusted because the specifier grammar is agent-specific.
-        var effectiveContextWindowTokens: Int {
+        var effectiveContextWindowTokens: Int? {
             if let contextWindowTokens {
                 return contextWindowTokens
             }
@@ -73,22 +74,14 @@ final class AgentRuntimeSidebarViewModel: ObservableObject {
             if let modelContextWindow = model?.contextWindowTokens {
                 return modelContextWindow
             }
-            // DeepSeek V4 family models ship a 1M-token context window. Dynamic
-            // agent model IDs (opencode "provider/model", ACP variants) may not
-            // exact-match the static catalog, so match on the raw model name as
-            // a fallback before resorting to agent-specific defaults.
-            if let selectedModelRaw,
-               selectedModelRaw.contains("deepseek-v4")
-            {
-                return 1_000_000
-            }
             switch selectedAgent {
-            case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: return 200_000
-            case .openCode, .cursor, .antigravity: return 200_000
             case .grokBuild: return 500_000 // grok 4.5/4.6 advertise totalContextTokens 500000
             case .piAgent:
-                return PiModelRegistry.contextWindow(forRaw: selectedModelRaw ?? "") ?? 200_000
-            case .codexExec, .devin, .none: return 200_000
+                // Discovered pi windows vary (262k, 500k, 1M). Unknown stays unknown.
+                return PiModelRegistry.contextWindow(forRaw: selectedModelRaw ?? "")
+            case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible,
+                 .openCode, .cursor, .antigravity, .codexExec, .devin, .none:
+                return nil
             }
         }
     }

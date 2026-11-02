@@ -38,6 +38,11 @@ extension AgentModeViewModel {
         session: TabSession
     ) -> Bool {
         guard let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) else { return false }
+        // The vouch compares against the stored window, which the estimator caps the same way.
+        let vouchableWindow = ClaudeAutoCompactWindow.cappedReportedWindow(
+            modelContextWindow,
+            autoCompactWindow: session.activeClaudeAutoCompactWindowTokens
+        )
         let changed = estimator.ingestUsageSignal(
             promptTokens: promptTokens,
             completionTokens: completionTokens,
@@ -49,7 +54,7 @@ extension AgentModeViewModel {
             contextUsedTokens: contextUsedTokens,
             // A prompt count is billed input, not occupancy: it cannot vouch during a compaction turn.
             promptTokens: session.contextCountVouchAwaitsOccupancyReport ? nil : promptTokens,
-            modelContextWindow: modelContextWindow
+            modelContextWindow: vouchableWindow
         )
         return changed
     }
@@ -69,6 +74,10 @@ extension AgentModeViewModel {
         session: TabSession
     ) {
         guard let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) else { return }
+        let vouchableWindow = ClaudeAutoCompactWindow.cappedReportedWindow(
+            modelContextWindow,
+            autoCompactWindow: session.activeClaudeAutoCompactWindowTokens
+        )
         // Whether the provider already reported occupancy this turn must be read before the
         // finalization consumes its per-turn marker.
         let heldOccupancy = estimator.hasOccupancyReportThisTurn(session: session)
@@ -89,7 +98,7 @@ extension AgentModeViewModel {
         // Vouch presence then always matches whether a count is exported, and its transitions
         // republish (a later `usage_update` confirming the same figure establishes a vouch).
         if session.selectedAgent.acpProviderID != nil, !heldOccupancy {
-            session.withdrawContextCountVouch(notingWindow: modelContextWindow)
+            session.withdrawContextCountVouch(notingWindow: vouchableWindow)
             return
         }
         // A billed prompt-call count is a different quantity than occupancy: when the estimator
@@ -111,7 +120,7 @@ extension AgentModeViewModel {
         session.noteLiveContextUsageReport(
             contextUsedTokens: vouchedCount,
             promptTokens: nil,
-            modelContextWindow: modelContextWindow
+            modelContextWindow: vouchableWindow
         )
     }
 
@@ -171,8 +180,9 @@ extension AgentModeViewModel {
         modelContextWindow: Int?
     ) -> AgentContextUsage? {
         guard !usage.isEmpty else { return nil }
-        let defaultClaudeContextWindow = 200_000
-        let maxContextTokens = max(1, modelContextWindow ?? defaultClaudeContextWindow)
+        // Without a known window there is no ceiling: a fixed fallback would discard valid
+        // occupancy restored from larger-window sessions.
+        let maxContextTokens = modelContextWindow.map { max(1, $0) } ?? Int.max
         // Only trust exact stream-derived context snapshots (contextUsedTokens).
         // Do NOT fall back to promptTokens — those are billed-turn aggregates that
         // include internal tool sub-steps and cause inflated context estimates.

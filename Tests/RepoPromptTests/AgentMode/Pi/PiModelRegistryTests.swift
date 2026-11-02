@@ -68,6 +68,29 @@ final class PiModelRegistryTests: XCTestCase {
         XCTAssertNil(PiModelRegistry.contextWindow(forRaw: "missing"))
     }
 
+    func testSidebarUsesDiscoveredPiWindowsAndLeavesUnknownPiModelsUnknown() {
+        PiModelRegistry.update(records: [
+            record("qwen3-235b", contextWindow: 262_144),
+            record("glm-5.3", contextWindow: 500_000),
+            record("kimi-k2", contextWindow: 1_000_000)
+        ])
+        XCTAssertEqual(
+            AgentRuntimeSidebarViewModel.ContextSnapshot(selectedAgent: .piAgent, selectedModelRaw: "qwen3-235b").effectiveContextWindowTokens,
+            262_144
+        )
+        XCTAssertEqual(
+            AgentRuntimeSidebarViewModel.ContextSnapshot(selectedAgent: .piAgent, selectedModelRaw: "glm-5.3").effectiveContextWindowTokens,
+            500_000
+        )
+        XCTAssertEqual(
+            AgentRuntimeSidebarViewModel.ContextSnapshot(selectedAgent: .piAgent, selectedModelRaw: "kimi-k2").effectiveContextWindowTokens,
+            1_000_000
+        )
+        XCTAssertNil(
+            AgentRuntimeSidebarViewModel.ContextSnapshot(selectedAgent: .piAgent, selectedModelRaw: "undiscovered").effectiveContextWindowTokens
+        )
+    }
+
     func testCatalogUsesDiscoveredOptionsAndValidates() {
         PiModelRegistry.update(records: [
             record("glm-5.3", name: "GLM 5.3", provider: "zai")
