@@ -312,7 +312,7 @@ final class ClaudeContextUsageEstimator: ContextUsageEstimating {
     static func estimatesUsage(for agent: AgentProviderKind) -> Bool {
         switch agent {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: true
-        case .openCode, .cursor, .grokBuild, .antigravity, .devin, .codexExec: false
+        case .openCode, .cursor, .grokBuild, .antigravity, .devin, .codexExec, .piAgent: false
         }
     }
 
