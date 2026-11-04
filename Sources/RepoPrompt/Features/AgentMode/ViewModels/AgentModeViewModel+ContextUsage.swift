@@ -39,7 +39,7 @@ extension AgentModeViewModel {
     ) -> Bool {
         guard let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) else { return false }
         // The vouch compares against the stored window, which the estimator caps the same way.
-        let vouchableWindow = ClaudeAutoCompactWindow.cappedReportedWindow(
+        let vouchableWindow = ClaudeCompatiblePluginAutoCompactWindow.cappedReportedWindow(
             modelContextWindow,
             autoCompactWindow: session.activeClaudeAutoCompactWindowTokens
         )
@@ -74,7 +74,7 @@ extension AgentModeViewModel {
         session: TabSession
     ) {
         guard let estimator = nonCodexContextUsageEstimator(for: session.selectedAgent) else { return }
-        let vouchableWindow = ClaudeAutoCompactWindow.cappedReportedWindow(
+        let vouchableWindow = ClaudeCompatiblePluginAutoCompactWindow.cappedReportedWindow(
             modelContextWindow,
             autoCompactWindow: session.activeClaudeAutoCompactWindowTokens
         )
