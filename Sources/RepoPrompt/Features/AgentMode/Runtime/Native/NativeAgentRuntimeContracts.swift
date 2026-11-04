@@ -195,6 +195,8 @@ enum NativeAgentRuntimeEvent {
     case runtimeInit(NativeAgentRuntimeRuntimeInitStatus)
     case approvalRequest(AgentApprovalRequest)
     case approvalCancelled(requestID: String)
+    /// A provider-originated turn the host did not start. Pi does not emit this.
+    case providerTurnStarted(turnID: UUID)
     case turnCompleted(turnID: UUID, status: NativeAgentRuntimeTurnStatus)
     /// Keyed answer group, including singleton groups. Legacy positional answers use turnCompleted.
     case turnsCompleted(turnIDs: [UUID], status: NativeAgentRuntimeTurnStatus)

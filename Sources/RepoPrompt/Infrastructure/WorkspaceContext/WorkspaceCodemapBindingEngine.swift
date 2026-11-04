@@ -6117,7 +6117,8 @@ actor WorkspaceCodemapBindingEngine {
              .some(.retryCancelled), .some(.generationResetRejected),
              .some(.checkpointTransitionRejected), .some(.admissionUnavailable):
             true
-        case .some(.complete), .some(.budgetLimited), .some(.prioritizeRestart), .none:
+        case .some(.complete), .some(.budgetLimited), .some(.retryExhausted),
+             .some(.prioritizeRestart), .none:
             false
         }
         if stoppedWithoutFinishing {
