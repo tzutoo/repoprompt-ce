@@ -60,6 +60,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
     /// worker has stopped.
     let graphIndexSupervisionMaximumMilliseconds: UInt64
     let graphIndexRetryJitterPercent: UInt64
+    let maximumGraphIndexConsecutiveRetryCount: UInt64
     let graphIndexWorkerNoProgressTimeoutMilliseconds: UInt64
     let maximumGraphIndexWorkerRecoveryCount: UInt64
 
@@ -111,6 +112,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         graphIndexRetryMaximumMilliseconds: UInt64 = 30000,
         graphIndexSupervisionMaximumMilliseconds: UInt64 = 2000,
         graphIndexRetryJitterPercent: UInt64 = 20,
+        maximumGraphIndexConsecutiveRetryCount: UInt64 = 8,
         graphIndexWorkerNoProgressTimeoutMilliseconds: UInt64 = 120_000,
         maximumGraphIndexWorkerRecoveryCount: UInt64 = 3
     ) {
@@ -169,6 +171,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         precondition(graphIndexRetryMaximumMilliseconds >= graphIndexRetryInitialMilliseconds)
         precondition(graphIndexRetryJitterPercent <= 100)
         precondition(graphIndexSupervisionMaximumMilliseconds >= graphIndexRetryInitialMilliseconds)
+        precondition(maximumGraphIndexConsecutiveRetryCount > 0)
         precondition(graphIndexWorkerNoProgressTimeoutMilliseconds > 0)
         precondition(maximumGraphIndexWorkerRecoveryCount > 0)
         self.maximumRootCount = maximumRootCount
@@ -222,6 +225,7 @@ struct WorkspaceCodemapBindingEnginePolicy: Equatable {
         self.graphIndexRetryMaximumMilliseconds = graphIndexRetryMaximumMilliseconds
         self.graphIndexRetryJitterPercent = graphIndexRetryJitterPercent
         self.graphIndexSupervisionMaximumMilliseconds = graphIndexSupervisionMaximumMilliseconds
+        self.maximumGraphIndexConsecutiveRetryCount = maximumGraphIndexConsecutiveRetryCount
         self.graphIndexWorkerNoProgressTimeoutMilliseconds = graphIndexWorkerNoProgressTimeoutMilliseconds
         self.maximumGraphIndexWorkerRecoveryCount = maximumGraphIndexWorkerRecoveryCount
     }
@@ -836,6 +840,7 @@ enum WorkspaceCodemapGraphIndexWorkerCompletionReason: String, Hashable {
     case checkpointTransitionRejected
     case generationResetRejected
     case retryCancelled
+    case retryExhausted
     case watchdogNoProgress
     case watchdogRecoveryExhausted
     case prioritizeRestart
@@ -846,6 +851,7 @@ enum WorkspaceCodemapGraphIndexWorkerCompletionReason: String, Hashable {
 enum WorkspaceCodemapGraphIndexExecutionState: Hashable {
     case available
     case exhausted
+    case retryExhausted
     case budgetLimited(WorkspaceCodemapGraphIndexBudget)
 
     var budget: WorkspaceCodemapGraphIndexBudget? {
