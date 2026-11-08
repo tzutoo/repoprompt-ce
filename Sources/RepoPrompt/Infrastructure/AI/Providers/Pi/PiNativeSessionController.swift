@@ -669,12 +669,23 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
             try? await Task.sleep(nanoseconds: timeoutNanos)
             await self?.failPendingResponseIfStillPending(requestID: requestID)
         }
-        do {
-            try stdinHandle.write(contentsOf: data)
-        } catch {
-            pendingResponses.removeValue(forKey: requestID)?(.failure(NativeAgentRuntimeControllerError.inputWriteFailed(error.localizedDescription)))
-            throw NativeAgentRuntimeControllerError.inputWriteFailed(error.localizedDescription)
+        // Image prompts are large. Writing them on this actor blocks the stdout
+        // consumer, so a full pipe can never be drained and the prompt never starts.
+        let handle = stdinHandle
+        Task.detached {
+            do {
+                try handle.write(contentsOf: data)
+            } catch {
+                await self.failPendingResponse(
+                    requestID: requestID,
+                    error: NativeAgentRuntimeControllerError.inputWriteFailed(error.localizedDescription)
+                )
+            }
         }
+    }
+
+    private func failPendingResponse(requestID: String, error: Error) {
+        pendingResponses.removeValue(forKey: requestID)?(.failure(error))
     }
 
     private func failPendingResponseIfStillPending(requestID: String) {
@@ -828,11 +839,14 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
                 break
             }
         case let .messageEnd(message):
-            if case let .assistant(blocks, _, _, usage, stopReason, _) = message {
+            if case let .assistant(blocks, _, _, usage, stopReason, errorMessage) = message {
                 if let usage {
                     lastTurnUsage = (usage.input, usage.output, usage.cost?.total ?? 0)
                 }
                 lastStopReason = stopReason ?? lastStopReason
+                if let errorMessage, !errorMessage.isEmpty, stopReason == "error" {
+                    emit(.error(errorMessage))
+                }
                 // Content blocks that streamed as deltas are already emitted; only
                 // emit unsent non-delta text if no deltas were observed for safety.
                 if !streamingAssistantText {

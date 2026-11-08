@@ -2348,13 +2348,33 @@ struct AgentAttachmentIntake {
 
     private func writeTemporaryImageData(_ data: Data, typeIdentifier: String) throws -> URL {
         try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
-        let fileExtension = (UTType(typeIdentifier)?.preferredFilenameExtension ?? "png")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let payload = piCompatibleImagePayload(data, typeIdentifier: typeIdentifier)
         let destinationURL = temporaryRoot
             .appendingPathComponent("pasted-image-\(UUID().uuidString)")
-            .appendingPathExtension(fileExtension.isEmpty ? "png" : fileExtension)
-        try data.write(to: destinationURL, options: .atomic)
+            .appendingPathExtension(payload.fileExtension)
+        try payload.data.write(to: destinationURL, options: .atomic)
         return destinationURL
+    }
+
+    /// pi RPC accepts PNG, JPEG, GIF, and WebP. Screenshot paste often arrives as
+    /// HEIC or TIFF, which the encoder would reject after the run had already started.
+    private func piCompatibleImagePayload(_ data: Data, typeIdentifier: String) -> (data: Data, fileExtension: String) {
+        let type = UTType(typeIdentifier)
+        if let type, type.conforms(to: .png) { return (data, "png") }
+        if let type, type.conforms(to: .jpeg) { return (data, "jpg") }
+        if let type, type.conforms(to: .gif) { return (data, "gif") }
+        if let type, type.conforms(to: .webP) { return (data, "webp") }
+        if let image = NSImage(data: data),
+           let tiffData = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiffData),
+           let pngData = bitmap.representation(using: .png, properties: [:]),
+           !pngData.isEmpty
+        {
+            return (pngData, "png")
+        }
+        let fileExtension = (type?.preferredFilenameExtension ?? "png")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (data, fileExtension.isEmpty ? "png" : fileExtension)
     }
 
     private func bestImageTypeIdentifier(from identifiers: [String]) -> String? {

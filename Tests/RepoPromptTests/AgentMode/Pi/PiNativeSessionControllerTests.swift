@@ -1,8 +1,8 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import XCTest
-import RepoPromptAIContracts
-import RepoPromptAgentProviderContracts
 
 final class PiNativeSessionControllerTests: XCTestCase {
     private var fakePiURL: URL!
@@ -36,10 +36,20 @@ final class PiNativeSessionControllerTests: XCTestCase {
               printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"fake-session-1","thinkingLevel":"off","isStreaming":false,"messageCount":0}}\n' "$id"
               ;;
             prompt)
+              if printf '%s' "$line" | grep -q '"images"'; then
+                # A large image prompt can fill the pipe. Respond only after the
+                # controller has released the actor, otherwise this deadlocks.
+                sleep 0.2
+                printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+                printf '{"type":"agent_start"}\n'
+                printf '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"image payload rejected"}}\n'
+                printf '{"type":"agent_settled"}\n'
+              else
               printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
               printf '{"type":"agent_start"}\n'
               printf '{"type":"message_update","usage":{"input":10,"output":2,"totalTokens":12,"cost":{"input":0.01,"output":0.02,"cacheRead":0,"cacheWrite":0,"total":0.03}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"CE_PI_FAKE_OK"}}\n'
               printf '{"type":"agent_settled"}\n'
+              fi
               ;;
             get_session_stats)
               printf '{"id":"%s","type":"response","command":"get_session_stats","success":true,"data":{"tokens":{"input":10,"output":2,"total":12,"cost":{"total":0.03}},"cost":0.03,"contextUsage":{"tokens":1200,"contextWindow":200000,"percent":0.6}}}\n' "$id"
@@ -124,6 +134,27 @@ final class PiNativeSessionControllerTests: XCTestCase {
         XCTAssertNil(status.initializeResponse)
         let active = await controller.hasActiveSession
         XCTAssertTrue(active)
+        await controller.shutdown()
+    }
+
+    func testImagePromptErrorIsEmittedBeforeFailedTurnCompletion() async throws {
+        let controller = makeController()
+        await controller.ensureEventsStreamReady()
+        _ = try await controller.startOrResume(existingSessionID: nil, model: nil, effortLevel: nil, systemPromptOverride: nil)
+        let image = NativeAgentRuntimeImage(data: Data("image".utf8), mimeType: "image/png")
+        _ = try await controller.sendUserMessage("look", images: [image])
+        let events = await collectedEvents(from: controller, until: {
+            if case .turnCompleted = $0 { return true }
+            return false
+        })
+        XCTAssertTrue(events.contains {
+            if case let .error(message) = $0 { return message == "image payload rejected" }
+            return false
+        })
+        guard case let .turnCompleted(_, status) = events.last else {
+            return XCTFail("Expected turn completion, got: \(events)")
+        }
+        XCTAssertEqual(status, .failed)
         await controller.shutdown()
     }
 

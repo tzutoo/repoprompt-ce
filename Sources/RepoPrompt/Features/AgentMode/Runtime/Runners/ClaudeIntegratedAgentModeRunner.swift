@@ -548,6 +548,7 @@ final class ClaudeIntegratedAgentModeRunner {
         }
         var completedProtectedStatuses: [UUID: NativeAgentRuntimeTurnStatus] = [:]
         var abandonedProtectedIDs: Set<UUID> = []
+        var latestProviderError: String?
         eventLoop: while let item = await next() {
             guard session.runID == runID,
                   session.activeRunAttemptID == runAttemptID,
@@ -701,7 +702,7 @@ final class ClaudeIntegratedAgentModeRunner {
                 case .cancelled:
                     return .cancelled
                 case .failed:
-                    return .failed(errorText: nil, shouldShutdownSession: false)
+                    return .failed(errorText: latestProviderError, shouldShutdownSession: false)
                 }
             case let .error(message):
                 session.clearClaudeReasoningStatus(clearDisplayedStatus: true)
@@ -713,6 +714,7 @@ final class ClaudeIntegratedAgentModeRunner {
                         // errors from killed tool processes) in release builds.
                         if Self.isKnownNonActionableStreamError(trimmed) { continue eventLoop }
                     #endif
+                    latestProviderError = trimmed
                     let errorItem = AgentChatItem.error(trimmed, sequenceIndex: session.nextSequenceIndex)
                     session.appendItem(errorItem)
                     hooks.bindingObservation.updateBindings(session)

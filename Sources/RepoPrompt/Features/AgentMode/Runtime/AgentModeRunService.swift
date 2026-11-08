@@ -376,6 +376,7 @@ final class AgentModeRunService {
             )
         }
         if selectedAgent.usesPiNativeRuntime {
+            candidateTransferred = true
             await piRunner.startRun(
                 tabID: tabID,
                 session: session,
@@ -386,7 +387,9 @@ final class AgentModeRunService {
                 autoEffortSelection: autoEffortSelection,
                 providerControlCommand: providerControlCommand,
                 selfCompactDispatchID: selfCompactDispatchID,
-                stopFence: stopFence
+                stopFence: stopFence,
+                localComposerCandidate: localComposerCandidate,
+                initialUserItemID: initialUserItemID
             )
             recordNonCodexStartOutcome(startOutcome, session: session)
             return nil
