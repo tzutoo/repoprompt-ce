@@ -44,6 +44,14 @@ var packageDependencies: [Package.Dependency] = [
 ]
 
 var repoPromptAppDependencies: [Target.Dependency] = [
+    "RepoPromptMCPServer",
+    "RepoPromptClaudeProvider",
+    "RepoPromptAgentProviderContracts",
+    "RepoPromptHTTPProviders",
+    "RepoPromptACPProviders",
+    "RepoPromptCodexProvider",
+    "RepoPromptAIContracts",
+    "RepoPromptWorkspaceContext",
     "RepoPromptDomainRuntime",
     "RepoPromptFoundation",
     "RepoPromptProcess",
@@ -85,7 +93,16 @@ var repoPromptSettingsCoreSwiftSettings: [SwiftSetting] = [
 ]
 
 var repoPromptTestDependencies: [Target.Dependency] = [
+    "RepoPromptMCPServer",
+    "RepoPromptClaudeProvider",
+    "RepoPromptAgentProviderContracts",
+    "RepoPromptHTTPProviders",
+    "RepoPromptACPProviders",
+    "RepoPromptCodexProvider",
+    "RepoPromptAIContracts",
     "RepoPromptApp",
+    "RepoPromptWorkspaceContext",
+    "RepoPromptWorkspaceContextTestSupport",
     "RepoPromptFoundation",
     "RepoPromptProcess",
     "RepoPromptInstrumentation",
@@ -140,6 +157,84 @@ let package = Package(
             path: "Sources/RepoPromptExecutable"
         ),
         .target(
+            name: "RepoPromptClaudeProvider",
+            dependencies: [
+                "RepoPromptAgentProviderContracts",
+                "RepoPromptAIContracts",
+                "RepoPromptDomainRuntime",
+                "RepoPromptFoundation",
+                "RepoPromptProcess",
+                "RepoPromptProviderQuota",
+                .product(name: "RepoPromptClaudeCompatibleProvider", package: "RepoPromptAgentProviders")
+            ],
+            path: "Sources/RepoPromptClaudeProvider"
+        ),
+        .testTarget(
+            name: "RepoPromptClaudeProviderTests",
+            dependencies: ["RepoPromptClaudeProvider", "RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptProcess"],
+            path: "Tests/RepoPromptClaudeProviderTests"
+        ),
+        .target(
+            name: "RepoPromptAgentProviderContracts",
+            dependencies: ["RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptProviderQuota"],
+            path: "Sources/RepoPromptAgentProviderContracts"
+        ),
+        .testTarget(
+            name: "RepoPromptAgentProviderContractsTests",
+            dependencies: ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime"],
+            path: "Tests/RepoPromptAgentProviderContractsTests"
+        ),
+        .target(
+            name: "RepoPromptHTTPProviders",
+            dependencies: [
+                "RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation",
+                .product(name: "SwiftOpenAI", package: "SwiftOpenAI"),
+                .product(name: "SwiftAnthropic", package: "SwiftAnthropic")
+            ],
+            path: "Sources/RepoPromptHTTPProviders"
+        ),
+        .testTarget(
+            name: "RepoPromptHTTPProvidersTests",
+            dependencies: [
+                "RepoPromptHTTPProviders", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation",
+                .product(name: "SwiftOpenAI", package: "SwiftOpenAI"),
+                .product(name: "SwiftAnthropic", package: "SwiftAnthropic")
+            ],
+            path: "Tests/RepoPromptHTTPProvidersTests"
+        ),
+        .target(
+            name: "RepoPromptCodexProvider",
+            dependencies: ["RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptMCPCore", "RepoPromptProcess", "RepoPromptProviderQuota", "RepoPromptShared", "RepoPromptAgentProviderContracts", "RepoPromptFoundation"],
+            path: "Sources/RepoPromptCodexProvider",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptCodexProviderTests",
+            dependencies: ["RepoPromptCodexProvider", "RepoPromptAIContracts", "RepoPromptShared", "RepoPromptDomainRuntime", "RepoPromptProcess"],
+            path: "Tests/RepoPromptCodexProviderTests"
+        ),
+        .target(
+            name: "RepoPromptACPProviders",
+            dependencies: ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation", "RepoPromptMCPCore", "RepoPromptProcess"],
+            path: "Sources/RepoPromptACPProviders",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug)), .enableUpcomingFeature("BareSlashRegexLiterals")]
+        ),
+        .testTarget(
+            name: "RepoPromptACPProvidersTests",
+            dependencies: ["RepoPromptACPProviders", "RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFileSystem", "RepoPromptFoundation", "RepoPromptProcess"],
+            path: "Tests/RepoPromptACPProvidersTests"
+        ),
+        .target(
+            name: "RepoPromptAIContracts",
+            dependencies: [],
+            path: "Sources/RepoPromptAIContracts"
+        ),
+        .testTarget(
+            name: "RepoPromptAIContractsTests",
+            dependencies: ["RepoPromptAIContracts"],
+            path: "Tests/RepoPromptAIContractsTests"
+        ),
+        .target(
             name: "RepoPromptProviderQuota",
             dependencies: [],
             path: "Sources/RepoPromptProviderQuota",
@@ -154,6 +249,7 @@ let package = Package(
         .target(
             name: "RepoPromptDomainRuntime",
             dependencies: [
+                "RepoPromptAIContracts",
                 "RepoPromptShared",
                 "RepoPromptWorkspaceCore",
                 "RepoPromptC",
@@ -229,7 +325,7 @@ let package = Package(
         ),
         .target(
             name: "RepoPromptSettingsCore",
-            dependencies: ["RepoPromptFoundation", "RepoPromptDomainRuntime", "RepoPromptProviderQuota", "RepoPromptShared"],
+            dependencies: ["RepoPromptAIContracts", "RepoPromptFoundation", "RepoPromptDomainRuntime", "RepoPromptProviderQuota", "RepoPromptShared"],
             path: "Sources/RepoPromptSettingsCore",
             swiftSettings: repoPromptSettingsCoreSwiftSettings
         ),
@@ -284,6 +380,55 @@ let package = Package(
             ]
         ),
         .target(
+            name: "RepoPromptWorkspaceContext",
+            dependencies: [
+                "RepoPromptC", "RepoPromptCodeMapCore", "RepoPromptDomainRuntime",
+                "RepoPromptFileSystem", "RepoPromptFoundation", "RepoPromptInstrumentation",
+                "RepoPromptPersistence", "RepoPromptRegexCore", "RepoPromptSettingsCore",
+                "RepoPromptShared", "RepoPromptVCS", "RepoPromptWorkspaceCore"
+            ],
+            path: "Sources/RepoPromptWorkspaceContext",
+            swiftSettings: [
+                .define("DEBUG", .when(configuration: .debug)),
+                .enableUpcomingFeature("BareSlashRegexLiterals")
+            ]
+        ),
+        .target(
+            name: "RepoPromptWorkspaceContextTestSupport",
+            dependencies: [
+                "RepoPromptWorkspaceContext", "RepoPromptCodeMapCore", "RepoPromptFileSystem",
+                "RepoPromptFoundation", "RepoPromptPersistence", "RepoPromptVCS"
+            ],
+            path: "Tests/RepoPromptWorkspaceContextTestSupport",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptWorkspaceContextTests",
+            dependencies: [
+                "RepoPromptWorkspaceContext", "RepoPromptWorkspaceContextTestSupport",
+                "RepoPromptCodeMapCore", "RepoPromptFileSystem", "RepoPromptFoundation",
+                "RepoPromptPersistence", "RepoPromptWorkspaceCore"
+            ],
+            path: "Tests/RepoPromptWorkspaceContextTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
+            name: "RepoPromptMCPServer",
+            dependencies: [
+                "RepoPromptDomainRuntime", "RepoPromptShared", "RepoPromptInstrumentation",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Logging", package: "swift-log")
+            ],
+            path: "Sources/RepoPromptMCPServer",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptMCPServerTests",
+            dependencies: ["RepoPromptMCPServer", "RepoPromptDomainRuntime", "RepoPromptShared", "RepoPromptInstrumentation", .product(name: "MCP", package: "swift-sdk"), .product(name: "Logging", package: "swift-log")],
+            path: "Tests/RepoPromptMCPServerTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
             name: "RepoPromptApp",
             dependencies: repoPromptAppDependencies,
             path: "Sources/RepoPrompt",
@@ -309,7 +454,7 @@ let package = Package(
             ]
         ),
         .target(name: "CSwiftPCRE2", path: "Sources/CSwiftPCRE2", exclude: ["deps/sljit/sljit_src/sljitNativeARM_64.c", "deps/sljit/sljit_src/sljitSerialize.c", "deps/sljit/sljit_src/sljitUtils.c", "deps/sljit/sljit_src/sljitNativeX86_common.c", "deps/sljit/sljit_src/sljitNativeX86_64.c", "deps/sljit/sljit_src/sljitNativeX86_32.c", "deps/sljit/sljit_src/allocator_src/sljitWXExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitProtExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorCore.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorApple.c"], publicHeadersPath: "include", cSettings: [.headerSearchPath("include"), .headerSearchPath("src"), .define("PCRE2_CODE_UNIT_WIDTH", to: "8"), .define("HAVE_CONFIG_H")]),
-        .target(name: "RepoPromptC", path: "Sources/RepoPromptC", publicHeadersPath: "include", cSettings: [.headerSearchPath("include")], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "RepoPromptC", path: "Sources/RepoPromptC", publicHeadersPath: "include", cSettings: [.headerSearchPath("include")], linkerSettings: [.linkedLibrary("sqlite3"), .linkedLibrary("icucore")]),
         // Exact-snapshot scanner ABI fallback for the JavaScript/Python manifests, whose
         // FileManager source probe evaluates false in this root package graph.
         .target(name: "TreeSitterScannerSupport", path: "Sources/TreeSitterScannerSupport", sources: ["src/javascript/scanner.c", "src/python/scanner.c"], publicHeadersPath: "include"),
@@ -317,6 +462,7 @@ let package = Package(
         .testTarget(
             name: "RepoPromptDomainRuntimeTests",
             dependencies: [
+                "RepoPromptAIContracts",
                 "RepoPromptDomainRuntime",
                 .product(name: "MCP", package: "swift-sdk")
             ],

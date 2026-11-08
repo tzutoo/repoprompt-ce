@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import RepoPromptSettingsCore
 import XCTest
@@ -170,6 +172,28 @@ final class AgentRepromptRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.repromptSpeculations[claim.attempt.id] === staged)
         XCTAssertEqual(fixture.viewModel.repromptDispatchTexts[claim.attempt.id], AgentRepromptServiceTests.valid)
         XCTAssertTrue(fixture.session.items.isEmpty)
+    }
+}
+
+/// Single-session tests read preparation state without naming the tab that owns it.
+extension AgentRepromptUIStore {
+    var presentation: Presentation? {
+        get { presentations.values.first }
+        set {
+            if let newValue {
+                presentations[newValue.sourceTabID] = newValue
+            } else {
+                presentations.removeAll()
+            }
+        }
+    }
+
+    var pendingQuestions: AgentAskUserPendingState? {
+        pendingQuestionsByTab.values.first
+    }
+
+    var autoSendRequest: AutoSendRequest? {
+        autoSendRequests.values.first
     }
 }
 

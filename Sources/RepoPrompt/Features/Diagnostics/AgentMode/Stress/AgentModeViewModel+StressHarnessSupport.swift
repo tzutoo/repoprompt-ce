@@ -1,6 +1,7 @@
 #if DEBUG
     import Foundation
     import MCP
+    import RepoPromptDomainRuntime
 
     // MARK: - Stress Harness Helpers
 
@@ -416,6 +417,7 @@
                         codexTotalTotalTokens: session.codexTotalTotalTokens,
                         codexMcpSessionKey: session.codexMcpSessionKey,
                         contextWindowCapacity: session.contextWindowCapacity,
+                        pendingHandoffProviderSwitchDelivery: session.pendingHandoffProviderSwitchDelivery,
                         pendingHandoffPayload: session.pendingHandoffPayload,
                         pendingHandoffCreatedAt: session.pendingHandoffCreatedAt,
                         pendingHandoffSourceItemID: session.pendingHandoffSourceItemID,

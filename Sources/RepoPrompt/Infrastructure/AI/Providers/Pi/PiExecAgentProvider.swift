@@ -1,4 +1,7 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
+import RepoPromptDomainRuntime
 import RepoPromptFoundation
 import RepoPromptProcess
 
@@ -24,7 +27,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
 
     // MARK: - HeadlessAgentProvider
 
-    func streamAgentMessage(_ message: AgentMessage, runID: UUID?) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
+    func streamAgentMessage(_ message: RepoPromptDomainRuntime.AgentMessage, runID: UUID?) async throws -> AsyncThrowingStream<RepoPromptDomainRuntime.AIStreamResult, Error> {
         AsyncThrowingStream { continuation in
             self.streamTask?.cancel()
             self.streamTask = Task { [weak self] in
@@ -39,7 +42,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
                     } catch is CancellationError {
                         continuation.finish(throwing: CancellationError())
                     } catch {
-                        continuation.yield(AIStreamResult(type: "error", text: error.localizedDescription))
+                        continuation.yield(RepoPromptDomainRuntime.AIStreamResult(type: "error", text: error.localizedDescription))
                         continuation.finish(throwing: error)
                     }
                 } onCancel: {
@@ -58,9 +61,9 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
     // MARK: - Run
 
     private func runOnce(
-        message: AgentMessage,
+        message: RepoPromptDomainRuntime.AgentMessage,
         runID: UUID?,
-        continuation: AsyncThrowingStream<AIStreamResult, Error>.Continuation
+        continuation: AsyncThrowingStream<RepoPromptDomainRuntime.AIStreamResult, Error>.Continuation
     ) async throws {
         let actualRunID = runID ?? UUID()
         if enableDebugLogging {
@@ -173,7 +176,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
                         if self.enableDebugLogging {
                             print("[PiExec][stderr] \(message)")
                         }
-                        continuation.yield(AIStreamResult(type: "system", text: message))
+                        continuation.yield(RepoPromptDomainRuntime.AIStreamResult(type: "system", text: message))
                     }
                 case let .terminated(status, didTimeout):
                     exitStatus = status
@@ -194,7 +197,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !message.isEmpty
                 else { return }
-                continuation.yield(AIStreamResult(type: "system", text: message))
+                continuation.yield(RepoPromptDomainRuntime.AIStreamResult(type: "system", text: message))
             }
 
             if timedOut {
@@ -208,7 +211,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
             }
             if !sawCompletion {
                 continuation.yield(
-                    AIStreamResult(
+                    RepoPromptDomainRuntime.AIStreamResult(
                         type: "message_stop",
                         text: nil,
                         providerSessionID: sessionID
@@ -239,7 +242,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         return PiProviderRuntimeBridge.ModelSelection(modelPattern: raw)
     }
 
-    private func combinedPrompt(from message: AgentMessage) -> String {
+    private func combinedPrompt(from message: RepoPromptDomainRuntime.AgentMessage) -> String {
         let system = message.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = message.userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if system.isEmpty {
@@ -323,12 +326,12 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
 
     #if DEBUG
         /// Test seam for JSON event mapping without launching a process.
-        static func test_parseJSONLLine(_ data: Data, sessionID: inout String?) -> [AIStreamResult] {
+        static func test_parseJSONLLine(_ data: Data, sessionID: inout String?) -> [RepoPromptDomainRuntime.AIStreamResult] {
             PiExecAgentProvider(config: .init()).parseJSONLLine(data, sessionID: &sessionID)
         }
     #endif
 
-    private func parseJSONLLine(_ data: Data, sessionID: inout String?) -> [AIStreamResult] {
+    private func parseJSONLLine(_ data: Data, sessionID: inout String?) -> [RepoPromptDomainRuntime.AIStreamResult] {
         guard let json = try? PiProviderRuntimeBridge.RPCWire.decodeLine(data) else {
             return []
         }
@@ -358,7 +361,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
             return []
         case "agent_settled":
             return [
-                AIStreamResult(
+                RepoPromptDomainRuntime.AIStreamResult(
                     type: "message_stop",
                     text: nil,
                     providerSessionID: sessionID
@@ -366,7 +369,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
             ]
         case "extension_error":
             let detail = object["message"]?.stringValue ?? "pi extension error"
-            return [AIStreamResult(type: "error", text: detail)]
+            return [RepoPromptDomainRuntime.AIStreamResult(type: "error", text: detail)]
         default:
             if enableDebugLogging {
                 print("[PiExec] ignoring event type: \(type)")
@@ -375,7 +378,7 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         }
     }
 
-    private func parseMessageUpdate(_ object: [String: PiProviderRuntimeBridge.JSONValue]) -> [AIStreamResult] {
+    private func parseMessageUpdate(_ object: [String: PiProviderRuntimeBridge.JSONValue]) -> [RepoPromptDomainRuntime.AIStreamResult] {
         guard let deltaJSON = object["assistantMessageEvent"] ?? object["assistant_message_event"],
               let delta = PiProviderRuntimeBridge.AssistantMessageDelta(json: deltaJSON)
         else {
@@ -383,15 +386,15 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         }
         switch delta {
         case let .textDelta(_, text):
-            return [AIStreamResult(type: "content", text: text)]
+            return [RepoPromptDomainRuntime.AIStreamResult(type: "content", text: text)]
         case let .thinkingDelta(_, text):
-            return [AIStreamResult(type: "reasoning", text: text)]
+            return [RepoPromptDomainRuntime.AIStreamResult(type: "reasoning", text: text)]
         default:
             return []
         }
     }
 
-    private func parseMessageEnd(_ object: [String: PiProviderRuntimeBridge.JSONValue]) -> [AIStreamResult] {
+    private func parseMessageEnd(_ object: [String: PiProviderRuntimeBridge.JSONValue]) -> [RepoPromptDomainRuntime.AIStreamResult] {
         guard let messageJSON = object["message"],
               let message = PiProviderRuntimeBridge.AgentMessage(json: messageJSON)
         else {
@@ -400,9 +403,9 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         guard case let .assistant(blocks, _, _, usage, _, errorMessage) = message else {
             return []
         }
-        var results: [AIStreamResult] = []
+        var results: [RepoPromptDomainRuntime.AIStreamResult] = []
         if let errorMessage, !errorMessage.isEmpty {
-            results.append(AIStreamResult(type: "error", text: errorMessage))
+            results.append(RepoPromptDomainRuntime.AIStreamResult(type: "error", text: errorMessage))
         }
         let text = blocks.compactMap {
             if case let .text(value) = $0 { value } else { nil }
@@ -410,11 +413,11 @@ final class PiExecAgentProvider: HeadlessAgentProvider {
         if !text.isEmpty {
             // Prefer streamed deltas when present; message_end is still useful when
             // providers emit only final blocks.
-            results.append(AIStreamResult(type: "content", text: text))
+            results.append(RepoPromptDomainRuntime.AIStreamResult(type: "content", text: text))
         }
         if let usage {
             results.append(
-                AIStreamResult(
+                RepoPromptDomainRuntime.AIStreamResult(
                     type: "usage",
                     text: nil,
                     promptTokens: usage.input,

@@ -1,22 +1,24 @@
 import Foundation
 import MCP
+import RepoPromptAIContracts
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptPersistence
 import RepoPromptSettingsCore
 import RepoPromptVCS
+@testable import RepoPromptWorkspaceContext
 import XCTest
 
 @MainActor
 final class SessionAdminWorktreeRecoveryTests: XCTestCase {
     func testUnopenedLaneModelAndEffortUseItsWriterDespiteEarlierWorkspaceReplica() async throws {
         for fullAccess in [true, false] {
-            try await withFixture(fullAccess: fullAccess) { fixture in
+            try await withFixture(fullAccess: fullAccess, canonicalHost: true) { fixture in
                 let settings = GlobalSettingsStore.shared
                 let originalProfile = settings.globalAgentModelsProfile()
                 defer {
                     settings.setGlobalAgentModelsProfile(originalProfile, contextBuilderWriteIntent: .preserveExistingOwnership)
-                    AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode)
+                    AgentModelCatalogRuntime.shared.invalidate(.claudeCode)
                 }
                 var profile = originalProfile
                 profile.mcpAgentRoleOverrides = ["explore": "claudeCode:sonnet:medium"]
@@ -26,12 +28,12 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 try await AsyncTestWait.waitUntil("model writer availability") {
                     fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
                 }
-                AgentAdvertisedModelCatalog.shared.record([
+                AgentModelCatalogRuntime.shared.record([
                     AgentModelOption(
                         rawValue: "sonnet:medium", displayName: "Sonnet", description: nil,
                         isPlaceholderDefault: false, isProviderDefault: false
                     )
-                ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
+                ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
                 let binding = fixture.session.persistentSessionBindingIdentity
                 let peerWorkspace = fixture.replica.workspaceManager.activeWorkspace
                 let peerIndex = fixture.replica.agentModeViewModel.ownerValidatedSessionIndex
@@ -77,7 +79,7 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
     }
 
     func testExistingCheckoutRecoveryReplaysThroughToolBindAndRelease() async throws {
-        try await withFixture { fixture in
+        try await withFixture(canonicalHost: true) { fixture in
             let checkout = fixture.git.sandbox.appendingPathComponent("existing-checkout")
             try fixture.git.runGit(["worktree", "add", "-b", "e2e/recovery", checkout.path, "HEAD"], at: fixture.repository)
             let before = try fixture.git.runGit(["worktree", "list", "--porcelain"], at: fixture.repository)
@@ -145,7 +147,7 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
 
     func testCompetingBoundWritersCannotMutateConfigurationOrCreateWorktree() async throws {
         for peerReady in [true, false] {
-            try await withFixture { fixture in
+            try await withFixture(canonicalHost: true) { fixture in
                 let originalOwner = try XCTUnwrap(SessionAdminWindows.runtimeOwner(for: fixture.sessionID))
                 XCTAssertTrue(SessionAdminWindows.isCurrent(originalOwner))
                 let peer = fixture.replica.agentModeViewModel.session(for: fixture.session.tabID)
@@ -973,8 +975,10 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
         let service: SessionAdminMCPToolService
         let callerSession: AgentTabSession
         let election: ElectionRepositories?
+        let ingress: SessionContractHost?
 
         func call(_ arguments: [String: Value]) async throws -> [String: Value] {
+            if let ingress { return try await ingress.call("session_admin", arguments) }
             let result = try await service.execute(args: arguments)
             return try XCTUnwrap(result.objectValue)
         }
@@ -1078,6 +1082,7 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
     /// target never admits (merge apply).
     private func withFixture(
         fullAccess: Bool = true,
+        canonicalHost: Bool = false,
         election: Bool = false,
         electionRepositoryNames: (alpha: String, beta: String) = ("alpha", "beta"),
         electionRoots: ElectionRoots? = nil,
@@ -1100,7 +1105,9 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
         let previousFullAccess = OverseerGlobalAutoApprove.isEnabled
         OverseerGlobalAutoApprove.isEnabled = { fullAccess }
         let sessionID = UUID(), callerID = UUID()
+        let ingress = canonicalHost ? SessionContractHost(windowID: window.windowID) : nil
         let cleanup: @MainActor () async -> Void = {
+            await ingress?.cleanup()
             let materializer = WorkspaceRootBindingProjectionMaterializer(store: window.promptManager.workspaceFileContextStore)
             await materializer.release(sessionID: sessionID)
             await materializer.release(sessionID: callerID)
@@ -1253,10 +1260,18 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 scopes: { scopes }, administration: { door }
             )
             service.isToolEnabled = { true }
+            if let ingress {
+                let boundService = service
+                try await ingress.start([
+                    MCPDomainToolBinding(definition: MCPDomainSessionAdminToolDefinition.definition) {
+                        try await boundService.execute(args: $0)
+                    }
+                ])
+            }
             try await body(.init(
                 git: git, repository: repository, window: window, replica: replica, session: session, sessionID: sessionID,
                 workspaceID: workspace.id, foregroundTabID: foregroundTabID, dataService: dataService,
-                ownership: ownership, service: service, callerSession: caller, election: electionRepositories
+                ownership: ownership, service: service, callerSession: caller, election: electionRepositories, ingress: ingress
             ))
         } catch {
             await cleanup()

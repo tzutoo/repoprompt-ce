@@ -1,5 +1,19 @@
 import Foundation
+import RepoPromptAgentProviderContracts
 import UniformTypeIdentifiers
+
+/// In-memory image payload for the pi RPC prompt. Callers encode composer
+/// attachments before crossing into the pi session controller. This stays out
+/// of the shared native-runtime contract because Claude and Codex sends are text-only.
+struct NativeAgentRuntimeImage: Equatable {
+    let data: Data
+    let mimeType: String
+}
+
+/// Pi-only prompt send. The shared `NativeAgentRuntimeControlling` send stays text-only.
+protocol PiNativeImagePromptSending: Actor {
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID
+}
 
 /// Encodes composer image attachments into pi RPC `ImageContent` payloads.
 ///

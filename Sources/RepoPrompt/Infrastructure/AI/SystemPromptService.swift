@@ -1,8 +1,10 @@
 import Foundation
+import RepoPromptAIContracts
 import RepoPromptFileSystem
 import RepoPromptFoundation
 import RepoPromptSettingsCore
 import RepoPromptShared
+import RepoPromptWorkspaceContext
 
 class SystemPromptService {
     /// Returns the Discover prompt with an optional token budget.

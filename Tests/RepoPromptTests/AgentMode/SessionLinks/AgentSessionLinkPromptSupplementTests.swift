@@ -1,6 +1,8 @@
 import Foundation
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
+@testable import RepoPromptMCPServer
 import RepoPromptShared
 import XCTest
 

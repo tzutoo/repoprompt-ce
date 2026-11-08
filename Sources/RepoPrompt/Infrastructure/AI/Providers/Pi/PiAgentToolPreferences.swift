@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptAIContracts
 
 enum PiAgentToolPreferences {
     /// pi core has no permission prompts, so RPCE shapes the tool surface at

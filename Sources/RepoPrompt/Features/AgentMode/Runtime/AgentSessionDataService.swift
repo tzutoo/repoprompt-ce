@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptAIContracts
+import RepoPromptDomainRuntime
 import RepoPromptFileSystem
 import RepoPromptInstrumentation
 import RepoPromptSettingsCore
@@ -161,6 +163,7 @@ actor AgentSessionDataService {
         let delegationScopeID: UUID?
         let worktreeBindings: [AgentSessionWorktreeBinding]?
         let worktreeMergeOperations: [AgentSessionWorktreeMergeOperation]?
+        let pendingHandoffProviderSwitchDelivery: AgentProviderSwitchDelivery?
         let pendingHandoffPayload: String?
         let pendingHandoffCreatedAt: Date?
         let pendingHandoffSourceItemID: UUID?
@@ -1431,6 +1434,7 @@ actor AgentSessionDataService {
                 createdByOverseerSessionID: header.createdByOverseerSessionID,
                 organizationalParentID: header.organizationalParentID,
                 delegationScopeID: header.delegationScopeID,
+                pendingHandoffProviderSwitchDelivery: header.pendingHandoffProviderSwitchDelivery,
                 pendingHandoffPayload: header.pendingHandoffPayload,
                 pendingHandoffCreatedAt: header.pendingHandoffCreatedAt,
                 pendingHandoffSourceItemID: header.pendingHandoffSourceItemID,

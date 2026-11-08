@@ -1,4 +1,7 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptClaudeProvider
+import RepoPromptDomainRuntime
 
 /// Interactive native-runtime seam for the Claude-compatible plugin path.
 ///
@@ -85,12 +88,8 @@ actor ClaudeCompatibleNativeSessionAdapter: NativeAgentRuntimeControlling {
         try await controller.applyModelAndEffortForTurn(model: model, effortLevel: effortLevel, replacingFailure: replacingFailure)
     }
 
-    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) async throws -> UUID {
-        try await controller.sendUserMessage(text, configuration: configuration, images: images)
-    }
-
-    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {
-        try await controller.sendUserMessage(text, images: images)
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
+        try await controller.sendUserMessage(text, configuration: configuration)
     }
 
     func sendUserMessage(_ text: String) async throws -> UUID {

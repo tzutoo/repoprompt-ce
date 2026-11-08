@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptAIContracts
+import RepoPromptCodexProvider
 import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 @_spi(TestSupport) @testable import RepoPromptApp
@@ -81,6 +83,43 @@ final class CodexResumeWedgeCommitTests: XCTestCase {
             session: session,
             factory: factory
         )
+    }
+
+    func testStreamEndCancelsOnlyCurrentControllersTransportFallback() async throws {
+        for retired in [true, false] {
+            let fixture = makeFixture([[.success("listener-thread")]], shouldManageCodexTooling: false)
+            let session = fixture.session
+            let coordinator = fixture.coordinator
+            await coordinator.ensureCodexNativeSession(session: session)
+            let controller = try XCTUnwrap(session.codexController as? WedgeFakeCodexController)
+            let listener = try XCTUnwrap(session.codexEventTask)
+            let release = AgentSessionLinkStopSignal<Void>()
+            let fallback = Task { await release.value() }
+            defer { release.finish(())
+                fallback.cancel()
+            }
+            let detached: CodexAgentModeCoordinator.DetachedCodexController?
+            if retired {
+                detached = coordinator.detachForWorkspaceSwitchFinalizeSync(session, runIDs: [])
+                session.codexController = WedgeFakeCodexController(runID: UUID(), responses: [])
+            } else { detached = nil }
+            // No suspension between retirement and installing the successor's spy: the old
+            // listener must execute its real stream-end branch after this registration.
+            coordinator.test_installTransportClosedFallback(fallback, tabID: session.tabID)
+            session.runState = .idle
+            controller.finishEventsForTest()
+            await listener.value
+            XCTAssertEqual(
+                fallback.isCancelled,
+                !retired,
+                retired ? "Retired listener must not cancel its successor's fallback" : "Current listener must still cancel its own fallback"
+            )
+            release.finish(())
+            await fallback.value
+            if let detached { await coordinator.retireDetachedControllerForWorkspaceSwitch(detached) }
+            await coordinator.shutdownCodexSession(session)
+            session.endCurrentRunAttempt(source: "test.cleanup")
+        }
     }
 
     func testComposerRechecksEligibilityAfterSuspendedRuntimePreflight() async throws {
@@ -2565,6 +2604,10 @@ final class WedgeFakeCodexController: CodexSessionControllerPassiveStubDefaults,
         continuation = storedContinuation
     }
 
+    func finishEventsForTest() {
+        continuation.finish()
+    }
+
     var hasActiveThread: Bool {
         lock.withLock { active }
     }
@@ -3486,6 +3529,13 @@ extension CodexResumeWedgeCommitTests {
                 for (name, payload, malformed) in cases {
                     let label = "\(method) \(name) ack=\(ack)"
                     let f = makeFixture([])
+                    // This synthetic unbound attempt tests event decoding, not first-save rebinding.
+                    f.viewModel.test_setSuppressesAgentSessionPersistence(true)
+                    f.session.saveDebounceTask?.cancel()
+                    defer {
+                        f.session.saveDebounceTask?.cancel()
+                        f.viewModel.test_setSuppressesAgentSessionPersistence(nil)
+                    }
                     f.viewModel.test_initializeRunService()
                     let runID = UUID()
                     f.session.installRunID(runID)
@@ -3514,6 +3564,8 @@ extension CodexResumeWedgeCommitTests {
                         switch event {
                         case .canonicalAssistantDelta, .reasoningDelta: deltas += 1
                         case .turnCompleted:
+                            XCTAssertNil(f.session.activeAgentSessionID, "\(label): fixture must remain unbound")
+                            XCTAssertTrue(f.session.isCurrentRunAttemptForCurrentBinding(owner), "\(label): fixture owner must remain current")
                             XCTAssertEqual(f.session.quietLedger.candidateStartKey(owner: owner) == nil, ack || malformed, label)
                         default: break
                         }

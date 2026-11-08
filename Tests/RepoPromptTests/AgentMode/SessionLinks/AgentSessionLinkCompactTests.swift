@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
@@ -1362,13 +1364,8 @@ actor CompactRecordingNativeController: NativeAgentRuntimeControlling {
         configuration.apply()
     }
 
-    func sendUserMessage(_ text: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+    func sendUserMessage(_ text: String, configuration proof: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
         try configuration.validate(proof)
-        sentMessages.append(text)
-        return UUID()
-    }
-
-    func sendUserMessage(_ text: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
         sentMessages.append(text)
         return UUID()
     }

@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptAIContracts
 import RepoPromptSettingsCore
 
 /// Centralizes context builder budget selection so UI and MCP paths resolve

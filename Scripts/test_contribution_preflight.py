@@ -45,6 +45,21 @@ class PathSelectionTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected_returncode)
 
+    def test_m8_provider_sources_select_root_tests_and_app_build(self) -> None:
+        paths = tuple(
+            (f"Sources/{target}/Runtime.swift", 0)
+            for target in (
+                "RepoPromptAIContracts", "RepoPromptAgentProviderContracts",
+                "RepoPromptClaudeProvider", "RepoPromptCodexProvider",
+                "RepoPromptACPProviders", "RepoPromptHTTPProviders",
+            )
+        )
+        for selector in ("root_test_paths_pattern", "repoprompt_product_paths_pattern"):
+            self._assert_path_selection(selector, paths + (
+                ("Sources/RepoPromptClaudeProviderOther/Runtime.swift", 1),
+                ("docs/RepoPromptClaudeProvider/Runtime.md", 1),
+            ))
+
     def test_conductor_test_family_selects_selftests(self) -> None:
         self._assert_path_selection("control_plane_paths_pattern", (
             ("Scripts/test_conductor_diagnostics.py", 0),
@@ -95,8 +110,13 @@ class PathSelectionTests(unittest.TestCase):
             ("Scripts/test_ci_resolve_packages.py", 0),
             (".github/workflows/ci.yml", 0),
             (".github/workflows/ci-integration-products.yml", 0),
+            (".github/workflows/ci-recovery.yml", 0),
+            ("Scripts/ci_recovery.py", 0),
+            ("Scripts/test_ci_recovery.py", 0),
             ("Scripts/ci_admission.py", 0),
             ("Scripts/ci_status_report.py", 0),
+            ("Scripts/ci_job_diagnostics.py", 0),
+            ("Scripts/test_ci_job_diagnostics.py", 0),
             ("Scripts/test_ci_admission.py", 0),
             ("Scripts/ci_test_coverage.py", 0),
             ("Scripts/test_ci_test_coverage.py", 0),

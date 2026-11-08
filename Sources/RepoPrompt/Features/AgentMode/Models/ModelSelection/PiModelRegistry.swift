@@ -1,4 +1,6 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 
 /// Discovered-model registry for the pi coding agent.
 ///

@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptAIContracts
 import RepoPromptDomainRuntime
 import RepoPromptFoundation
 
@@ -71,6 +72,9 @@ enum AgentSidebarThreadKey: Hashable, Equatable {
     /// An overseer's group in the Overseers tab, by tab ID. A separate namespace, so folding a group
     /// there never folds anything in the other tabs.
     case overseerGroup(UUID)
+    /// A thread folded inside the Pinned or Active tab, by tab ID. These tabs list matches, so they
+    /// start unfolded: folds made on All (and default folds) must never hide a match here.
+    case filteredThread(tab: AgentSidebarTab, tabID: UUID)
 
     static func key(sessionID: UUID?, tabID: UUID) -> AgentSidebarThreadKey {
         if let sessionID {
@@ -166,10 +170,7 @@ extension AgentModeViewModel {
         case mcpElicitationResponseSubmitted
     }
 
-    enum AgentInteractionTransport: Equatable {
-        case ui
-        case mcp(sessionID: UUID, originatingConnectionID: UUID?)
-    }
+    typealias AgentInteractionTransport = AgentRunInteractionTransport
 
     enum UIRefreshScope: String, Equatable, Hashable {
         case full
@@ -499,46 +500,8 @@ extension AgentModeViewModel {
         case claudeNativeInterrupt
     }
 
-    enum MCPInstructionDispatch: String, Equatable {
-        case deliveredIntoWaitingContinuation = "delivered_waiting_continuation"
-        case queuedClaudeInterrupt = "queued_claude_interrupt"
-        case queuedACPInterrupt = "queued_acp_interrupt"
-        case queuedFollowUp = "queued_follow_up"
-        case dispatchedCodexTurn = "dispatched_codex_turn"
-        case startedRun = "started_run"
-
-        /// Whether this dispatch sent an instruction into an already-running session.
-        /// Used to suppress stale assistant previews in the immediate steer response.
-        var isActiveRunDispatch: Bool {
-            switch self {
-            case .queuedClaudeInterrupt, .queuedACPInterrupt, .queuedFollowUp, .dispatchedCodexTurn:
-                true
-            case .deliveredIntoWaitingContinuation, .startedRun:
-                false
-            }
-        }
-
-        /// Whether MCP waiters should be woken as soon as `mcpDispatchInstruction` returns.
-        /// Some runtimes accept the local queue before provider delivery; those signal later
-        /// from their provider-specific flush path.
-        var signalsMCPDeliveryAfterDispatch: Bool {
-            guard isActiveRunDispatch else { return false }
-            switch self {
-            case .queuedClaudeInterrupt, .queuedACPInterrupt:
-                return false
-            case .queuedFollowUp, .dispatchedCodexTurn:
-                return true
-            case .deliveredIntoWaitingContinuation, .startedRun:
-                return false
-            }
-        }
-    }
-
-    struct MCPActiveInstructionDispatchPlan {
-        let delivery: MCPInstructionDispatch
-        let codexAttemptID: UUID?
-        let signalsDeliveryAfterDispatch: Bool
-    }
+    typealias MCPInstructionDispatch = AgentMCPInstructionDispatch
+    typealias MCPActiveInstructionDispatchPlan = AgentMCPActiveInstructionDispatchPlan
 
     struct MCPInteractionResponsePayload: Equatable {
         enum ResponseArgument: Equatable {
@@ -684,19 +647,7 @@ extension AgentModeViewModel {
         let action: Action
     }
 
-    struct NonCodexTurnTokenAccumulator {
-        var estimatedUserInputTokens: Int = 0
-        var estimatedToolInputTokens: Int = 0
-        var estimatedToolOutputTokens: Int = 0
-        /// Exact stream-derived context snapshot for the current turn (from usage events),
-        /// tracked separately from the session-wide display value to prevent billed-turn
-        /// aggregates from overwriting it.
-        var observedContextUsedTokens: Int?
-
-        var estimatedInputTokens: Int {
-            estimatedUserInputTokens + estimatedToolInputTokens + estimatedToolOutputTokens
-        }
-    }
+    typealias NonCodexTurnTokenAccumulator = AgentNonCodexTurnTokenAccumulator
 
     /// Compatibility alias for app call sites while terminal settlement uses the
     /// provider-neutral domain command vocabulary directly.
@@ -721,6 +672,16 @@ extension AgentModeViewModel {
         let shouldEnableCodexComputerUse: Bool
     }
 
+    /// Request-local save-phase evidence. A thrown saver or later currency failure is NOT proof
+    /// of no write. Switch apply may roll back only while this remains beforeWrite.
+    enum RequiredSavePhase: Equatable {
+        case beforeWrite
+        case writeMayHaveCommitted
+        /// The frozen payload's saver returned, but its live-owner currency may still fail.
+        case writeReturned
+        case durablySaved(AgentSessionRestorationBindingToken)
+    }
+
     struct PendingHandoffState: Equatable {
         var payload: String?
         var createdAt: Date?
@@ -731,6 +692,10 @@ extension AgentModeViewModel {
         var isStagedForSend: Bool = false
         /// Durable failure/preparation marker; ordinary send cleanup must never clear it.
         var executionLocationFailure: String?
+        /// Nil retains the existing fork/resume-recovery delivery policy.
+        var providerSwitchDelivery: AgentProviderSwitchDelivery?
+        /// Captured by the existing physical fence; never persisted or reused by another dispatch.
+        var providerSwitchDispatch: ProviderSwitchPhysicalDispatch?
 
         var hasPayload: Bool {
             guard let payload else { return false }
@@ -743,6 +708,8 @@ extension AgentModeViewModel {
             sourceItemID = nil
             defersProviderLockUntilSend = false
             isStagedForSend = false
+            providerSwitchDelivery = nil
+            providerSwitchDispatch = nil
         }
     }
 

@@ -142,6 +142,28 @@ defect in this subsystem.
 
 The lane board is derived data in the existing passive observation pipeline, not a fifth owner. The target view model combines its own run outcome, stamped failure reason, send-readiness blockers, and a current child-session census into the observation snapshot; the runtime bridge publishes that snapshot through link authority, and `poll`/`wait` render it. A board change can advance the existing `wait(until: "change")` cursor, but it creates no new status or attention edge for the passive reducer, changes no Auto-wake admission rule, and persists no board state.
 
+Existing managed-link status and attention rows also carry cached `context_used_percent`,
+`context_count_confidence`, `run_outcome`, `has_pending_interaction`, and
+`direct_running_helpers`. Missing context figures/confidence and unavailable child censuses are
+rendered as `unknown`, not zero; a known empty census renders zero direct running helpers. A
+workspace-mismatched or unbuilt census is unavailable. These are the accepted observation's cached
+facts, not fresh telemetry, interaction details, a context-change wake, or a compaction/liveness
+notification guarantee. Poll JSON remains unchanged. A census-availability-only publication refreshes
+private cached state and its source high-water mark, but does not advance public change sequences,
+notify change waiters, or signal send readiness. Full internal value equality still distinguishes it.
+
+This supplemental metadata refreshes pending rows without advancing status/attention occurrence
+identity, status timestamps, receipt cutoffs, or the wake fingerprint. An older accepted receipt may
+settle the row even if newer cached decoration was not delivered: decoration is not separately owed
+content. Both row kinds share the existing renderer and its byte budget. Only rendered managed rows
+contribute exact Manage requirements to the immutable claim. Existing consent, capability-elevation,
+and link-revocation fences are rechecked at physical handoff, including after asynchronous proof;
+withdrawal discloses no managed bytes and acknowledges no receipt. After a managed proof suspension,
+pending batches are reclaimed against the complete current inventory (including watch-only rows) and
+observer eligibility. Already accepted recovery instead preserves its immutable bytes under the existing
+reuse contract. All provider adapters recheck their existing ownership, Stop, and route fences after
+proof regardless of whether the claim includes local-input decoration.
+
 `wait` accepts returned `wait_cursor` strings directly in `cursors`, without a separate session ID
 list. Existing `{session_id, cursor}` records remain valid and may be mixed with strings. The link
 authority resolves each opaque string only within the current caller's exact outbound grants;
@@ -511,7 +533,7 @@ configuration committed synchronously. A concurrent composer claim wins. Revocat
 that hop cannot substitute a new grant; later revocation does not undo an already admitted commit.
 Busy/loading/settling refusals are retryable, never queued. Even identical selections pass every gate.
 
-`AgentAdvertisedModelCatalog` indexes full compound IDs when ordinary catalogue producers run.
+`AgentModelCatalogRuntime` indexes full compound IDs when ordinary catalogue producers run.
 Admission performs bounded memory lookups only: no persistence warming, full catalogue flattening,
 provider discovery, or legacy resolver fallback. Registry/backend changes invalidate the index;
 a cold index tells the caller to refresh `agent_manage.list_agents` in the destination window.
@@ -1188,10 +1210,12 @@ target, so opening an observer cannot overlap or masquerade as revocation.
 ## The routine wake interval is admission spacing, not a schedule
 
 An observer may require a minimum interval between *routine* automatic wakes. It is durable
-observer-session configuration (`routineWakeIntervalEnabled`, `routineWakeIntervalSeconds`), default
-off, retained while off, and normalized to one of 60/300/600/900/1800/3600/10800 seconds by
+observer-session configuration (`routineWakeIntervalEnabled`, `routineWakeIntervalSeconds`), enabled
+at 300 seconds for new sessions, retained while off, and normalized to one of
+60/180/300/600/900/1800/3600/10800 seconds by
 `AgentSessionLinkRoutineWakeInterval.normalized` — the one helper every decode, restore, and write
-path shares.
+path shares. Saved choices are preserved; legacy payloads without these fields retain their disabled
+default. The picker uses `No delay` to disable spacing while retaining the saved duration.
 
 Timing is measured from the **transport boundary**, not from a clock: the first successful transition
 to `.dispatching` in `agentSessionLinkAcquirePhysicalDispatch` records an endpoint-qualified monotonic
@@ -1249,8 +1273,8 @@ omitted rather than shown as zero once elapsed. `agent_session_link` is unchange
 
 Periodic waking is a separate, default-off observer-session preference, not notification admission
 spacing. It applies only while the session has at least one live outbound oversight relationship.
-The compact `Wake periodically when idle` checkbox and adjacent picker offer 10/30/60/120/360 minutes
-(default 30). The existing routine-limit checkbox likewise keeps its picker on the same row. The entire
+The `Wake after being idle for:` checkbox and adjacent picker offer 10/30/60/120/360 minutes
+(default 30). The separate routine-interval picker includes `No delay`. The entire
 wake-controls block is visible only with outbound oversight; inbound-only sessions do not show it.
 Hiding these controls does not clear the session's saved preferences.
 

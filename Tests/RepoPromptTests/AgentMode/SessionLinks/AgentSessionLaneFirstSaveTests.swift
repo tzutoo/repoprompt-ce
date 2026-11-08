@@ -1,9 +1,12 @@
 import Foundation
 import MCP
+import RepoPromptACPProviders
+import RepoPromptAIContracts
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 import RepoPromptVCS
+@testable import RepoPromptWorkspaceContext
 import XCTest
 
 @MainActor
@@ -197,10 +200,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             XCTAssertEqual(AgentSessionLaneMCPToolService.resolveDestination(
                 workspaceSelector: fixture.workspaceID.uuidString, callerWindow: fixture.window
             ), destination)
-            AgentAdvertisedModelCatalog.shared.record([
+            AgentModelCatalogRuntime.shared.record([
                 AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-            ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-            defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+            ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+            defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
             fixture.window.apiSettingsViewModel.isClaudeCodeConnected = true
             try await AsyncTestWait.waitUntil("scoped destination model availability") {
                 fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
@@ -218,7 +221,7 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
                 requireTargetWindow: { fixture.window }, resolveRequestedTabID: { _ in nil },
                 resolveSpawnParentSourceTabID: { _ in nil }, resolveSpawnParentSessionID: { _, _ in creatorID },
                 withHeartbeat: { _, _, _, _, operation in try await operation() },
-                startRun: { target, _, _, viewModel, _, _, _, _, _, parent, _, _ in
+                startRun: { target, _, _, viewModel, _, _, _, _, _, parent, _, _, _ in
                     reachedStart = true
                     XCTAssertEqual(parent, creatorID)
                     XCTAssertEqual(viewModel.session(for: target.tabID).delegationScopeID, grant.id)
@@ -699,10 +702,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             XCTAssertNil(creator.oversight.pendingAutoWake, "consent cannot start a turn")
             let noLinks = await authority.links(forObserver: creatorID)
             XCTAssertTrue(noLinks.items.isEmpty, "consent manufactures no grants")
-            AgentAdvertisedModelCatalog.shared.record([
+            AgentModelCatalogRuntime.shared.record([
                 AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-            ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-            defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+            ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+            defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
             try await withSecondRegisteredWindow { destinationWindow in
                 // Simulate only the destination's published CLI-availability input; never run a provider.
                 destinationWindow.apiSettingsViewModel.isClaudeCodeConnected = true
@@ -950,10 +953,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             }
             await bridge.bootstrapIntentStore(store)
             await bridge.test_settleLaunchReconciliation()
-            AgentAdvertisedModelCatalog.shared.record([
+            AgentModelCatalogRuntime.shared.record([
                 AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-            ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-            defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+            ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+            defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
             fixture.window.apiSettingsViewModel.isClaudeCodeConnected = true
             try await AsyncTestWait.waitUntil("ABA creation model availability") {
                 fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
@@ -1134,10 +1137,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
                 }
                 await bridge.bootstrapIntentStore(store)
                 await bridge.test_settleLaunchReconciliation()
-                AgentAdvertisedModelCatalog.shared.record([
+                AgentModelCatalogRuntime.shared.record([
                     AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-                ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-                defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+                ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+                defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
                 fixture.window.apiSettingsViewModel.isClaudeCodeConnected = true
                 try await AsyncTestWait.waitUntil("entry lifecycle model availability") {
                     fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
@@ -1328,10 +1331,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
                 endpoint: endpoint, isEnabled: { true }, revalidateRoute: { true }, commitIfCurrent: { $0() }
             )
             XCTAssertNotNil(activated)
-            AgentAdvertisedModelCatalog.shared.record([
+            AgentModelCatalogRuntime.shared.record([
                 AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-            ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-            defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+            ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+            defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
             fixture.window.apiSettingsViewModel.isClaudeCodeConnected = true
             try await AsyncTestWait.waitUntil("nested creation model availability") {
                 fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
@@ -1583,7 +1586,7 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
 
     func testPersistedDevinRoleLanesSaveLinkAndDispatchFirstTask() async throws {
         GlobalSettingsStore.installApplicationModelIdentityPolicy()
-        let registry = AgentACPModelRegistry.shared
+        let registry = AgentModelCatalogRuntime.shared.acpRegistry
         registry.test_reset(providerID: .devin)
         defer { registry.test_reset(providerID: .devin) }
         XCTAssertTrue(registry.updateDiscoveredModels(
@@ -1888,6 +1891,53 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             XCTAssertNil(lane.codexController)
             XCTAssertNil(lane.claudeController)
             XCTAssertNil(lane.acpController)
+        }
+    }
+
+    func testAuthorityRevisionConflictBeforeLanePublicationLeavesNoLaneOrProvider() async throws {
+        try await withFixture(ephemeral: false) { fixture in
+            let manager = fixture.window.workspaceManager
+            let viewModel = fixture.window.agentModeViewModel
+            let originalTabs = try XCTUnwrap(manager.activeWorkspace).composeTabs.map(\.id)
+            let originalRuntimeTabs = Set(viewModel.sessions.keys)
+            var published = false
+            var sessionSaveCount = 0
+            viewModel.test_afterOversightLaneProvision = { _ in published = true }
+            viewModel.test_setAgentSessionSaver { _, _, _ in
+                sessionSaveCount += 1
+                throw CancellationError()
+            }
+            manager.setWorkspacePersistenceOutcomeOverrideForTesting(
+                .rejected(reason: "workspace_save_failed", category: .authorityRevisionConflict)
+            )
+            defer {
+                manager.setWorkspacePersistenceOutcomeOverrideForTesting(nil)
+                viewModel.test_afterOversightLaneProvision = nil
+            }
+            do {
+                _ = try await viewModel.mcpCreateOversightLane(
+                    creatorSessionID: UUID(), sessionName: "Rejected lane",
+                    selection: fixture.selection, expectedWorkspaceID: fixture.workspaceID
+                )
+                XCTFail("A workspace authority conflict cannot prove a fresh lane")
+            } catch let AgentSessionLaneDestinationFailure.admissionRejected(failure) {
+                XCTAssertEqual(failure.reason, "workspace_persistence_rejected")
+                XCTAssertEqual(failure.saveResult, "workspace_save_failed")
+                XCTAssertEqual(failure.category, WorkspacePersistenceFailureCategory.authorityRevisionConflict.rawValue)
+                XCTAssertFalse(failure.workingCommitted)
+                XCTAssertNil(failure.retainedAdmission, "A pre-publication conflict cannot retain an allocated lane")
+            } catch {
+                XCTFail("Unexpected lane rejection: \(error)")
+            }
+            XCTAssertFalse(published, "pre-publication rejection must never reach lane configuration")
+            XCTAssertEqual(sessionSaveCount, 0)
+            XCTAssertEqual(manager.activeWorkspace?.composeTabs.map(\.id), originalTabs)
+            XCTAssertEqual(Set(viewModel.sessions.keys), originalRuntimeTabs)
+            for session in viewModel.sessions.values {
+                XCTAssertNil(session.provider)
+                XCTAssertNil(session.runID)
+                XCTAssertFalse(session.runState.isActive)
+            }
         }
     }
 
@@ -2448,7 +2498,7 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
         idempotencyKey: String,
         omitWorkspaceSelector: Bool = false
     ) async throws -> (sessionID: UUID, tabID: UUID) {
-        let catalog = AgentAdvertisedModelCatalog.shared
+        let catalog = AgentModelCatalogRuntime.shared
         catalog.record([
             AgentModelOption(
                 rawValue: "sonnet:high", displayName: "Fixture model", description: nil,
@@ -3362,10 +3412,10 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             }
             let actor = await store.roots().filter { $0.kind == .primaryWorkspace }.map(\.standardizedFullPath)
             XCTAssertEqual(actor, [beta.path, alpha.path], "actor install order must be reversed")
-            AgentAdvertisedModelCatalog.shared.record([
+            AgentModelCatalogRuntime.shared.record([
                 AgentModelOption(rawValue: "sonnet:high", displayName: "Fixture model", description: nil, isPlaceholderDefault: false, isProviderDefault: false)
-            ], for: .claudeCode, generation: AgentAdvertisedModelCatalog.shared.productionGeneration(for: .claudeCode))
-            defer { AgentAdvertisedModelCatalog.shared.invalidate(.claudeCode) }
+            ], for: .claudeCode, generation: AgentModelCatalogRuntime.shared.productionGeneration(for: .claudeCode))
+            defer { AgentModelCatalogRuntime.shared.invalidate(.claudeCode) }
             fixture.window.apiSettingsViewModel.isClaudeCodeConnected = true
             try await AsyncTestWait.waitUntil("startup model availability") {
                 fixture.window.apiSettingsViewModel.agentAvailability.claudeCodeAvailable
@@ -3409,7 +3459,7 @@ final class AgentSessionLaneFirstSaveTests: XCTestCase {
             requireTargetWindow: { fixture.window }, resolveRequestedTabID: { _ in requestedTabID },
             resolveSpawnParentSourceTabID: { _ in nil }, resolveSpawnParentSessionID: { _, _ in parentSessionID },
             withHeartbeat: { _, _, _, _, operation in try await operation() },
-            startRun: { target, _, _, viewModel, _, _, _, _, _, _, _, _ in
+            startRun: { target, _, _, viewModel, _, _, _, _, _, _, _, _, _ in
                 observation.reachedStarter = true
                 observation.targetTabID = target.tabID
                 observation.targetSessionID = target.sessionID

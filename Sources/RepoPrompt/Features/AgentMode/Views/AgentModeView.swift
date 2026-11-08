@@ -1,7 +1,12 @@
 import Combine
 import RepoPromptFileSystem
 import RepoPromptInstrumentation
+import RepoPromptWorkspaceContext
 import SwiftUI
+
+extension EnvironmentValues {
+    @Entry var handoffOmittedImageCount: Binding<Int> = .constant(0)
+}
 
 /// Agent Mode view - a chat-style interface for long-running agent interactions
 /// with per-tab session management, markdown message rendering, and tool call display
@@ -14,6 +19,7 @@ struct AgentModeView: View {
     @StateObject private var navigationController: AgentModeNavigationController
     @StateObject private var rootsSidebarStore: AgentWorkspaceRootsSidebarStore
     @ObservedObject private var fontScale = FontScaleManager.shared
+    @State private var omittedHandoffImageCount = 0
 
     private var currentTabID: UUID? {
         promptManager.activeComposeTabID
@@ -57,6 +63,19 @@ struct AgentModeView: View {
     }
 
     var body: some View {
+        content
+            .environment(\.handoffOmittedImageCount, $omittedHandoffImageCount)
+            .alert("Handoff completed", isPresented: Binding(
+                get: { omittedHandoffImageCount > 0 },
+                set: { if !$0 { omittedHandoffImageCount = 0 } }
+            )) {
+                Button("OK", role: .cancel) { omittedHandoffImageCount = 0 }
+            } message: {
+                Text("\(omittedHandoffImageCount) unavailable image(s) could not be copied. The new chat is ready; conversation history is unchanged.")
+            }
+    }
+
+    private var content: some View {
         GeometryReader { proxy in
             let fontPreset = fontScale.preset
             let sidebarMinWidth = AgentSidebarSizing.minWidth(for: fontPreset)
@@ -81,6 +100,9 @@ struct AgentModeView: View {
                             object: nil,
                             userInfo: ["windowID": windowState.windowID]
                         )
+                    },
+                    onNewSession: {
+                        navigationController.requestNewSession(agentModeVM: agentModeVM)
                     }
                 )
                 .navigationSplitViewColumnWidth(
@@ -136,6 +158,9 @@ struct AgentModeView: View {
         .onDisappear {
             navigationController.onDisappear(windowState: windowState, agentModeVM: agentModeVM)
         }
+        .onChange(of: navigationController.columnVisibility, initial: true) { _, visibility in
+            windowState.setAgentSidebarCollapsed(visibility == .detailOnly)
+        }
         .onChange(of: isSystemWorkspaceMode) { _, isSystem in
             navigationController.onWorkspaceModeChanged(
                 isSystem: isSystem,
@@ -167,6 +192,7 @@ struct AgentModeView: View {
 
     private var codexManagedLoginAction: CodexManagedLoginAction {
         CodexManagedLoginAction(
+            ownerID: ObjectIdentifier(windowState.apiSettingsViewModel),
             browser: { openURL in
                 try await windowState.apiSettingsViewModel.startCodexManagedChatgptLogin(openURL: openURL)
             },
@@ -1432,12 +1458,6 @@ struct AgentModeChatDetailView: View {
         #endif
     }
 
-    private var markdownFileLinkOpener: MarkdownFileLinkOpener {
-        MarkdownFileLinkOpener { target in
-            await promptManager.fileManager.openFileForMarkdownLink(target)
-        }
-    }
-
     private var supportsAutoScroll: Bool {
         if #available(macOS 15.0, *) {
             return true
@@ -2469,6 +2489,8 @@ struct AgentModeChatDetailView: View {
             AgentRequestUserInputCard(
                 request: request,
                 allowsRememberedDecision: agentModeVM.codexRememberedApprovalAllowed(for: currentTabID),
+                pendingFocusStore: runInteractionUI,
+                pendingFocusTabID: currentTabID,
                 onSubmit: { response in
                     guard let tabID = currentTabID else { return }
                     agentModeVM.submitUserInputResponse(tabID: tabID, requestID: request.requestID, response: response)
@@ -2513,7 +2535,9 @@ struct AgentModeChatDetailView: View {
                 onUserActivity: {
                     guard let tabID = currentTabID else { return }
                     agentModeVM.noteAskUserCardActivity(tabID: tabID, interactionID: pendingAskUser.interaction.id)
-                }
+                },
+                pendingFocusStore: runInteractionUI,
+                pendingFocusTabID: currentTabID
             )
             .id("pendingAskUser")
             .transition(.opacity)
@@ -2587,12 +2611,14 @@ struct AgentModeChatDetailView: View {
                 ))
             #endif
         }
-        .environment(\.agentMessageRuntimeFooterByItemID, transcriptSnapshot.runtimeFooterByItemID)
         .messageTimestampEnvironment()
     }
 
     @ViewBuilder
     private func transcriptBlockView(block: AgentTranscriptRenderBlock, renderContext: TranscriptRenderContext) -> some View {
+        #if DEBUG
+            let _ = AgentTranscriptTailRenderProbe.sink?(.block(block.id))
+        #endif
         switch block.kind {
         case .activityCluster:
             let supportsExpansion = transcriptBlockSupportsExpansion(block)
@@ -2733,14 +2759,6 @@ struct AgentModeChatDetailView: View {
         return false
     }
 
-    /// Stable cancel closure for the active run, captured at render time.
-    private func cancelActiveToolsAction(runInteraction: AgentRunInteractionUISnapshot) -> (() -> Void)? {
-        guard let runID = runInteraction.activeRunID else { return nil }
-        return { [weak agentModeVM] in
-            agentModeVM?.cancelActiveToolsForRun(runID: runID, reason: "tool_card_header_cancel")
-        }
-    }
-
     private func transcriptRowView(
         item: AgentChatItem,
         block: AgentTranscriptRenderBlock,
@@ -2750,44 +2768,33 @@ struct AgentModeChatDetailView: View {
         runInteraction: AgentRunInteractionUISnapshot
     ) -> some View {
         let showCancel = showRunScopedToolCancel(for: item, in: block, runInteraction: runInteraction)
-        let cancelAction = showCancel ? cancelActiveToolsAction(runInteraction: runInteraction) : nil
         let ownerTabID = transcript.presentation.tabID ?? transcript.currentTabID ?? currentTabID
         let ownerWorkspaceID = oracleViewModel.workspaceManager.activeWorkspaceID
-        return AgentMessageBubble(
-            item: item,
-            isMostRecentEditBubble: item.id == renderContext.mostRecentEditID,
-            windowID: windowID,
-            currentWorkspaceID: ownerWorkspaceID,
-            currentTabID: ownerTabID,
-            suppressAskUserTranscriptUI: renderContext.isContextBuilderQuestionActive,
-            contextBuilderContext: .init(
-                tabID: ownerTabID,
-                contextBuilderAgentVM: contextBuilderAgentVM,
-                activeContextBuilderCallItemID: renderContext.activeContextBuilderCallID,
-                activeContextBuilderResultItemID: renderContext.activeContextBuilderResultID,
-                oracleOpenContext: .init(
-                    windowID: windowID,
-                    workspaceID: ownerWorkspaceID,
-                    tabID: ownerTabID
-                ),
-                showRunScopedToolCancel: showCancel,
-                cancelActiveToolsAction: cancelAction
+        return AgentTranscriptRow(
+            inputs: .init(
+                item: item,
+                isMostRecentEditBubble: item.id == renderContext.mostRecentEditID,
+                windowID: windowID, workspaceID: ownerWorkspaceID, tabID: ownerTabID,
+                suppressAskUserTranscriptUI: renderContext.isContextBuilderQuestionActive,
+                activeContextBuilderCallID: renderContext.activeContextBuilderCallID,
+                activeContextBuilderResultID: renderContext.activeContextBuilderResultID,
+                rawToolResultPayload: agentModeVM.rawToolResultPayloadForRendering(tabID: ownerTabID, itemID: item.id),
+                rawToolResultPayloadRenderRevision: transcript.presentation.rawToolResultPayloadRenderRevisionByItemID[item.id] ?? 0,
+                cancelRunID: showCancel ? runInteraction.activeRunID : nil,
+                runInteraction: runInteraction,
+                runtimeFooter: transcript.runtimeFooterByItemID[item.id],
+                autoExpandEnabled: autoExpandEnabled,
+                liveBashExecution: transcript.activeBashLiveExecutionByItemID[item.id],
+                isRecentAssistant: renderContext.recentAssistantItemIDs.contains(item.id),
+                approvalVisible: renderContext.interactionBlockerVisible
             ),
+            agentModeVM: agentModeVM,
             promptManager: promptManager,
-            handoffConfig: runInteraction.canForkCurrentSession ? handoffConfig(for: item.id, runInteraction: runInteraction) : nil,
-            rawToolResultPayload: agentModeVM.rawToolResultPayloadForRendering(tabID: ownerTabID, itemID: item.id),
-            rawToolResultPayloadRenderRevision: transcript.presentation
-                .rawToolResultPayloadRenderRevisionByItemID[item.id] ?? 0,
-            showRunScopedToolCancel: showCancel,
-            cancelActiveToolsAction: cancelAction,
-            codexManagedLoginAction: codexManagedLoginAction
+            contextBuilderAgentVM: contextBuilderAgentVM,
+            codexManagedLoginAction: item.kind == .error && CodexManagedAuthRecoveryClassifier.preservesAsUserFacingGuidance(item.text) ? codexManagedLoginAction : nil
         )
+        .equatable()
         .id(item.id)
-        .environment(\.markdownFileLinkOpener, markdownFileLinkOpener)
-        .environment(\.agentToolCardAutoExpandEnabled, autoExpandEnabled)
-        .environment(\.agentLiveBashExecutionByItemID, transcript.activeBashLiveExecutionByItemID)
-        .environment(\.agentRecentAssistantItemIDs, renderContext.recentAssistantItemIDs)
-        .environment(\.agentApprovalVisible, renderContext.interactionBlockerVisible)
     }
 
     private func toolCardAutoExpandEnabled(for block: AgentTranscriptRenderBlock, lockTargetID: UUID?) -> Bool {
@@ -3251,36 +3258,6 @@ struct AgentModeChatDetailView: View {
         }
         transcriptBlockExpansion = nextExpansion
         transcriptBlockDefaultExpansion = nextDefaults
-    }
-
-    // MARK: - Handoff
-
-    private func handoffConfig(for itemID: UUID, runInteraction: AgentRunInteractionUISnapshot) -> AgentHandoffConfig {
-        AgentHandoffConfig(
-            itemID: itemID,
-            defaultDestinationAgent: runInteraction.selectedAgent,
-            defaultModelRaw: runInteraction.selectedModelRaw,
-            defaultReasoningEffortRaw: runInteraction.selectedReasoningEffortRaw,
-            availableAgentsProvider: { [weak agentModeVM] in
-                agentModeVM?.availableAgents ?? []
-            },
-            modelOptionsProvider: { [weak agentModeVM] agent in
-                agentModeVM?.modelOptions(for: agent) ?? []
-            },
-            windowID: windowID,
-            buildPayloadForClipboard: { [weak agentModeVM] in
-                await agentModeVM?.buildHandoffPayload(upToItemID: itemID) ?? ""
-            },
-            performHandoff: { [weak agentModeVM] selection in
-                guard let vm = agentModeVM else { return }
-                try await vm.prepareHandoffToNewTab(
-                    upToItemID: itemID,
-                    destinationAgent: selection.agent,
-                    destinationModelRaw: selection.modelRaw,
-                    destinationReasoningEffortRaw: selection.reasoningEffortRaw
-                )
-            }
-        )
     }
 
     private var topSentinel: some View {

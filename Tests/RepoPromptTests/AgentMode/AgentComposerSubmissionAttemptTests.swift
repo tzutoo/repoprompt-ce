@@ -1,6 +1,10 @@
 import Combine
 import Foundation
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 @testable import RepoPromptApp
+import RepoPromptClaudeProvider
+import RepoPromptDomainRuntime
 import RepoPromptProviderQuota
 import RepoPromptSecureStorage
 import RepoPromptSettingsCore
@@ -1731,15 +1735,11 @@ private actor SlashSuggestionRuntime: NativeAgentRuntimeControlling {
         preconditionFailure("Slash suggestions must not start a provider")
     }
 
-    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof, images: [NativeAgentRuntimeImage]) -> UUID {
+    func sendUserMessage(_ text: String, configuration: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
         preconditionFailure("Slash suggestions must not send provider messages")
     }
 
-    func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) -> UUID {
-        preconditionFailure("Slash suggestions must not send provider messages")
-    }
-
-    func sendUserMessage(_ text: String) -> UUID {
+    func sendUserMessage(_ text: String) async throws -> UUID {
         preconditionFailure("Slash suggestions must not send provider messages")
     }
 

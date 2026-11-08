@@ -1,7 +1,12 @@
 import Foundation
 import MCP
+import RepoPromptACPProviders
+import RepoPromptAIContracts
+import RepoPromptCodexProvider
+import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 import RepoPromptVCS
+@testable import RepoPromptWorkspaceContext
 @_spi(TestSupport) @testable import RepoPromptApp
 import XCTest
 
@@ -10,8 +15,8 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     override func setUp() {
         super.setUp()
         GlobalSettingsStore.installApplicationModelIdentityPolicy()
-        AgentACPModelRegistry.shared.test_reset(providerID: .cursor)
-        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+        AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .cursor)
+        _ = AgentModelCatalogRuntime.shared.acpRegistry.updateDiscoveredModels(
             ACPDiscoveredSessionModels(
                 options: [.init(rawValue: "grok-4.6", displayName: "Grok 4.6", description: nil, isDefault: true)],
                 currentModelRaw: "grok-4.6",
@@ -31,7 +36,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
     }
 
     override func tearDown() {
-        AgentACPModelRegistry.shared.test_reset(providerID: .cursor)
+        AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .cursor)
         super.tearDown()
     }
 
@@ -107,9 +112,9 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         ]
 
         // Seed the catalog with the OpenCode model so validation/serialization see it.
-        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
-        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
-        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+        AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .openCode)
+        defer { AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .openCode) }
+        _ = AgentModelCatalogRuntime.shared.acpRegistry.updateDiscoveredModels(
             ACPDiscoveredSessionModels(
                 options: [
                     .init(
@@ -305,9 +310,9 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         window.apiSettingsViewModel.isOpenCodeConnected = true
         // Seed the OpenCode catalog so `model_id` validation resolves an OpenCode model rather
         // than rejecting it before the target is allocated.
-        AgentACPModelRegistry.shared.test_reset(providerID: .openCode)
-        defer { AgentACPModelRegistry.shared.test_reset(providerID: .openCode) }
-        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+        AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .openCode)
+        defer { AgentModelCatalogRuntime.shared.acpRegistry.test_reset(providerID: .openCode) }
+        _ = AgentModelCatalogRuntime.shared.acpRegistry.updateDiscoveredModels(
             ACPDiscoveredSessionModels(
                 options: [
                     .init(
@@ -785,8 +790,8 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         api.isOpenCodeConnected = false
         api.isGrokBuildConnected = false
         api.compatibleBackendSecretPresence = [:]
-        let registry = AgentCodexModelRegistry.shared
-        let catalogue = AgentAdvertisedModelCatalog.shared
+        let registry = AgentModelCatalogRuntime.shared.codexRegistry
+        let catalogue = AgentModelCatalogRuntime.shared
         let originalModels = registry.currentLiveModels()
         let persistenceKey = "CodexDynamicModelRecords"
         let originalPersistence = UserDefaults.standard.object(forKey: persistenceKey)
@@ -904,7 +909,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
         var stagedSelections: [ACPModelParameterSelection] = []
         // Runtime membership is authoritative; this success fixture must advertise the
         // canonical target of the legacy Composer alias rather than rely on static entries.
-        _ = AgentACPModelRegistry.shared.updateDiscoveredModels(
+        _ = AgentModelCatalogRuntime.shared.acpRegistry.updateDiscoveredModels(
             ACPDiscoveredSessionModels(
                 options: [.init(rawValue: "composer-2.5", displayName: "Composer 2.5", description: nil, isDefault: true)],
                 currentModelRaw: "composer-2.5",
@@ -1166,7 +1171,7 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
             resolveSpawnParentSourceTabID: { _ in nil },
             resolveSpawnParentSessionID: { _, _ in nil },
             withHeartbeat: { _, _, _, _, operation in try await operation() },
-            startRun: { target, message, metadata, agentModeVM, agentRaw, modelRaw, reasoningEffortRaw, _, _, _, _, _ in
+            startRun: { target, message, metadata, agentModeVM, agentRaw, modelRaw, reasoningEffortRaw, _, _, _, _, _, expiry in
                 if let resumeValueBeforeStartFailure {
                     // Exercise the production control activation/configuration path. A newer
                     // resume is accepted while the old start is waiting to dispatch its prompt.
@@ -1185,7 +1190,8 @@ final class MCPWorkspaceScopedCursorModelParameterTests: XCTestCase {
                                 "model_parameters": self.request([("effort", resumeValueBeforeStartFailure)])
                             ])
                             throw MCPError.internalError("Injected provider start failure.")
-                        }
+                        },
+                        startExpiry: expiry
                     )
                 }
                 try beforeStartFailure?(agentModeVM, target.tabID)

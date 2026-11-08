@@ -475,6 +475,7 @@ struct MarkdownTextView: View, Equatable {
     let renderCadence: MarkdownRenderCadence
     private let allowsStreamingSegmentation: Bool
     private let allowsDiagramSplitting: Bool
+    @Environment(\.windowIsPresentationVisible) private var windowIsPresentationVisible
     @Environment(\.markdownFileLinkOpener) private var markdownFileLinkOpener
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
@@ -533,6 +534,9 @@ struct MarkdownTextView: View, Equatable {
                     updateMarkdownRenderingLifecycle()
                 }
                 .onChange(of: renderRequestContext) { _, _ in
+                    updateMarkdownRenderingLifecycle()
+                }
+                .onChange(of: windowIsPresentationVisible) { _, _ in
                     updateMarkdownRenderingLifecycle()
                 }
                 .onDisappear {
@@ -650,7 +654,7 @@ struct MarkdownTextView: View, Equatable {
     }
 
     private func updateMarkdownRenderingLifecycle(now: Date = Date()) {
-        guard isMarkdown else {
+        guard isMarkdown, windowIsPresentationVisible else {
             cancelPendingCompile()
             return
         }
@@ -662,7 +666,7 @@ struct MarkdownTextView: View, Equatable {
     }
 
     private func scheduleMarkdownCompile(for context: MarkdownRenderRequestContext, now: Date = Date()) {
-        guard isMarkdown else {
+        guard isMarkdown, windowIsPresentationVisible else {
             cancelPendingCompile()
             return
         }

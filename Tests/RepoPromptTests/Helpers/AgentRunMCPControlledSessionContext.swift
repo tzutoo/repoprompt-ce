@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import RepoPromptSettingsCore
 
@@ -97,7 +98,7 @@ final class AgentRunMCPControlledSessionContext {
                 resolveSpawnParentSourceTabID: { _ in nil },
                 resolveSpawnParentSessionID: { _, _ in nil },
                 withHeartbeat: { _, _, _, _, operation in try await operation() },
-                startRun: { _, _, _, _, _, _, _, _, _, _, _, _ in
+                startRun: { _, _, _, _, _, _, _, _, _, _, _, _, _ in
                     throw MCPError.internalError(unusedStartRunMessage)
                 }
             )

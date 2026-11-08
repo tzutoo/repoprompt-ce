@@ -1,7 +1,10 @@
 import Foundation
+import RepoPromptAgentProviderContracts
+@testable import RepoPromptMCPServer
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import XCTest
+import RepoPromptAIContracts
 
 /// The delegated multi-stage pipeline, end to end, with no local user turn anywhere inside it.
 ///
@@ -40,6 +43,8 @@ final class AgentSessionLinkAutonomousPipelineTests: XCTestCase {
     func testAutonomousPipelineRelaysThroughThreeSessionsUnderTwoIndependentDirectGrants() async throws {
         let pipeline = try makePipeline()
         let observer = pipeline.observer
+        // This relay exercises successive admissions, not routine interval throttling.
+        observer.session.oversight.routineWakeIntervalEnabled = false
         let observerEndpoint = try endpoint(observer)
 
         // Two grants the user created separately. Neither implies the other, and neither is inferred
@@ -890,12 +895,12 @@ private actor AutonomousPipelineStubNativeController: NativeAgentRuntimeControll
         configuration.apply()
     }
 
-    func sendUserMessage(_: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+    func sendUserMessage(_: String, configuration proof: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
         try configuration.validate(proof)
         return UUID()
     }
 
-    func sendUserMessage(_: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+    func sendUserMessage(_: String) async throws -> UUID {
         UUID()
     }
 

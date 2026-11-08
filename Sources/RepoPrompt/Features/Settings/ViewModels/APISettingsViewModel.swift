@@ -1,4 +1,9 @@
 import Combine
+import RepoPromptACPProviders
+import RepoPromptAIContracts
+import RepoPromptClaudeProvider
+import RepoPromptCodexProvider
+import RepoPromptHTTPProviders
 import RepoPromptProcess
 import RepoPromptSecureStorage
 import RepoPromptSettingsCore
@@ -860,7 +865,11 @@ public class APISettingsViewModel: ObservableObject {
         let provider = ClaudeCodeProvider()
         let start = Date()
         do {
-            let ok = try await provider.testCompatibleBackendConnection(id, timeout: 30)
+            let ok = try await provider.testCompatibleBackendConnection(
+                variant: ClaudeCLIAppModelPolicy.runtimeVariant(for: id),
+                requestedModel: { ClaudeCLIAppModelPolicy.compatibleBackendTestRequestedModel(for: id) },
+                timeout: 30
+            )
             await provider.dispose()
             let elapsed = max(1, Int(Date().timeIntervalSince(start) * 1000))
             let result: ClaudeCompatibleBackendTestResult = ok
@@ -1347,7 +1356,7 @@ public class APISettingsViewModel: ObservableObject {
 
         // Load persisted ACP catalogs before any provider result can trigger restoration.
         // A live refresh may legitimately omit dynamic metadata, especially for Cursor.
-        await AgentACPModelRegistry.shared.warmStandardStoreIfNeeded()
+        await AgentModelCatalogRuntime.shared.acpRegistry.warmStandardStoreIfNeeded()
         guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
         if isContextBuilderProviderValidationComplete { return }
         if let contextBuilderProviderValidationTask {
@@ -2177,7 +2186,7 @@ public class APISettingsViewModel: ObservableObject {
             case .deepseek:
                 deepSeekApiKey = trimmedKey
                 isDeepSeekKeyValid = true
-                seedPreferredComposeModelIfMissing(AIModel.deepseekV4Flash, reason: "api_settings.validate_key.default_seed.deepseek")
+                seedPreferredComposeModelIfMissing(AIModel.deepseekChat, reason: "api_settings.validate_key.default_seed.deepseek")
             case .fireworks:
                 fireworksApiKey = trimmedKey
                 isFireworksKeyValid = true
@@ -2471,7 +2480,7 @@ public class APISettingsViewModel: ObservableObject {
         let baseURL = ollamaURL.hasSuffix("/v1") ? ollamaURL : (ollamaURL.hasSuffix("/") ? ollamaURL + "v1" : ollamaURL + "/v1")
 
         let provider = CustomOpenAIProvider(
-            baseURL: baseURL,
+            host: CustomOpenAIAppHost(), baseURL: baseURL,
             apiKey: "",
             defaultModel: "llama2",
             defaultTemperature: 0.7,
@@ -2809,6 +2818,7 @@ public class APISettingsViewModel: ObservableObject {
         if !userModel.isEmpty {
             // User specified a model → validate it with a test completion (skip model list fetch)
             let testProvider = OpenAIProvider(
+                host: OpenAIProviderAppHost(),
                 apiKey: apiKey,
                 baseURL: URL(string: baseURL),
                 configuredMaxTokens: 16,
@@ -2839,7 +2849,7 @@ public class APISettingsViewModel: ObservableObject {
         } else {
             // No custom model → fetch available models to validate endpoint
             let probeProvider = CustomOpenAIProvider(
-                baseURL: baseURL,
+                host: CustomOpenAIAppHost(), baseURL: baseURL,
                 apiKey: apiKey,
                 defaultModel: "gpt-4o",
                 defaultTemperature: 0.7,
@@ -2958,7 +2968,8 @@ public class APISettingsViewModel: ObservableObject {
             baseURL: normalizedURL,
             apiKey: trimmedKey,
             apiVersions: discoveryVersions,
-            httpCredentialConsentEndpoint: consentEndpoint
+            httpCredentialConsentEndpoint: consentEndpoint,
+            host: AzureOpenAIAppHost()
         )
         let resolvedAPIVersion = trimmedVersion
         AzureOpenAIProvider.debug("Retrieved \(models.count) Azure deployments")
@@ -3072,7 +3083,8 @@ public class APISettingsViewModel: ObservableObject {
                 baseURL: normalizedURL,
                 apiKey: trimmedKey,
                 apiVersions: discoveryVersions,
-                httpCredentialConsentEndpoint: azureHTTPConsentEndpoint
+                httpCredentialConsentEndpoint: azureHTTPConsentEndpoint,
+                host: AzureOpenAIAppHost()
             )
             availableAzureModels = AzureOpenAIProvider.mergedWithDefaultDescriptors(descriptors)
         } catch {
@@ -3105,7 +3117,7 @@ public class APISettingsViewModel: ObservableObject {
 
         do {
             let provider = CustomOpenAIProvider(
-                baseURL: customProviderConsentURL,
+                host: CustomOpenAIAppHost(), baseURL: customProviderConsentURL,
                 apiKey: customProviderApiKey,
                 defaultModel: "",
                 defaultTemperature: 0.7,
@@ -4352,7 +4364,7 @@ public class APISettingsViewModel: ObservableObject {
 
         do {
             let provider = CustomOpenAIProvider(
-                baseURL: "https://openrouter.ai/api/v1",
+                host: CustomOpenAIAppHost(), baseURL: "https://openrouter.ai/api/v1",
                 apiKey: openRouterApiKey,
                 defaultModel: "openai/gpt-4o-mini",
                 defaultTemperature: 0.7,
@@ -4397,7 +4409,7 @@ public class APISettingsViewModel: ObservableObject {
             let version = versionFromField ?? (UserDefaults.standard.string(forKey: "customOpenAIVersionOverride") ?? "v1")
 
             let provider = CustomOpenAIProvider(
-                baseURL: base,
+                host: CustomOpenAIAppHost(), baseURL: base,
                 apiKey: openAIApiKey,
                 defaultModel: "gpt-3.5-turbo",
                 defaultTemperature: 0.7,
@@ -4416,7 +4428,7 @@ public class APISettingsViewModel: ObservableObject {
         guard isDeepSeekKeyValid else { return }
         do {
             let provider = CustomOpenAIProvider(
-                baseURL: "https://api.deepseek.com/v1",
+                host: CustomOpenAIAppHost(), baseURL: "https://api.deepseek.com/v1",
                 apiKey: deepSeekApiKey,
                 defaultModel: "deepseek-v4-flash",
                 defaultTemperature: 0.7
@@ -4433,7 +4445,7 @@ public class APISettingsViewModel: ObservableObject {
         guard isFireworksKeyValid else { return }
         do {
             let provider = CustomOpenAIProvider(
-                baseURL: "https://api.fireworks.ai/inference/v1",
+                host: CustomOpenAIAppHost(), baseURL: "https://api.fireworks.ai/inference/v1",
                 apiKey: fireworksApiKey,
                 defaultModel: "accounts/fireworks/models/llama-v4-maverick",
                 defaultTemperature: 0.7
@@ -4524,7 +4536,7 @@ public class APISettingsViewModel: ObservableObject {
             // GrokProvider inherits from OpenAIProvider, so CustomOpenAIProvider can be used for model listing
             // if Grok's /models endpoint is OpenAI-compatible.
             let provider = CustomOpenAIProvider(
-                baseURL: "https://api.x.ai/v1", // Grok API base URL for models
+                host: CustomOpenAIAppHost(), baseURL: "https://api.x.ai/v1", // Grok API base URL for models
                 apiKey: grokApiKey,
                 defaultModel: "grok-3-mini-beta", // A known Grok model
                 defaultTemperature: 0.7
@@ -4544,7 +4556,7 @@ public class APISettingsViewModel: ObservableObject {
             // GroqProvider inherits from OpenAIProvider, so CustomOpenAIProvider can be used for model listing
             // if Groq's /models endpoint is OpenAI-compatible.
             let provider = CustomOpenAIProvider(
-                baseURL: "https://api.groq.com/openai/v1", // Groq API base URL for models
+                host: CustomOpenAIAppHost(), baseURL: "https://api.groq.com/openai/v1", // Groq API base URL for models
                 apiKey: groqApiKey,
                 defaultModel: "moonshotai/kimi-k2-instruct", // Default Groq model
                 defaultTemperature: 0.7

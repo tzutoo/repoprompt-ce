@@ -1,7 +1,10 @@
 import Foundation
 import MCP
+import RepoPromptACPProviders
+import RepoPromptAIContracts
 import RepoPromptDomainRuntime
 import RepoPromptFileSystem
+import RepoPromptWorkspaceContext
 
 extension Value {
     /// Decode this Value into a Decodable type by going through JSON.

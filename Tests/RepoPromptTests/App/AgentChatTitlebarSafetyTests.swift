@@ -4,10 +4,13 @@ import Combine
 import Foundation
 import KeyboardShortcuts
 import MCP
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
+@testable import RepoPromptMCPServer
 import RepoPromptPersistence
 import RepoPromptSettingsCore
+@testable import RepoPromptWorkspaceContext
 import SwiftUI
 import XCTest
 
@@ -388,6 +391,38 @@ final class AgentChatTitlebarSafetyTests: XCTestCase {
             AgentSessionHandoffInstructionsPolicy.validation(of: String(repeating: "a", count: maximum + 1)),
             .tooLong(count: maximum + 1, maximum: maximum)
         )
+    }
+
+    func testOnlyUserSwitchesRequestComposerActivationAndBackgroundCreationLeavesTabAlone() async throws {
+        try await withFixture { fixture in
+            let promptManager = fixture.window.promptManager
+            var requestedTabIDs: [UUID] = []
+            let observer = NotificationCenter.default.addObserver(
+                forName: .composerActivationRequested, object: nil, queue: nil
+            ) { notification in
+                guard notification.userInfo?["windowID"] as? Int == promptManager.windowID,
+                      let tabID = notification.userInfo?["tabID"] as? UUID else { return }
+                MainActor.assumeIsolated { requestedTabIDs.append(tabID) }
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            await promptManager.switchComposeTab(fixture.tabBID, focusIntent: .preservesLiveText)
+            XCTAssertEqual(promptManager.activeComposeTabID, fixture.tabBID)
+            XCTAssertEqual(requestedTabIDs, [], "An automated switch must not end the user's typing")
+
+            await promptManager.switchComposeTab(fixture.tabAID)
+            XCTAssertEqual(requestedTabIDs, [fixture.tabAID])
+
+            // Re-selecting the active tab changes nothing but must still focus its composer.
+            await promptManager.switchComposeTab(fixture.tabAID)
+            XCTAssertEqual(requestedTabIDs, [fixture.tabAID, fixture.tabAID])
+
+            requestedTabIDs = []
+            let background = await promptManager.createBackgroundComposeTab(strategy: .blank)
+            XCTAssertNotNil(background)
+            XCTAssertEqual(promptManager.activeComposeTabID, fixture.tabAID, "Background creation must not change the active tab")
+            XCTAssertEqual(requestedTabIDs, [], "Background creation must not request composer focus")
+        }
     }
 
     func testSnapshotAndTargetValidationFailClosedAcrossLifecycleChanges() async throws {

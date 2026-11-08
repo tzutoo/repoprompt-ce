@@ -1,8 +1,11 @@
 import Combine
+import RepoPromptAIContracts
 import RepoPromptDomainRuntime
 import RepoPromptFileSystem
+import RepoPromptHTTPProviders
 import RepoPromptInstrumentation
 import RepoPromptSettingsCore
+import RepoPromptWorkspaceContext
 import SwiftUI
 
 #if DEBUG
@@ -2605,7 +2608,7 @@ class OracleViewModel: ObservableObject {
            promptViewModel.activeComposeTabID != targetTabID
         {
             isSwitchingTabsForSession = true
-            await promptViewModel.switchComposeTab(targetTabID)
+            await promptViewModel.switchComposeTab(targetTabID, focusIntent: .preservesLiveText)
             isSwitchingTabsForSession = false
         }
         guard sessionSwitchGeneration == switchGeneration else { return }

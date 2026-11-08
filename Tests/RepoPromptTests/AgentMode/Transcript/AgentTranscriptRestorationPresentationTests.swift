@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import os
 @testable import RepoPromptApp
+import RepoPromptDomainRuntime
 import XCTest
 
 /// Table-driven precedence for the pure Agent transcript pane classifier (§4.4).
@@ -3791,7 +3792,7 @@ final class AgentSidebarRestoreStabilityTests: XCTestCase {
             XCTAssertTrue(AgentSidebarDateSectionBuilder.activeSections(for: projection.pagedSessions).isEmpty)
             XCTAssertEqual(
                 viewModel.sidebarCollapseAllState(for: incoming.composeTabs, currentTabID: incomingTabID, searchText: ""),
-                .hidden
+                .unavailable
             )
 
             await switchGate.open()

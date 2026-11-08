@@ -1,6 +1,8 @@
 import Foundation
 @testable import RepoPromptApp
 import XCTest
+import RepoPromptAIContracts
+import RepoPromptAgentProviderContracts
 
 final class PiNativeSessionControllerTests: XCTestCase {
     private var fakePiURL: URL!

@@ -1,4 +1,7 @@
 import Foundation
+import RepoPromptACPProviders
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 import RepoPromptDomainRuntime
 import RepoPromptInstrumentation
 
@@ -66,6 +69,19 @@ final class AgentModeRunService {
     private let piRunner: ClaudeIntegratedAgentModeRunner
     private let acpRunner: ACPIntegratedAgentModeRunner
     private let terminalCommitBarrier: AgentRunTerminalCommitBarrier
+
+    /// Forward only; the barrier remains the owner of teardown/settlement evidence.
+    func providerSwitchTerminalIsSettled(_ session: AgentTabSession) -> Bool {
+        terminalCommitBarrier.isSettled(
+            tabID: session.tabID, lifecycle: session.runLifecycle,
+            hasAcceptedWork: session.agentTask != nil || session.mcpFollowUpRunPending
+                || !session.pendingInstructions.isEmpty || !session.pendingClaudeSteeringInstructions.isEmpty
+                || !session.pendingACPSteeringInstructions.isEmpty || !session.codexFallbackQueue.isEmpty
+                || session.codexFallbackDispatchInFlight != nil || session.codexFallbackPumpTask != nil
+                || session.scheduledACPFollowUp != nil
+        )
+    }
+
     private let perfRecorder: any AgentModePerfRecording
 
     #if DEBUG
@@ -1089,7 +1105,7 @@ final class AgentModeRunService {
             .intersection(session.claudeSupersedingProtectedTurnIDs)
         let protectedTurnIDs = claimedTurnIDs.union(laterProviderIDs)
         guard !protectedTurnIDs.isEmpty else { return }
-        dependencies.claudeCoordinator.notifySteeringSettlement(session: session, protectedIDs: protectedTurnIDs)
+        nativeCoordinator(for: session.selectedAgent).notifySteeringSettlement(session: session, protectedIDs: protectedTurnIDs)
 
         let unconsumedTurnIDs = protectedTurnIDs
             .intersection(session.claudeExpectedTurnIDs)
@@ -1271,10 +1287,12 @@ final class AgentModeRunService {
                 )
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush sending native interrupt id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID)")
                 var inputWasAttempted = false
-                let sendOutcome = await dependencies.claudeCoordinator.sendClaudeNativeMessage(
+                // Queued image attachments are a pi-native send. Claude steering stays text-only.
+                let queuedAttachments = session.selectedAgent.usesPiNativeRuntime ? steering.attachments : []
+                let sendOutcome = await nativeCoordinator(for: session.selectedAgent).sendClaudeNativeMessage(
                     session: session,
                     text: augmentedSteeringText,
-                    attachments: [],
+                    attachments: queuedAttachments,
                     intent: .runAttempt(ownership: ownership, runID: runID),
                     // The active runner owns the current controller's event stream. Replacing it
                     // here would strand the runner, so steering must keep failing closed.
@@ -1288,7 +1306,7 @@ final class AgentModeRunService {
                     await hooks.continuation.signalMCPInstructionDelivered(session)
                 case .failed:
                     if inputWasAttempted, session.activeRunOwnership == ownership {
-                        dependencies.claudeCoordinator.notifySteeringSettlement(session: session, protectedIDs: steering.supersedingProtectedTurnIDs, inputWasAttempted: true)
+                        nativeCoordinator(for: session.selectedAgent).notifySteeringSettlement(session: session, protectedIDs: steering.supersedingProtectedTurnIDs, inputWasAttempted: true)
                     }
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
                     // Re-insert the failed instruction so it's included in the restore.
@@ -1492,7 +1510,7 @@ final class AgentModeRunService {
             guard admission.scope == .activeRun, admission.claim(for: session) else { return }
             outcomeRecorder?.recordCancellationInitiated()
         }
-        let withdrawingProviderAdoption = dependencies.claudeCoordinator.hasPendingProviderAdoption(for: session)
+        let withdrawingProviderAdoption = nativeCoordinator(for: session.selectedAgent).hasPendingProviderAdoption(for: session)
             && session.activeRunOwnership == nil
         let providerTeardown = hooks.prepareForCancellation(session, intent, origin)
         if withdrawingProviderAdoption {

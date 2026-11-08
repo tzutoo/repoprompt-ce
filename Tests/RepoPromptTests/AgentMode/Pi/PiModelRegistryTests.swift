@@ -1,6 +1,7 @@
 import Foundation
 @testable import RepoPromptApp
 import XCTest
+import RepoPromptAIContracts
 
 final class PiModelRegistryTests: XCTestCase {
     override func setUp() {

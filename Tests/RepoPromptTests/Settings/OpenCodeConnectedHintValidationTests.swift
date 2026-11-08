@@ -3,6 +3,9 @@ import RepoPromptSecureStorage
 import RepoPromptSettingsCore
 @_spi(TestSupport) @testable import RepoPromptApp
 import XCTest
+import RepoPromptAIContracts
+import RepoPromptAgentProviderContracts
+import RepoPromptACPProviders
 
 @MainActor
 final class OpenCodeConnectedHintValidationTests: XCTestCase {
@@ -20,7 +23,8 @@ final class OpenCodeConnectedHintValidationTests: XCTestCase {
         defer { restoreConnectedHint(previous) }
 
         let service = OpenCodeACPModelPollingService(
-            client: RefreshClient(failure: OpenCodeACPLaunchResolutionError.exactPathNotFound("opencode"))
+            client: RefreshClient(failure: OpenCodeACPLaunchResolutionError.exactPathNotFound("opencode")),
+            registry: .app
         )
         let viewModel = makeViewModel(openCodeService: service)
         defer { viewModel.prepareForWindowClose() }
@@ -43,7 +47,8 @@ final class OpenCodeConnectedHintValidationTests: XCTestCase {
         defer { restoreConnectedHint(previous) }
 
         let service = OpenCodeACPModelPollingService(
-            client: RefreshClient(failure: AIProviderError.invalidConfiguration(detail: "offline"))
+            client: RefreshClient(failure: AIProviderError.invalidConfiguration(detail: "offline")),
+            registry: .app
         )
         let viewModel = makeViewModel(openCodeService: service)
         defer { viewModel.prepareForWindowClose() }

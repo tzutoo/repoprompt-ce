@@ -2,6 +2,7 @@ import Foundation
 import MCP
 @testable import RepoPromptApp
 import RepoPromptPersistence
+@testable import RepoPromptWorkspaceContext
 import XCTest
 
 final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
@@ -1180,11 +1181,28 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         )
 
         let overlay = WorkspaceCodemapLiveOverlay()
-        let fixture = try CodemapStoreFixture(name: #function, overlay: overlay, forbidCodeMapGitProcesses: true)
+        let indexGate = SiblingRootIndexReadGate()
+        let fixture = try CodemapStoreFixture(
+            name: #function,
+            catalogTransform: { client in
+                WorkspaceCodemapBindingCatalogClient(
+                    client.resolveManifestBinding,
+                    readGraphIndexCatalogPage: { request in
+                        await indexGate.waitIfArmed(rootID: request.rootEpoch.rootID)
+                        return await client.readGraphIndexCatalogPage(request)
+                    },
+                    revalidateGraphIndexCatalogToken: client.revalidateGraphIndexCatalogToken,
+                    publishMarkerReadiness: client.publishMarkerReadiness,
+                    reportRootAuthorityInvalidated: client.reportRootAuthorityInvalidated
+                )
+            },
+            overlay: overlay, forbidCodeMapGitProcesses: true
+        )
         let store = fixture.makeProductionStore()
         let loadedAlpha = try await store.loadRoot(path: alphaRoot.path)
         let loadedBeta = try await store.loadRoot(path: betaRoot.path)
         addTeardownBlock {
+            await indexGate.release()
             await store.unloadRoot(id: loadedAlpha.id)
             await store.unloadRoot(id: loadedBeta.id)
             await fixture.shutdown()
@@ -1223,6 +1241,8 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         let betaBuildsBeforeEdit = fixture.builtSourceTexts.values
             .count(where: { $0.contains("BetaOnlyProps") })
 
+        let indexReadEntered = expectation(description: "Edited-root background index is held before its catalog read")
+        await indexGate.arm(rootID: loadedAlpha.id, entered: indexReadEntered)
         try workspace.write(
             "export interface AlphaReplacedProps {\n  id: string;\n}\n",
             to: "src/App.ts",
@@ -1232,6 +1252,8 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
             rootID: loadedAlpha.id,
             deltas: [.fileModified("src/App.ts", Date())]
         )
+
+        await fulfillment(of: [indexReadEntered], timeout: 10)
 
         // Structure for both roots after the edit. The edited root must show its new symbol; the
         // untouched sibling must still show its own and must not be rebuilt.
@@ -1255,6 +1277,19 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
             "An edit in one root must not rebuild the sibling root's identically named source"
         )
 
+        // presentation() has already released its operation-owned demand. That revokes the
+        // live ready slot; while the independent background index is held, the graph has no
+        // replacement contribution. A generation fence alone is therefore not an index join.
+        let afterDemandRelease = try await snapshotAfterOverlayPublication(
+            engine: engine, overlay: overlay, rootEpoch: alphaAccounting.rootEpoch
+        )
+        XCTAssertEqual(definitions(in: afterDemandRelease, fileID: alphaFile.id), [])
+        XCTAssertFalse(afterDemandRelease.snapshot.coverage.isComplete)
+        let heldRoots = await engine.accounting().graphIndexRoots
+        let heldAlpha = try XCTUnwrap(heldRoots.first { $0.rootEpoch == alphaAccounting.rootEpoch })
+        XCTAssertNotEqual(heldAlpha.phase, .complete, "The index join must not accept pre-edit completion")
+        await indexGate.release()
+        _ = try await waitForGraphCompletion(engine: engine, rootID: loadedAlpha.id)
         let replacedAlpha = try await snapshotAfterOverlayPublication(
             engine: engine, overlay: overlay, rootEpoch: alphaAccounting.rootEpoch
         )
@@ -1270,6 +1305,11 @@ final class CodemapAutomaticSelectionGraphNativeTests: XCTestCase {
         XCTAssertEqual(definitions(in: untouchedBeta, fileID: betaFile.id), ["BetaOnlyProps"])
         XCTAssertTrue(untouchedBeta.snapshot.coverage.isComplete)
         XCTAssertNil(untouchedBeta.snapshot.nodesByFileID[alphaFile.id])
+        XCTAssertEqual(
+            fixture.builtSourceTexts.values.count(where: { $0.contains("BetaOnlyProps") }),
+            betaBuildsBeforeEdit,
+            "The completed edited-root index must not rebuild its sibling either"
+        )
         XCTAssertEqual(fixture.codeMapGitProcessAttempts.values, [])
     }
 
@@ -2402,5 +2442,33 @@ private final class PlainWorkspaceFixture: Sendable {
 
     func cleanup() {
         try? FileManager.default.removeItem(at: sandbox)
+    }
+}
+
+private actor SiblingRootIndexReadGate {
+    private var rootID: UUID?
+    private var entered: XCTestExpectation?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func arm(rootID: UUID, entered: XCTestExpectation) {
+        self.rootID = rootID
+        self.entered = entered
+    }
+
+    func waitIfArmed(rootID: UUID) async {
+        guard self.rootID == rootID else { return }
+        entered?.fulfill()
+        entered = nil
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        rootID = nil
+        entered = nil
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
     }
 }

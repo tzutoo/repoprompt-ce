@@ -1,8 +1,10 @@
 import Foundation
+import RepoPromptAgentProviderContracts
 import RepoPromptSecureStorage
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import XCTest
+import RepoPromptAIContracts
 
 /// Live-view-model regressions for the managed cross-session `steer` transaction.
 ///
@@ -760,13 +762,13 @@ private actor SteerRecordingNativeController: NativeAgentRuntimeControlling {
         configuration.apply()
     }
 
-    func sendUserMessage(_ message: String, configuration proof: NativeAgentRuntimeConfigurationProof, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+    func sendUserMessage(_ message: String, configuration proof: NativeAgentRuntimeConfigurationProof) async throws -> UUID {
         try configuration.validate(proof)
         log.record(message)
         return UUID()
     }
 
-    func sendUserMessage(_ message: String, images _: [NativeAgentRuntimeImage]) async throws -> UUID {
+    func sendUserMessage(_ message: String) async throws -> UUID {
         log.record(message)
         return UUID()
     }

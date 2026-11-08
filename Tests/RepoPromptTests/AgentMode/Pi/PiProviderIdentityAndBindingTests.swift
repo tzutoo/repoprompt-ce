@@ -3,6 +3,8 @@ import Foundation
 import RepoPromptSettingsCore
 import RepoPromptShared
 import XCTest
+import RepoPromptAIContracts
+import RepoPromptAgentProviderContracts
 
 final class PiProviderIdentityAndBindingTests: XCTestCase {
     func testMCPClientIdentityResolvesBuiltinPiFamily() {

@@ -2,9 +2,12 @@ import AppKit
 import Combine
 import Foundation
 import MCP
+import RepoPromptAgentProviderContracts
+import RepoPromptAIContracts
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
+@testable import RepoPromptWorkspaceContext
 import UniformTypeIdentifiers
 import XCTest
 

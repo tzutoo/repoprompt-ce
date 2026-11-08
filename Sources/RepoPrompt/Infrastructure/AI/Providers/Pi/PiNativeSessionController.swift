@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptAgentProviderContracts
 import RepoPromptProcess
 
 /// Interactive Agent Mode controller for the pi coding agent's RPC mode.
@@ -15,7 +16,7 @@ import RepoPromptProcess
 ///   that gate. Probe launches still auto-cancel.
 /// - `runtimeInit` carries the pi session identity; the Claude-compatible
 ///   initialize snapshot stays `nil`.
-actor PiNativeSessionController: NativeAgentRuntimeControlling {
+actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePromptSending {
     struct Options {
         /// Explicit executable override (tests). When `nil`, `pi` is resolved
         /// from the launch environment.
@@ -330,6 +331,10 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling {
             throw NativeAgentRuntimeControllerError.configurationNotCurrent
         }
         return try await sendUserMessage(text, images: images)
+    }
+
+    func sendUserMessage(_ text: String) async throws -> UUID {
+        try await sendUserMessage(text, images: [])
     }
 
     func sendUserMessage(_ text: String, images: [NativeAgentRuntimeImage]) async throws -> UUID {

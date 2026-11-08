@@ -1,5 +1,8 @@
 import Foundation
 import MCP
+import RepoPromptACPProviders
+import RepoPromptAIContracts
+import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 
 @MainActor
@@ -721,10 +724,11 @@ final class ACPIntegratedAgentModeRunner {
                 return false
             }
             inputProof = await hooks.providerInput.proveAgentSessionLinkProviderInput(session, decorated.claim)
-            if decorated.claim?.localInput != nil {
-                guard !Task.isCancelled, session.runID == runID,
-                      session.activeRunAttemptID == runAttemptID, session.acpController === controller
-                else { return false }
+            guard !Task.isCancelled, session.runID == runID,
+                  session.activeRunAttemptID == runAttemptID, session.acpController === controller
+            else {
+                hooks.providerInput.recordAgentSessionLinkPhysicalDispatchNotAttempted(session, oversightDispatch)
+                return false
             }
             guard hooks.providerInput.acquireAgentSessionLinkPhysicalDispatch(
                 session,
@@ -1222,10 +1226,11 @@ final class ACPIntegratedAgentModeRunner {
                 return .cancelled
             }
             inputProof = await hooks.providerInput.proveAgentSessionLinkProviderInput(session, decorated.claim)
-            if decorated.claim?.localInput != nil {
-                guard !Task.isCancelled, session.runID == runID,
-                      session.activeRunAttemptID == runAttemptID, session.acpController === controller
-                else { return .cancelled }
+            guard !Task.isCancelled, session.runID == runID,
+                  session.activeRunAttemptID == runAttemptID, session.acpController === controller
+            else {
+                hooks.providerInput.recordAgentSessionLinkPhysicalDispatchNotAttempted(session, oversightDispatch)
+                return .cancelled
             }
             guard hooks.providerInput.acquireAgentSessionLinkPhysicalDispatch(
                 session,
@@ -1607,7 +1612,7 @@ final class ACPIntegratedAgentModeRunner {
         }
         if agentKind == .grokBuild || agentKind == .antigravity,
            let providerID = agentKind.acpProviderID,
-           AgentACPModelRegistry.shared.resolvedSnapshot(for: providerID)?.contains(rawModel: model) != true
+           AgentModelCatalogRuntime.shared.acpRegistry.resolvedSnapshot(for: providerID)?.contains(rawModel: model) != true
         {
             // These ACP providers have no provider-side alias surface: an unknown
             // concrete model fails instead of silently running the provider's default.
@@ -2481,7 +2486,7 @@ final class ACPIntegratedAgentModeRunner {
     ) -> Bool {
         guard let providerID = agentKind.acpProviderID,
               providerID != .cursor,
-              let snapshot = AgentACPModelRegistry.shared.resolvedSnapshot(for: providerID)
+              let snapshot = AgentModelCatalogRuntime.shared.acpRegistry.resolvedSnapshot(for: providerID)
         else {
             return false
         }
