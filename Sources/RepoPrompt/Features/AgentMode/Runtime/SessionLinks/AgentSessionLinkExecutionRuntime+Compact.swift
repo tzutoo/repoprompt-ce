@@ -35,7 +35,7 @@ enum AgentNativeCompactDispatchResult: Equatable {
     case startFailed
 }
 
-extension AgentModeViewModel {
+extension AgentSessionLinkExecutionRuntime {
     /// Pure support decision for one target, taken before anything is recorded.
     ///
     /// Claude-compatible variants share the Claude CLI but their backends are not verified to honor
@@ -52,7 +52,7 @@ extension AgentModeViewModel {
         switch session.selectedAgent {
         case .codexExec:
             let thread = session.codexConversationID?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return codexCoordinator.hasKnownCodexThread(session) && thread?.isEmpty == false
+            return codexCoordinator?.hasKnownCodexThread(session) == true && thread?.isEmpty == false
                 ? .codex
                 : .noProviderSession
         case .claudeCode:
@@ -118,9 +118,11 @@ extension AgentModeViewModel {
         commitAuthorization: @MainActor () async -> AgentSessionLinkSendCommitOutcome
     ) async -> AgentSessionLinkSendTransactionOutcome {
         // 1. Exact endpoint incarnations.
-        guard let session = agentSessionLinkLiveSession(matching: candidate) else {
+        guard let command = admit(candidate) else {
             return .blocked(.endpointInvalidated)
         }
+        let writer = command.writer
+        let session = writer.session
         let admissionLiveness = liveness()
         guard admissionLiveness.permitsDelivery else {
             return .blocked(.endpointInvalidated)
@@ -129,7 +131,7 @@ extension AgentModeViewModel {
         // 2. Pure readiness admission, then provider support. Readiness first, so a busy or waiting
         //    target reads `target_not_idle` regardless of its provider.
         let admission = AgentSessionLinkDeliveryReadiness.evaluate(
-            snapshot: Self.agentSessionLinkDeliveryReadinessSnapshot(
+            snapshot: AgentModeViewModel.agentSessionLinkDeliveryReadinessSnapshot(
                 session: session,
                 endpointMatchesGrant: admissionLiveness.targetEndpointIsLive,
                 isClosing: admissionLiveness.targetWindowIsClosing
@@ -152,7 +154,8 @@ extension AgentModeViewModel {
         }
 
         // 3. Local composer claim. Losing it means a local user Send won the race.
-        guard let target = makeComposerSubmitTarget(tabID: candidate.tabID, session: session),
+        guard command.isCurrent,
+              let target = makeComposerSubmitTarget(tabID: candidate.tabID, session: session),
               target.route == .existingAgentSession,
               target.expectedSourceAgentSessionID == candidate.sessionID
         else {
@@ -165,10 +168,7 @@ extension AgentModeViewModel {
             noticeRevision: 0,
             rawDraftSnapshot: ""
         )
-        guard case let .claimed(claim) = claimComposerSubmitAttempt(
-            attempt,
-            requireActiveTabOwnership: false
-        ) else {
+        guard let claim = claimComposerSubmitAttempt(attempt) else {
             return .blocked(.targetNotIdle)
         }
 
@@ -184,15 +184,14 @@ extension AgentModeViewModel {
         //    The support answer itself suspends on the controller actor, so it is fetched first;
         //    liveness, identity, claim, readiness, and workspace are then proved in one MainActor
         //    stretch with no suspension between them and the durable row.
-        guard let liveSession = agentSessionLinkLiveSession(matching: candidate),
-              liveSession === session
-        else {
+        guard command.isCurrent else {
             releaseComposerSubmitClaim(claim)
             return .blocked(.endpointInvalidated)
         }
+        let liveSession = session
         let postCommitSupport = await agentSessionLinkCompactSupport(for: liveSession)
         let postCommitLiveness = liveness()
-        guard agentSessionLinkLiveSession(matching: candidate) === liveSession,
+        guard command.isCurrent,
               postCommitLiveness.permitsDelivery,
               composerSubmitClaimIsCurrent(claim)
         else {
@@ -200,7 +199,7 @@ extension AgentModeViewModel {
             return .blocked(.endpointInvalidated)
         }
         let postCommitAdmission = AgentSessionLinkDeliveryReadiness.evaluate(
-            snapshot: Self.agentSessionLinkDeliveryReadinessSnapshot(
+            snapshot: AgentModeViewModel.agentSessionLinkDeliveryReadinessSnapshot(
                 session: liveSession,
                 endpointMatchesGrant: postCommitLiveness.targetEndpointIsLive,
                 isClosing: postCommitLiveness.targetWindowIsClosing,
@@ -219,12 +218,6 @@ extension AgentModeViewModel {
             releaseComposerSubmitClaim(claim)
             return .blocked(postCommitSupport == .noProviderSession ? .noProviderSession : .notSupported)
         }
-        guard let workspaceID = workspaceManager?.activeWorkspace?.id,
-              workspaceID == candidate.workspaceID
-        else {
-            releaseComposerSubmitClaim(claim)
-            return .blocked(.endpointInvalidated)
-        }
 
         // 6. Durable acceptance of the *request*. A `.system` row with fixed text plus typed
         //    attribution: no user row, no turn anchor, no draft, workflow, or handoff mutation.
@@ -233,13 +226,19 @@ extension AgentModeViewModel {
             sequenceIndex: liveSession.nextSequenceIndex
         )
         liveSession.appendItem(requestItem)
-        updateBindingsFromSession(liveSession)
+        writer.scope.presentation.bindingChanged(liveSession)
         requestUIRefresh(tabID: candidate.tabID, urgent: true)
 
-        if case .failure = await flushSaveRequired(for: candidate.tabID, workspaceID: workspaceID) {
+        if case .failure = await writer.scope.persistence.flushSaveRequired(writer: writer) {
+            // An indeterminate write belongs to this incarnation. Never compensate against a
+            // replacement writer, even if it reused the tab or persistent session identity.
+            guard writer.isCurrent else {
+                releaseComposerSubmitClaim(claim)
+                return .blocked(.persistenceIndeterminate)
+            }
             agentSessionLinkRemoveStagedCompactRow(itemID: requestItem.id, tabID: candidate.tabID, session: liveSession)
             // As for a send: only a durably confirmed removal makes "nothing was requested" true.
-            if case .failure = await flushSaveRequired(for: candidate.tabID, workspaceID: workspaceID) {
+            if case .failure = await writer.scope.persistence.flushSaveRequired(writer: writer) {
                 releaseComposerSubmitClaim(claim)
                 return .blocked(.persistenceIndeterminate)
             }
@@ -266,17 +265,16 @@ extension AgentModeViewModel {
         let dispatchSupport = await agentSessionLinkCompactSupport(for: liveSession)
         let dispatchLiveness = liveness()
         guard !Task.isCancelled,
-              agentSessionLinkLiveSession(matching: candidate) === liveSession,
+              command.isCurrent,
               dispatchLiveness.permitsDelivery,
               composerSubmitClaimIsCurrent(claim),
-              workspaceManager?.activeWorkspace?.id == candidate.workspaceID,
               dispatchSupport == support
         else {
             releaseComposerSubmitClaim(claim)
             return .delivered(persistedOnly)
         }
         let dispatchAdmission = AgentSessionLinkDeliveryReadiness.evaluate(
-            snapshot: Self.agentSessionLinkDeliveryReadinessSnapshot(
+            snapshot: AgentModeViewModel.agentSessionLinkDeliveryReadinessSnapshot(
                 session: liveSession,
                 endpointMatchesGrant: dispatchLiveness.targetEndpointIsLive,
                 isClosing: dispatchLiveness.targetWindowIsClosing,
@@ -304,13 +302,12 @@ extension AgentModeViewModel {
                 guard let self else { return false }
                 let current = liveness()
                 guard !Task.isCancelled,
-                      agentSessionLinkLiveSession(matching: candidate) === liveSession,
+                      command.isCurrent,
                       current.permitsDelivery,
-                      composerSubmitClaimIsCurrent(claim),
-                      workspaceManager?.activeWorkspace?.id == candidate.workspaceID
+                      composerSubmitClaimIsCurrent(claim)
                 else { return false }
                 return AgentSessionLinkDeliveryReadiness.evaluate(
-                    snapshot: Self.agentSessionLinkDeliveryReadinessSnapshot(
+                    snapshot: AgentModeViewModel.agentSessionLinkDeliveryReadinessSnapshot(
                         session: liveSession,
                         endpointMatchesGrant: current.targetEndpointIsLive,
                         isClosing: current.targetWindowIsClosing,
@@ -325,7 +322,7 @@ extension AgentModeViewModel {
         }
         releaseComposerSubmitClaim(claim)
 
-        let resultingRunState = sessions[candidate.tabID]?.runState ?? liveSession.runState
+        let resultingRunState = liveSession.runState
         return .delivered(AgentSessionLinkSendDelivery(
             targetItemID: requestItem.id,
             acceptedAt: acceptedAt,
@@ -344,17 +341,24 @@ extension AgentModeViewModel {
         isStillAdmissible: @escaping @MainActor () -> Bool,
         selfCompactDispatchID: AgentSelfCompactionDispatchID? = nil
     ) async -> AgentNativeCompactDispatchResult {
-        guard isStillAdmissible(), await agentSessionLinkCompactSupport(for: session) == support,
-              isStillAdmissible()
+        guard let scope, let sessionID = session.activeAgentSessionID,
+              case let .unique(writer) = scope.resolveWriter(sessionID: sessionID),
+              writer.scope === scope, writer.session === session, session.tabID == tabID,
+              let command = try? writer.admitCommand().get()
+        else { return .notStarted }
+        let mayDispatch = { @MainActor in command.isCurrent && isStillAdmissible() }
+        guard mayDispatch(), await agentSessionLinkCompactSupport(for: session) == support,
+              mayDispatch()
         else { return .notStarted }
         switch support {
         case .codex:
-            guard let expectedThreadID = session.codexConversationID else { return .notStarted }
+            guard let expectedThreadID = session.codexConversationID,
+                  let codexCoordinator, scope.execution != nil else { return .notStarted }
             let start = await codexCoordinator.startOversightCompaction(
                 session: session,
                 expectedThreadID: expectedThreadID,
                 selfCompactDispatchID: selfCompactDispatchID,
-                isStillAdmissible: isStillAdmissible
+                isStillAdmissible: mayDispatch
             )
             switch start {
             case .started: return .started
@@ -364,7 +368,7 @@ extension AgentModeViewModel {
         case .claudeCode, .pi, .acpAdvertisedCommand:
             guard let conversation = session.providerSessionID,
                   let binding = session.persistentSessionBindingIdentity,
-                  isStillAdmissible()
+                  mayDispatch()
             else { return .notStarted }
             let command = AgentProviderControlCommand.compact(
                 expectedBinding: binding,
@@ -376,7 +380,8 @@ extension AgentModeViewModel {
                 tabID: tabID,
                 initialMessage: command.providerText,
                 directStartOptions: .providerControl(command),
-                startOutcome: recorder
+                startOutcome: recorder,
+                providerSwitchPreparation: nil
             )
             return recorder.outcome.didStart ? .started : .startFailed
         case .notSupported, .noProviderSession:
@@ -398,7 +403,7 @@ extension AgentModeViewModel {
         if let index = session.items.firstIndex(where: { $0.id == itemID }) {
             _ = session.removeItem(at: index)
         }
-        updateBindingsFromSession(session)
+        scope?.presentation.bindingChanged(session)
         requestUIRefresh(tabID: tabID, urgent: true)
         scheduleSave(for: tabID)
     }

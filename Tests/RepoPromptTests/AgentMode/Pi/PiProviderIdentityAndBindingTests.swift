@@ -94,7 +94,7 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         let coordinator = CodexAgentModeCoordinator(
             windowID: 1,
             runtimeWorkspacePathsProvider: { _ in .uniform("/tmp") },
-            codexControllerFactory: { _, _, _, _, _, _, _, _ in
+            codexControllerFactory: { _, _, _, _, _, _, _, _, _ in
                 fatalError("unused")
             },
             connectionPolicyInstaller: { _, _, _, _, _, _, _, _, _, _, _, _, _ in },
@@ -206,11 +206,11 @@ final class PiProviderIdentityAndBindingTests: XCTestCase {
         let tabID = UUID()
         let session = viewModel.session(for: tabID)
         session.selectedAgent = .piAgent
-        let withoutConversation = await viewModel.agentSessionLinkCompactSupport(for: session)
+        let withoutConversation = await viewModel.linkExecutionRuntime.agentSessionLinkCompactSupport(for: session)
         XCTAssertEqual(withoutConversation, .noProviderSession)
 
         session.providerSessionID = "pi-session"
-        let withConversation = await viewModel.agentSessionLinkCompactSupport(for: session)
+        let withConversation = await viewModel.linkExecutionRuntime.agentSessionLinkCompactSupport(for: session)
         XCTAssertEqual(withConversation, .pi)
     }
 

@@ -55,15 +55,22 @@ package enum AgentApprovalDecision: Hashable {
 }
 
 package enum AgentApprovalRequestID: Hashable {
-    case codex(CodexAppServerRequestID)
+    package var identitySeed: String {
+        switch self {
+        case let .codex(receipt): receipt.identitySeed
+        case let .claudeControl(id), let .piExtensionUI(id), let .acp(id): id
+        }
+    }
+
+    case codex(CodexServerRequestReceipt)
     case claudeControl(String)
     case piExtensionUI(String)
     case acp(String)
 
     package var displayValue: String {
         switch self {
-        case let .codex(id):
-            id.displayValue
+        case let .codex(receipt):
+            receipt.requestID.displayValue
         case let .claudeControl(id), let .piExtensionUI(id):
             id
         case let .acp(id):
@@ -155,7 +162,7 @@ package struct AgentApprovalRequest: Identifiable, Hashable {
         itemID: String
     ) -> UUID {
         StableUserInteractionIdentity.uuid(
-            from: "approval-request|\(requestID.displayValue)|\(method)|\(kind.rawValue)|\(threadID)|\(turnID)|\(itemID)"
+            from: "approval-request|\(requestID.identitySeed)|\(method)|\(kind.rawValue)|\(threadID)|\(turnID)|\(itemID)"
         )
     }
 

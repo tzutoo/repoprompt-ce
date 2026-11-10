@@ -11,6 +11,143 @@ import XCTest
 
 @MainActor
 final class SessionAdminWorktreeRecoveryTests: XCTestCase {
+    func testColdSavedTargetCreatesBindsAndUnbindsThroughPreparedCanonicalWriter() async throws {
+        try await withFixture { fixture in
+            let manager = WindowStatesManager.shared
+            // Keep the production prepared owner available across the three separate commands
+            // and their durable reads. The host must release its own nested hold each time;
+            // otherwise normal idle retirement may legitimately refuse the next command.
+            manager.beginPreparedOversightPreparation(fixture.sessionID)
+            @MainActor func cleanupPreparedOwner() async {
+                manager.endPreparedOversightPreparation(fixture.sessionID)
+                if manager.preparedOversightWindows[fixture.sessionID] != nil {
+                    let released = await manager.releasePreparedOversightOwnerForVisit(sessionID: fixture.sessionID)
+                    XCTAssertTrue(released)
+                }
+            }
+            do {
+                let viewModel = fixture.window.agentModeViewModel
+                let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
+                let savedSource = try await fixture.savedSession()
+                let source = try XCTUnwrap(savedSource)
+                _ = try await AgentSessionDataService.shared.saveAgentSession(source, for: workspace)
+                // Use the same real durable service as saved-target preparation, including if it can
+                // reuse the visible composition. No acknowledgement stub or post-command flush.
+                viewModel.test_setAgentSessionSaver { payload, workspace, count in
+                    try await AgentSessionDataService.shared.saveAgentSession(
+                        payload, for: workspace, preparation: .alreadyCanonicalTranscript, trustedCanonicalItemCount: count
+                    )
+                }
+                viewModel.test_removeSession(tabID: fixture.session.tabID)
+                XCTAssertNil(try SessionAdminWindows.command(for: fixture.sessionID))
+                let host = SessionAdminWindowsWorktreeHost()
+                let created = try await host.createWorktree(
+                    forSession: fixture.sessionID, repoRoot: nil, branch: "e2e/cold-target", baseRef: nil,
+                    isStillAuthorized: { true }
+                )
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                var published: Set<String>?
+                _ = try await host.bindWorktree(
+                    sessionID: fixture.sessionID, worktree: created.path, repoRoot: nil,
+                    isStillAuthorized: { true }, admitBindings: { _ in }, bindingsCommitted: { published = $0 }
+                )
+                XCTAssertEqual(published, [created.worktreeID])
+                let bound = try await AgentSessionDataService.shared.loadAgentSession(id: fixture.sessionID, for: workspace)
+                XCTAssertEqual(bound?.worktreeBindings.map(\.worktreeID), [created.worktreeID])
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                let removed = try await host.unbindWorktrees(
+                    sessionID: fixture.sessionID, worktreeID: nil, isStillAuthorized: { true }, bindingsRemoved: { _ in }
+                )
+                XCTAssertEqual(removed, [created.worktreeID])
+                let unbound = try await AgentSessionDataService.shared.loadAgentSession(id: fixture.sessionID, for: workspace)
+                XCTAssertEqual(unbound?.worktreeBindings, [])
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                fixture.assertForegroundUnchanged()
+            } catch {
+                await cleanupPreparedOwner()
+                throw error
+            }
+            await cleanupPreparedOwner()
+            XCTAssertNil(manager.preparedOversightPreparationInFlight[fixture.sessionID])
+        }
+    }
+
+    func testIdleWaitStopsOnWriterReacquisitionInsteadOfFollowingSuccessor() async throws {
+        try await withFixture { fixture in
+            fixture.session.mcpFollowUpRunPending = true
+            let command = try XCTUnwrap(SessionAdminWindows.command(for: fixture.sessionID))
+            var entered = false
+            let finished = expectation(description: "original writer wait ended")
+            let waiter = Task { @MainActor in
+                entered = true
+                await SessionAdminWindowsWorktreeHost().waitForIdleBoundary(sessionID: fixture.sessionID)
+                finished.fulfill()
+            }
+            defer { waiter.cancel() }
+            try await AsyncTestWait.waitUntil("idle waiter entered") { entered }
+            fixture.window.agentModeViewModel.test_removeSession(tabID: fixture.session.tabID)
+            fixture.window.agentModeViewModel.test_installLiveSession(fixture.session)
+            XCTAssertFalse(command.isCurrent)
+            XCTAssertTrue(fixture.session.mcpFollowUpRunPending, "Successor remains busy")
+            await fulfillment(of: [finished], timeout: 3)
+            fixture.session.mcpFollowUpRunPending = false
+        }
+    }
+
+    func testUnscopedWriterDefersBeforeConfiguredPayloadPreparation() async throws {
+        try await withFixture(canonicalHost: true) { fixture in
+            let viewModel = fixture.window.agentModeViewModel
+            var writes = 0
+            viewModel.test_setAgentSessionSaver { _, _, _ in
+                writes += 1
+                throw CancellationError()
+            }
+            let original = try XCTUnwrap(fixture.session.persistentSessionBindingIdentity)
+            fixture.session.installPersistentSessionBinding(.init(
+                tabID: original.tabID, sessionID: original.sessionID, generation: original.generation
+            ))
+            fixture.session.recordRestorationAuthoritative(.persistedPayloadApplied)
+            fixture.session.isDirty = true
+            let result = await viewModel.flushSaveRequired(for: fixture.session.tabID, workspaceID: fixture.workspaceID)
+            guard case let .failure(failure) = result else { return XCTFail("An unscoped binding cannot write") }
+            XCTAssertEqual(failure.message, "The session does not have a unique runtime writer for this workspace.")
+            XCTAssertEqual(writes, 0)
+            XCTAssertTrue(fixture.session.isDirty)
+            XCTAssertTrue(fixture.session.saveDebounceTask?.isCancelled ?? true, "Unscoped identities must not spin a save retry loop")
+        }
+    }
+
+    func testRequiredSaveRejectsConflictingWriterWithoutLosingDirtyStateThenRetriesExactly() async throws {
+        try await withFixture(canonicalHost: true) { fixture in
+            let viewModel = fixture.window.agentModeViewModel
+            var writes = 0
+            viewModel.test_setAgentSessionSaver { payload, workspace, count in
+                writes += 1
+                return try await AgentSessionDataService.shared.saveAgentSession(
+                    payload, for: workspace, preparation: .alreadyCanonicalTranscript, trustedCanonicalItemCount: count
+                )
+            }
+            var competitorScope: AgentSessionRuntimeStore.Scope? = AgentSessionRuntimeStore.shared.makeScope()
+            let competitor = AgentTabSession(tabID: fixture.session.tabID)
+            competitor.installPersistentSessionBinding(.init(
+                tabID: competitor.tabID, sessionID: fixture.sessionID, workspaceID: fixture.workspaceID
+            ))
+            competitorScope?.replaceSessions([competitor.tabID: competitor])
+            fixture.session.isDirty = true
+            let refused = await viewModel.flushSaveRequired(for: fixture.session.tabID, workspaceID: fixture.workspaceID)
+            if case .success = refused { XCTFail("Conflicting identities must never authorize a durable write") }
+            XCTAssertEqual(writes, 0)
+            XCTAssertTrue(fixture.session.isDirty)
+            competitorScope = nil
+            try await viewModel.flushSaveRequired(for: fixture.session.tabID, workspaceID: fixture.workspaceID).get()
+            XCTAssertEqual(writes, 1)
+            XCTAssertFalse(fixture.session.isDirty)
+            let saved = try await fixture.savedSession()
+            XCTAssertEqual(saved?.id, fixture.sessionID)
+            XCTAssertEqual(saved?.workspaceID, fixture.workspaceID)
+        }
+    }
+
     func testUnopenedLaneModelAndEffortUseItsWriterDespiteEarlierWorkspaceReplica() async throws {
         for fullAccess in [true, false] {
             try await withFixture(fullAccess: fullAccess, canonicalHost: true) { fixture in
@@ -157,9 +294,13 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 peer.parentSessionID = fixture.session.parentSessionID
                 peer.createdByOverseerSessionID = fixture.session.createdByOverseerSessionID
                 peer.hasLoadedPersistedState = peerReady
-                _ = try XCTUnwrap(fixture.replica.agentModeViewModel.test_installPersistentSessionBinding(
+                XCTAssertEqual(fixture.replica.agentModeViewModel.test_bindingRejection(sessionID: fixture.sessionID, on: peer), .conflictingWriter)
+                XCTAssertNil(fixture.replica.agentModeViewModel.test_installPersistentSessionBinding(
                     sessionID: fixture.sessionID, on: peer
                 ))
+                XCTAssertNil(peer.persistentSessionBindingIdentity)
+                // This refusal scenario requires legacy corruption, not an admitted second writer.
+                peer.testInstallPersistentSessionBinding(sessionID: fixture.sessionID)
                 if peerReady { peer.recordRestorationAuthoritative(.persistedPayloadApplied) }
                 XCTAssertEqual(peer.permitsBoundOperationAndSave, peerReady)
                 XCTAssertTrue(try fixture.replica.agentModeViewModel.authoritativeLiveSession(for: fixture.sessionID) === peer)
@@ -167,6 +308,20 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 XCTAssertEqual(source.resolutionState(for: fixture.sessionID), .replicated)
                 XCTAssertEqual(source.provenance(for: fixture.sessionID)?.hasUniqueRuntimeOwner, false)
                 XCTAssertNil(SessionAdminWindows.runtimeOwner(for: fixture.sessionID))
+                let partialCapture = AgentSessionCarrierResolver.capture(
+                    windows: [fixture.window], sessionIDs: [fixture.sessionID], includeRuntimeOwners: true
+                )
+                XCTAssertEqual(
+                    partialCapture.runtimeWriterRejections[fixture.sessionID],
+                    .conflicting,
+                    "A narrower presentation census cannot hide a process-wide writer claim"
+                )
+                XCTAssertNotNil(partialCapture.bindingConflictDetail(for: fixture.sessionID))
+                XCTAssertNil(partialCapture.uniqueRuntimeOwners[fixture.sessionID])
+                XCTAssertNil(
+                    SessionAdminWindows.owningViewModel(for: fixture.sessionID),
+                    "Readable metadata must not provide a cold-mutation fallback around a writer conflict"
+                )
                 XCTAssertFalse(SessionAdminWindows.isCurrent(originalOwner), "A second bound object invalidates prior owner proof before it finishes loading")
                 let before = try fixture.git.runGit(["worktree", "list", "--porcelain"], at: fixture.repository)
                 let ownerSaveGeneration = fixture.session.saveRequestGeneration
@@ -194,6 +349,40 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 XCTAssertEqual(try fixture.git.runGit(["worktree", "list", "--porcelain"], at: fixture.repository), before)
                 fixture.assertForegroundUnchanged()
             }
+        }
+    }
+
+    func testUnscopedLiveBindingRequiresExplicitWorkspaceQualificationAndFreshHydration() async throws {
+        try await withFixture(canonicalHost: true) { fixture in
+            let vm = fixture.window.agentModeViewModel
+            let session = fixture.session
+            let workspaceID = try XCTUnwrap(session.persistentSessionBindingIdentity?.workspaceID)
+            session.installPersistentSessionBinding(.init(tabID: session.tabID, sessionID: fixture.sessionID))
+            session.recordRestorationAuthoritative(.persistedPayloadApplied)
+            session.hasLoadedPersistedState = true
+            let unscoped = try XCTUnwrap(session.currentRestorationBindingToken)
+            let capture = AgentSessionCarrierResolver.capture(
+                windows: [fixture.window], sessionIDs: [fixture.sessionID], includeRuntimeOwners: true
+            )
+            XCTAssertEqual(capture.runtimeWriterRejections[fixture.sessionID], .unavailable(.unscopedBinding))
+            XCTAssertNil(SessionAdminWindows.owningViewModel(for: fixture.sessionID))
+            // Runtime-only refresh cannot silently borrow the selected workspace.
+            XCTAssertEqual(vm.test_installPersistentSessionBinding(sessionID: fixture.sessionID, on: session), unscoped.bindingIdentity)
+            session.isDirty = true
+            XCTAssertNil(vm.test_installPersistentSessionBinding(
+                sessionID: fixture.sessionID, on: session, compareAndSetInWorkspaceID: workspaceID
+            ), "Qualification may not discard unsaved payload changes")
+            session.isDirty = false
+            let scoped = try XCTUnwrap(vm.test_installPersistentSessionBinding(
+                sessionID: fixture.sessionID, on: session, compareAndSetInWorkspaceID: workspaceID
+            ))
+            XCTAssertEqual(scoped.workspaceID, workspaceID)
+            XCTAssertNotEqual(scoped.generation, unscoped.bindingIdentity.generation)
+            XCTAssertFalse(session.hasLoadedPersistedState)
+            XCTAssertFalse(session.permitsBoundOperationAndSave, "The old workspace's readiness is not transferable")
+            XCTAssertNil(vm.test_installPersistentSessionBinding(
+                sessionID: fixture.sessionID, on: session, compareAndSetInWorkspaceID: UUID()
+            ), "A qualified binding cannot be silently redirected to another workspace")
         }
     }
 
@@ -410,8 +599,8 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
         }
     }
 
-    func testHeldResolutionAbortsWhenTargetBindingsOrDeclaredOrderChangeBeforeCommit() async throws {
-        for change in ["bindings", "declared_order"] {
+    func testHeldResolutionAbortsWhenTargetBindingsDeclaredOrderOrWriterIncarnationChangeBeforeCommit() async throws {
+        for change in ["bindings", "binding_metadata", "declared_order", "writer_incarnation"] {
             let hold = DiscoveryHold()
             let live = GitRepoTargetResolver.Dependencies.live
             let resolver = GitRepoTargetResolver(dependencies: .init(
@@ -424,6 +613,9 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
             try await withFixture(election: true, resolver: resolver) { fixture in
                 let repos = try XCTUnwrap(fixture.election)
                 let topicID = try fixture.worktreeID(repos.alphaTopic)
+                if change == "binding_metadata" {
+                    fixture.session.worktreeBindings = try [fixture.binding(logical: repos.alpha, worktree: repos.alphaPrime)]
+                }
                 await hold.arm()
                 let request = Task { @MainActor in
                     try await fixture.call([
@@ -435,16 +627,41 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 switch change {
                 case "bindings":
                     fixture.session.worktreeBindings = try [fixture.binding(logical: repos.beta, worktree: repos.betaPrime)]
+                case "binding_metadata":
+                    let fingerprint = AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(fixture.session.worktreeBindings)
+                    let previous = fixture.session.worktreeBindings[0]
+                    fixture.session.worktreeBindings = [.init(
+                        id: previous.id, repositoryID: previous.repositoryID, repoKey: previous.repoKey,
+                        logicalRootPath: previous.logicalRootPath, logicalRootName: previous.logicalRootName,
+                        worktreeID: previous.worktreeID, worktreeRootPath: previous.worktreeRootPath,
+                        commonGitDir: previous.commonGitDir, isMainWorktree: previous.isMainWorktree,
+                        worktreeName: previous.worktreeName, branch: previous.branch, head: previous.head,
+                        visualLabel: "Changed during discovery", visualColorHex: previous.visualColorHex,
+                        boundAt: previous.boundAt, source: previous.source
+                    )]
+                    XCTAssertEqual(AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(fixture.session.worktreeBindings), fingerprint)
+                case "writer_incarnation":
+                    let viewModel = fixture.window.agentModeViewModel
+                    let origin = try XCTUnwrap(viewModel.runtimeCommand(sessionID: fixture.sessionID))
+                    viewModel.test_removeSession(tabID: fixture.session.tabID)
+                    viewModel.test_installLiveSession(fixture.session)
+                    let successor = try XCTUnwrap(viewModel.runtimeCommand(sessionID: fixture.sessionID))
+                    XCTAssertNotEqual(origin.identity, successor.identity)
+                    XCTAssertFalse(origin.isCurrent)
+                    XCTAssertTrue(successor.isCurrent)
                 default:
                     let index = try XCTUnwrap(fixture.window.workspaceManager.workspaces.firstIndex { $0.id == fixture.workspaceID })
                     fixture.window.workspaceManager.workspaces[index].repoPaths = [repos.beta, repos.alpha, repos.gamma].map(\.path)
                 }
                 let expected = fixture.session.worktreeBindings
+                let persistedBefore = try await fixture.savedSession()?.worktreeBindings
                 await hold.release()
                 let reply = try await request.value
                 let item = try XCTUnwrap(reply["items"]?.arrayValue?.first?.objectValue, Self.json(reply))
                 XCTAssertEqual(item["code"], .string("scope_revoked"), "\(change): \(Self.json(reply))")
                 XCTAssertEqual(fixture.session.worktreeBindings, expected, change)
+                let persistedAfter = try await fixture.savedSession()?.worktreeBindings
+                XCTAssertEqual(persistedAfter, persistedBefore, "Discovery refusal must not save a successor: \(change)")
             }
         }
     }

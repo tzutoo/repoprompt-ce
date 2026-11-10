@@ -232,8 +232,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         session.selectedAgent = .devin
         let runtimePermission = AgentProviderRuntimePermissionBinding(acpLaunchPermissionMode: "smart")
 
-        let newRun = try XCTUnwrap(AgentModeRunService.makeACPRunRequest(
-            session: session,
+        let newRun = try XCTUnwrap(session.acpRunInput.makeRequest(
             workspacePath: "/tmp/workspace",
             attachments: [],
             runtimePermission: runtimePermission
@@ -242,8 +241,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertNil(newRun.resumeSessionID)
 
         session.providerSessionID = "devin-session"
-        let followUp = try XCTUnwrap(AgentModeRunService.makeACPRunRequest(
-            session: session,
+        let followUp = try XCTUnwrap(session.acpRunInput.makeRequest(
             workspacePath: "/tmp/workspace",
             attachments: [],
             runtimePermission: runtimePermission

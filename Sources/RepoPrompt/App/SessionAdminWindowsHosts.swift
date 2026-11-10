@@ -9,6 +9,43 @@ import RepoPromptWorkspaceCore
 /// session and to the existing owner of that state; nothing here authorizes.
 @MainActor
 enum SessionAdminWindows {
+    /// Carrier metadata can veto inconsistent identities, but cannot select or manufacture a writer.
+    static func command(for sessionID: UUID) throws -> AgentSessionRuntimeStore.Command? {
+        let carriers = AgentSessionCarrierResolver.capture(
+            windows: WindowStatesManager.shared.sessionRuntimeWindows, sessionIDs: [sessionID]
+        )
+        guard !carriers.ambiguousSessionIDs.contains(sessionID) else {
+            throw SessionAdminHostError.refused(code: "target_ambiguous", detail: "Conflicting target identities prevent mutation.", nextCall: nil)
+        }
+        switch AgentSessionRuntimeStore.shared.resolveWriter(sessionID: sessionID) {
+        case .unavailable(.absent): return nil
+        case .unavailable, .conflicting: throw SessionAdminHostError.sessionUnavailable
+        case let .unique(writer):
+            guard carriers.affectedWorkspaceIDs(for: sessionID).allSatisfy({ $0 == writer.identity.workspaceID }) else {
+                throw SessionAdminHostError.sessionUnavailable
+            }
+            return try writer.admitCommand().get()
+        }
+    }
+
+    /// Admission for commands that may use the existing targeted saved-session preparation.
+    /// Missing restoration is not permission to replace a creating, retiring or conflicting writer.
+    static func preparedCommand(
+        for sessionID: UUID, allowingPreparation: Bool
+    ) throws -> AgentSessionRuntimeStore.Command? {
+        do {
+            return try command(for: sessionID)
+        } catch let rejection as AgentSessionRuntimeStore.CommandRejection {
+            if allowingPreparation, rejection == .restorationUnavailable,
+               case let .unique(writer) = AgentSessionRuntimeStore.shared.resolveWriter(sessionID: sessionID),
+               writer.session.creationState == nil, !writer.session.hasLoadedPersistedState
+            {
+                return nil
+            }
+            throw SessionAdminHostError.sessionUnavailable
+        }
+    }
+
     static func runtimeOwner(for sessionID: UUID) -> AgentSessionCarrierResolver.RuntimeOwner? {
         AgentSessionCarrierResolver.capture(
             windows: WindowStatesManager.shared.sessionRuntimeWindows, sessionIDs: [sessionID], includeRuntimeOwners: true
@@ -24,7 +61,8 @@ enum SessionAdminWindows {
         let capture = AgentSessionCarrierResolver.capture(
             windows: WindowStatesManager.shared.sessionRuntimeWindows, sessionIDs: [sessionID], includeRuntimeOwners: true
         )
-        guard !capture.ambiguousSessionIDs.contains(sessionID) else { return nil }
+        guard !capture.ambiguousSessionIDs.contains(sessionID),
+              capture.runtimeWriterRejections[sessionID] == nil else { return nil }
         if let owner = capture.uniqueRuntimeOwners[sessionID] { return owner.location.window.agentModeViewModel }
         guard !capture.replicatedSessionIDs.contains(sessionID) else { return nil }
         return capture.uniqueLocations[sessionID]?.window.agentModeViewModel
@@ -148,15 +186,35 @@ final class SessionAdminWindowsStructureHost: SessionAdminStructureHost {
         }
     }
 
+    func prepareOrganizationalPlacement(
+        sessionID: UUID, isStillAuthorized: @escaping @MainActor () -> Bool
+    ) async throws -> SessionAdminPlacementPreparation {
+        let manager = WindowStatesManager.shared
+        manager.beginPreparedOversightPreparation(sessionID)
+        var transferred = false
+        defer { if !transferred { manager.endPreparedOversightPreparation(sessionID) } }
+        guard isStillAuthorized(), !Task.isCancelled else { throw SessionAdminHostError.authorityEnded }
+        if try SessionAdminWindows.command(for: sessionID) == nil {
+            guard let preparation else { throw SessionAdminHostError.sessionUnavailable }
+            let result = await preparation(sessionID, isStillAuthorized)
+            guard isStillAuthorized(), !Task.isCancelled else { throw SessionAdminHostError.authorityEnded }
+            guard result == .ready else { throw Self.preparationRefusal(result) }
+        }
+        guard try SessionAdminWindows.command(for: sessionID) != nil else { throw SessionAdminHostError.sessionUnavailable }
+        transferred = true
+        return SessionAdminPlacementPreparation { manager.endPreparedOversightPreparation(sessionID) }
+    }
+
     func commitOrganizationalPlacement(
         sessionID: UUID,
         parentID: UUID,
         delegationScopeID: UUID?
     ) throws -> DelegationPlacementCommit? {
-        guard let viewModel = SessionAdminWindows.owningViewModel(for: sessionID) else { return nil }
-        let scopeID = delegationScopeID ?? viewModel.ownerValidatedSessionIndex[sessionID]?.delegationScopeID
-        return try viewModel.commitDelegationPlacement(
-            sessionID: sessionID, organizationalParentID: parentID, delegationScopeID: scopeID
+        guard let command = try SessionAdminWindows.command(for: sessionID) else { return nil }
+        return try command.commitDelegationPlacement(
+            organizationalParentID: parentID,
+            delegationScopeID: delegationScopeID ?? command.writer.session.delegationScopeID,
+            project: WindowStatesManager.shared.projectDelegationPlacement
         )
     }
 
@@ -201,7 +259,9 @@ final class SessionAdminWindowsStructureHost: SessionAdminStructureHost {
         guard !owner.isClosing else { return .revoked }
         // Re-read after hydration: no captured endpoint, deletion state or ambiguity claim earns a link.
         let current = AgentSessionCarrierResolver.capture(windows: WindowStatesManager.shared.allWindows, sessionIDs: [target])
-        guard !current.ambiguousSessionIDs.contains(target), !current.replicatedSessionIDs.contains(target) else {
+        guard !current.ambiguousSessionIDs.contains(target),
+              (try? SessionAdminWindows.command(for: target)) != nil
+        else {
             return .failed("target_ambiguous: Target ownership changed during preparation. Use session_admin inventory; nothing was linked.")
         }
         let candidates = WindowStatesManager.shared.agentSessionLinkCandidates(
@@ -270,18 +330,17 @@ final class SessionAdminWindowsStructureHost: SessionAdminStructureHost {
     ) async -> SessionAdminLifecycleOutcome {
         if let refusal = await prepareIfUnloaded(sessionID, isStillAuthorized: isStillAuthorized) { return refusal }
         let windows = WindowStatesManager.shared
-        guard let owner = SessionAdminWindows.runtimeOwner(for: sessionID),
-              let candidate = windows.agentSessionLinkCandidates(forSessionIDs: [sessionID], includeLocation: false)[sessionID]?.only,
-              candidate.windowID == owner.location.window.windowID,
-              let modelCandidate = windows.agentSessionLinkModelCandidate(for: candidate.domainEndpoint)
+        guard let command = try? SessionAdminWindows.command(for: sessionID),
+              let runtime = command.writer.scope.linkExecution,
+              let endpoint = runtime.agentSessionLinkObserverEndpoint(tabID: command.writer.session.tabID),
+              let modelCandidate = runtime.agentSessionLinkModelCandidate(for: endpoint)
         else { return .blocked("The target session is not live.") }
-        let endpoint = candidate.domainEndpoint
         // Same commit seam as `agent_session_link set_model`; the scope lease is the final fence.
         let outcome = await windows.agentSessionLinkPerformSetModel(
             to: modelCandidate,
             modelID: modelID,
             liveness: {
-                let live = SessionAdminWindows.isCurrent(owner) && windows.agentSessionLinkModelCandidate(for: endpoint) != nil
+                let live = command.isCurrent && runtime.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
                 return AgentSessionLinkSendLiveness(
                     observerEndpointIsLive: isStillAuthorized(), targetEndpointIsLive: live, targetWindowIsClosing: false
                 )
@@ -308,12 +367,13 @@ final class SessionAdminWindowsStructureHost: SessionAdminStructureHost {
         isStillAuthorized: @escaping @MainActor () -> Bool
     ) async -> SessionAdminLifecycleOutcome {
         if let refusal = await prepareIfUnloaded(sessionID, isStillAuthorized: isStillAuthorized) { return refusal }
-        guard let owner = SessionAdminWindows.runtimeOwner(for: sessionID) else {
+        guard let command = try? SessionAdminWindows.command(for: sessionID),
+              let runtime = command.writer.scope.linkExecution
+        else {
             return .blocked("The target session is not live.")
         }
-        return owner.location.window.agentModeViewModel.delegationSetReasoningEffort(
-            sessionID: sessionID, effort: effort,
-            isStillAuthorized: { isStillAuthorized() && SessionAdminWindows.isCurrent(owner) }
+        return runtime.delegationSetReasoningEffort(
+            command: command, effort: effort, isStillAuthorized: isStillAuthorized
         )
     }
 
@@ -322,17 +382,21 @@ final class SessionAdminWindowsStructureHost: SessionAdminStructureHost {
     ) async throws -> UUID {
         // A saved or never-visited source is prepared the same way targeted oversight prepares
         // one: point read, no tab focus, no provider run. Authority is re-checked throughout.
-        if SessionAdminWindows.liveSession(sessionID) == nil, let preparation {
+        let manager = WindowStatesManager.shared
+        manager.beginPreparedOversightPreparation(sessionID)
+        defer { manager.endPreparedOversightPreparation(sessionID) }
+        guard isStillAuthorized(), !Task.isCancelled else { throw SessionAdminHostError.authorityEnded }
+        if try SessionAdminWindows.preparedCommand(for: sessionID, allowingPreparation: true) == nil, let preparation {
             let outcome = await preparation(sessionID, isStillAuthorized)
             guard isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
             guard outcome == .ready else { throw Self.preparationRefusal(outcome) }
         }
         guard isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
-        guard let viewModel = SessionAdminWindows.owningViewModel(for: sessionID) else {
+        guard let command = try SessionAdminWindows.preparedCommand(for: sessionID, allowingPreparation: false) else {
             throw SessionAdminHostError.sessionUnavailable
         }
-        return try await viewModel.delegationFork(
-            sessionID: sessionID, upToItemID: upToItemID, isStillAuthorized: isStillAuthorized
+        return try await command.writer.scope.administration.fork(
+            command: command, upToItemID: upToItemID, isStillAuthorized: isStillAuthorized
         )
     }
 }
@@ -357,9 +421,16 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
     /// Capture elects nothing and requires no hydrated bindings: merge apply needs only its admission roots.
     @MainActor
     private struct TargetCapture {
-        let owner: AgentSessionCarrierResolver.RuntimeOwner
-        let workspaceID: UUID
-        let repoPaths: [String]
+        let command: AgentSessionRuntimeStore.Command
+        let resources: AgentSessionWorktreeRuntime.Resources
+        var workspaceID: UUID {
+            command.identity.workspaceID
+        }
+
+        var repoPaths: [String] {
+            resources.declaredRepoPaths
+        }
+
         /// Canonical (logical) roots of the target's workspace.
         let roots: [WorkspaceRootRef]
         /// Repositories resolved from exactly those roots, deduplicated by checkout path.
@@ -368,30 +439,26 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         /// Read synchronously with placement, so a binding change during discovery is detected.
         let bindingSource: AgentWorkspaceLookupContextSource
 
-        var viewModel: AgentModeViewModel {
-            owner.location.window.agentModeViewModel
-        }
-
         var session: AgentTabSession {
-            owner.session
+            command.writer.session
         }
 
         /// Runtime owner, workspace, and declared root order (PRIMARY moves on reorder).
         var isPlacementCurrent: Bool {
-            SessionAdminWindows.isCurrent(owner)
-                && viewModel.workspaceManager?.activeWorkspace?.id == workspaceID
-                && viewModel.workspaceManager?.activeWorkspace?.repoPaths == repoPaths
+            command.isCurrent && resources.isCurrent()
         }
 
         /// The target's hydration and binding set still match the capture.
         var isBindingCurrent: Bool {
-            Self.bindingSource(viewModel, sessionID: owner.location.sessionID).identity == bindingSource.identity
+            Self.bindingSource(command) == bindingSource
         }
 
-        static func bindingSource(_ viewModel: AgentModeViewModel, sessionID: UUID) -> AgentWorkspaceLookupContextSource {
+        /// Only restored commands enter the host; hydration is established by canonical admission,
+        /// not inferred from a presenting view model's session or index cache.
+        static func bindingSource(_ command: AgentSessionRuntimeStore.Command) -> AgentWorkspaceLookupContextSource {
             AgentWorkspaceLookupContextSource(
-                activeAgentSessionID: sessionID,
-                worktreeBindingState: viewModel.worktreeBindingState(forAgentSessionID: sessionID)
+                activeAgentSessionID: command.identity.sessionID,
+                worktreeBindingState: .hydrated(command.writer.session.worktreeBindings)
             )
         }
     }
@@ -420,54 +487,66 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
 
     /// A saved or never-visited target is prepared (no tab focus, no provider run) before an
     /// on-behalf worktree change, instead of being refused as unavailable.
-    private func prepareIfUnloaded(_ sessionID: UUID, isStillAuthorized: @escaping @MainActor () -> Bool) async throws {
-        guard SessionAdminWindows.liveSession(sessionID) == nil else { return }
+    private func preparedCommand(
+        _ sessionID: UUID, isStillAuthorized: @escaping @MainActor () -> Bool
+    ) async throws -> AgentSessionRuntimeStore.Command {
+        guard isStillAuthorized(), !Task.isCancelled else { throw SessionAdminHostError.authorityEnded }
+        if let command = try SessionAdminWindows.preparedCommand(for: sessionID, allowingPreparation: true) {
+            return command
+        }
         let outcome = await SessionAdminWindowsStructureHost.savedTargetPreparation(sessionID, isStillAuthorized)
-        guard isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
+        guard isStillAuthorized(), !Task.isCancelled else { throw SessionAdminHostError.authorityEnded }
         guard outcome == .ready else { throw SessionAdminWindowsStructureHost.preparationRefusal(outcome) }
+        guard let command = try SessionAdminWindows.preparedCommand(for: sessionID, allowingPreparation: false) else {
+            throw SessionAdminHostError.sessionUnavailable
+        }
+        return command
     }
 
     /// Roots and repositories come from the target's own workspace, never the caller's routing.
-    private func captureTarget(_ sessionID: UUID) async throws -> TargetCapture {
-        guard let owner = SessionAdminWindows.runtimeOwner(for: sessionID) else {
-            throw SessionAdminHostError.sessionUnavailable
-        }
-        let viewModel = owner.location.window.agentModeViewModel
-        guard let workspace = viewModel.workspaceManager?.activeWorkspace,
-              let store = viewModel.promptManager?.workspaceFileContextStore
+    private func captureTarget(_ command: AgentSessionRuntimeStore.Command) async throws -> TargetCapture {
+        guard command.isCurrent,
+              let resources = command.writer.scope.worktrees.captureResources?(command), resources.isCurrent(),
+              let store = resources.store
         else { throw SessionAdminHostError.sessionUnavailable }
-        let bindingSource = TargetCapture.bindingSource(viewModel, sessionID: sessionID)
+        let bindingSource = TargetCapture.bindingSource(command)
+        func requireCurrent() throws {
+            try Task.checkCancellation()
+            guard command.isCurrent, resources.isCurrent(),
+                  TargetCapture.bindingSource(command) == bindingSource
+            else { throw SessionAdminHostError.authorityEnded }
+        }
         let roots = await store.rootRefs(scope: .visibleWorkspace)
+        try requireCurrent()
         var repos: [GitRepoDescriptor] = []
         var repoByRootPath: [String: GitRepoDescriptor] = [:]
         var seen: Set<String> = []
         for root in roots {
+            try requireCurrent()
             if let resolved = await vcsService.resolveRepo(from: URL(fileURLWithPath: root.standardizedFullPath)) {
+                try requireCurrent()
                 let descriptor = GitRepoDescriptor(rootURL: resolved.rootURL)
                 repoByRootPath[root.standardizedFullPath] = descriptor
                 if seen.insert(descriptor.rootPath.lowercased()).inserted { repos.append(descriptor) }
             }
         }
         let capture = TargetCapture(
-            owner: owner, workspaceID: workspace.id, repoPaths: workspace.repoPaths,
+            command: command, resources: resources,
             roots: roots, repos: repos, repoByRootPath: repoByRootPath, bindingSource: bindingSource
         )
-        guard capture.isPlacementCurrent else { throw SessionAdminHostError.authorityEnded }
+        try requireCurrent()
         return capture
     }
 
     /// Create/bind require the target's authoritative, hydrated bindings and their validated projection
     /// (`requiredLookupContext`), even when the selector is explicit; only default election is optional.
-    private func resolveTargetAuthority(_ sessionID: UUID) async throws -> TargetAuthority {
-        let capture = try await captureTarget(sessionID)
+    private func resolveTargetAuthority(_ command: AgentSessionRuntimeStore.Command) async throws -> TargetAuthority {
+        let capture = try await captureTarget(command)
         guard !capture.repos.isEmpty else {
             throw SessionAdminHostError.invalid("The target session's workspace has no Git repository.")
         }
-        guard capture.session.permitsBoundOperationAndSave else { throw SessionAdminHostError.sessionUnavailable }
-        guard case let .hydrated(bindings) = capture.bindingSource.worktreeBindingState else {
-            throw SessionAdminHostError.invalid(WorkspaceLookupContextResolutionError.unknownBindingState.localizedDescription)
-        }
-        guard let store = capture.viewModel.promptManager?.workspaceFileContextStore else {
+        let bindings = capture.session.worktreeBindings
+        guard let store = capture.resources.store else {
             throw SessionAdminHostError.sessionUnavailable
         }
         let lookupContext: WorkspaceLookupContext
@@ -633,14 +712,17 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         baseRef: String?,
         isStillAuthorized: @escaping @MainActor () -> Bool
     ) async throws -> SessionAdminWorktreeInfo {
-        try await prepareIfUnloaded(sessionID, isStillAuthorized: isStillAuthorized)
-        let authority = try await resolveTargetAuthority(sessionID)
+        let manager = WindowStatesManager.shared
+        manager.beginPreparedOversightPreparation(sessionID)
+        defer { manager.endPreparedOversightPreparation(sessionID) }
+        let command = try await preparedCommand(sessionID, isStillAuthorized: isStillAuthorized)
+        let authority = try await resolveTargetAuthority(command)
         let capture = authority.capture
         let target = try await resolveRepository(repoRoot, authority: authority)
         // Placement and the target's bindings must hold until the Git commit fence. A committed worktree is
         // returned even if authority changes afterwards, so the handler can record its ownership.
         let authorize: @MainActor () throws -> Void = {
-            guard isStillAuthorized(), authority.isCurrent
+            guard !Task.isCancelled, isStillAuthorized(), authority.isCurrent
             else { throw SessionAdminHostError.authorityEnded }
         }
         try authorize()
@@ -769,10 +851,13 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         admitBindings: @escaping @MainActor (Set<String>) throws -> Void,
         bindingsCommitted: @escaping @MainActor (Set<String>) -> Void
     ) async throws -> SessionAdminWorktreeInfo {
-        try await prepareIfUnloaded(sessionID, isStillAuthorized: isStillAuthorized)
-        let authority = try await resolveTargetAuthority(sessionID)
+        let manager = WindowStatesManager.shared
+        manager.beginPreparedOversightPreparation(sessionID)
+        defer { manager.endPreparedOversightPreparation(sessionID) }
+        let command = try await preparedCommand(sessionID, isStillAuthorized: isStillAuthorized)
+        let authority = try await resolveTargetAuthority(command)
         let capture = authority.capture
-        guard isIdle(capture.viewModel, capture.session) else { throw SessionAdminHostError.notIdle }
+        guard isIdle(capture.session) else { throw SessionAdminHostError.notIdle }
         let repository: TargetRepository? = if let repoRoot {
             try await resolveRepository(repoRoot, authority: authority)
         } else {
@@ -780,7 +865,7 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         }
         let (worktree, target) = try await resolveWorktree(selector, repository: repository, authority: authority)
         let logicalRoot = try target.logicalRoot ?? logicalRoot(for: target.repo, in: capture)
-        guard isStillAuthorized(), authority.isCurrent else { throw SessionAdminHostError.authorityEnded }
+        guard !Task.isCancelled, isStillAuthorized(), authority.isCurrent else { throw SessionAdminHostError.authorityEnded }
         // Desired bindings come from the validated, hydrated capture, preserving unrelated rows.
         let existing = authority.bindings
         let normalizedRoot = GitRepoRootAuthorization.canonicalPath(logicalRoot.standardizedFullPath)
@@ -812,14 +897,14 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         // The transition's exact no-op path has no beforeCommit callback. A released ownership row
         // may still be reactivated by that bind, so even this path receives identity admission.
         if existing == desired {
-            guard isStillAuthorized(), authority.isCurrent else { throw SessionAdminHostError.authorityEnded }
+            guard !Task.isCancelled, isStillAuthorized(), authority.isCurrent else { throw SessionAdminHostError.authorityEnded }
             try admit()
             committed()
         }
         // Placement and target bindings are re-checked at entry and at `beforeCommit`; the transition's own
         // publication afterwards never counts as supersession.
         try await transition(
-            desired, owner: capture.owner,
+            desired, command: capture.command,
             isStillAuthorized: { isStillAuthorized() && authority.isCurrent },
             admitBindings: admit, bindingsCommitted: committed
         )
@@ -839,38 +924,37 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         isStillAuthorized: @escaping @MainActor () -> Bool,
         bindingsRemoved: @escaping @MainActor (Set<String>) -> Void
     ) async throws -> [String] {
-        guard let owner = SessionAdminWindows.runtimeOwner(for: sessionID) else {
-            throw SessionAdminHostError.sessionUnavailable
-        }
+        let manager = WindowStatesManager.shared
+        manager.beginPreparedOversightPreparation(sessionID)
+        defer { manager.endPreparedOversightPreparation(sessionID) }
+        let command = try await preparedCommand(sessionID, isStillAuthorized: isStillAuthorized)
         return try await unbindWorktrees(
-            sessionID: sessionID, worktreeID: worktreeID,
-            viewModel: owner.location.window.agentModeViewModel, session: owner.session,
-            isStillAuthorized: { isStillAuthorized() && SessionAdminWindows.isCurrent(owner) },
-            bindingsRemoved: bindingsRemoved
+            command: command, worktreeID: worktreeID,
+            isStillAuthorized: isStillAuthorized, bindingsRemoved: bindingsRemoved
         )
     }
 
-    /// Shared production unbind seam over an exact view model and live session.
+    /// Shared production unbind seam over the original admitted writer.
     func unbindWorktrees(
-        sessionID: UUID,
+        command: AgentSessionRuntimeStore.Command,
         worktreeID: String?,
-        viewModel: AgentModeViewModel,
-        session: AgentTabSession,
         isStillAuthorized: @escaping @MainActor () -> Bool,
         bindingsRemoved: @escaping @MainActor (Set<String>) -> Void
     ) async throws -> [String] {
-        let repoPaths = viewModel.workspaceManager?.activeWorkspace?.repoPaths
-        let existing = viewModel.worktreeBindings(forAgentSessionID: sessionID)
+        guard !Task.isCancelled, command.isCurrent, isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
+        let session = command.writer.session
+        let existing = session.worktreeBindings
         let removed = existing.filter { worktreeID == nil || $0.worktreeID == worktreeID }
         guard !removed.isEmpty else { return [] }
-        guard isIdle(viewModel, session) else { throw SessionAdminHostError.notIdle }
+        guard let resources = command.writer.scope.worktrees.captureResources?(command), resources.isCurrent() else {
+            throw SessionAdminHostError.sessionUnavailable
+        }
+        guard isIdle(session) else { throw SessionAdminHostError.notIdle }
         let remaining = existing.filter { worktreeID != nil && $0.worktreeID != worktreeID }
         let removedIDs = Set(removed.map(\.worktreeID))
         try await transition(
-            remaining, sessionID: sessionID, viewModel: viewModel,
-            isStillAuthorized: {
-                isStillAuthorized() && viewModel.workspaceManager?.activeWorkspace?.repoPaths == repoPaths
-            },
+            remaining, command: command,
+            isStillAuthorized: { isStillAuthorized() && resources.isCurrent() },
             // Publication, not the later required save, is the commit point for the removal.
             bindingsCommitted: { bindingsRemoved(removedIDs) }
         )
@@ -880,34 +964,19 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
     /// Scope authority stays live through every preparation/retirement suspension, including root
     /// ownership installation, until the binding is published. Admission still runs once, at the
     /// original pre-commit fence; post-publication persistence does not reauthorize a committed bind.
-    private func transition(
-        _ desired: [AgentSessionWorktreeBinding],
-        owner: AgentSessionCarrierResolver.RuntimeOwner,
-        isStillAuthorized: @escaping @MainActor () -> Bool,
-        admitBindings: @escaping @MainActor () throws -> Void = {},
-        bindingsCommitted: @escaping @MainActor () -> Void = {}
-    ) async throws {
-        try await transition(
-            desired, sessionID: owner.location.sessionID, viewModel: owner.location.window.agentModeViewModel,
-            isStillAuthorized: { isStillAuthorized() && SessionAdminWindows.isCurrent(owner) },
-            admitBindings: admitBindings, bindingsCommitted: bindingsCommitted
-        )
-    }
-
-    /// Shared production transition seam: scope and exact carrier checks remain one live predicate.
+    /// Shared production transition seam: consent is composed with the same writer capability.
     func transition(
         _ desired: [AgentSessionWorktreeBinding],
-        sessionID: UUID,
-        viewModel: AgentModeViewModel,
+        command: AgentSessionRuntimeStore.Command,
         isStillAuthorized: @escaping @MainActor () -> Bool,
         admitBindings: @escaping @MainActor () throws -> Void = {},
         bindingsCommitted: @escaping @MainActor () -> Void = {}
     ) async throws {
-        guard isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
+        guard !Task.isCancelled, command.isCurrent, isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
         var published = false
         do {
-            _ = try await viewModel.transitionWorktreeBindings(
-                desired, forSessionID: sessionID, intent: .externalManagement,
+            _ = try await command.writer.scope.worktrees.transition(
+                desired, command: command, intent: .externalManagement,
                 beforeCommit: {
                     guard isStillAuthorized() else { throw SessionAdminHostError.authorityEnded }
                     try admitBindings()
@@ -926,11 +995,14 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
             )
         } catch SessionAdminHostError.authorityEnded {
             throw SessionAdminHostError.authorityEnded
+        } catch let partial as AgentSessionWorktreeRuntime.PartialTransition {
+            // Never rewrite an already-retired provider or published binding as pre-effect busy.
+            throw partial
         } catch {
             // A run that started during preparation refuses the transition; that is "not idle".
             // After publication the change is committed: a run that starts while the required save
             // awaits must not turn a completion failure into a retryable pre-commit refusal.
-            if !published, let session = try? viewModel.authoritativeLiveSession(for: sessionID), !isIdle(viewModel, session) {
+            if !published, command.isCurrent, !isIdle(command.writer.session) {
                 throw SessionAdminHostError.notIdle
             }
             throw error
@@ -946,22 +1018,23 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
     }
 
     func isIdleForWorktreeTransition(sessionID: UUID) -> Bool {
-        guard let (viewModel, session) = SessionAdminWindows.liveSession(sessionID) else { return false }
-        return isIdle(viewModel, session)
+        guard let command = try? SessionAdminWindows.command(for: sessionID) else { return false }
+        return isIdle(command.writer.session)
     }
 
-    private func isIdle(_ viewModel: AgentModeViewModel, _ session: AgentTabSession) -> Bool {
-        (try? viewModel.requireIdleWorktreeBindingTransition(session)) != nil
+    private func isIdle(_ session: AgentTabSession) -> Bool {
+        (try? AgentSessionWorktreeRuntime.requireIdle(session)) != nil
     }
 
     /// Observation only: samples the exact gate the binding transition uses until it would admit,
     /// the session disappears, or the bounded wait elapses. It never touches session state.
     func waitForIdleBoundary(sessionID: UUID) async {
+        guard let command = try? SessionAdminWindows.command(for: sessionID) else { return }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: Self.maxIdleWait)
         while clock.now < deadline, !Task.isCancelled {
-            guard let (viewModel, session) = SessionAdminWindows.liveSession(sessionID) else { return }
-            if isIdle(viewModel, session) { return }
+            guard command.isCurrent else { return }
+            if isIdle(command.writer.session) { return }
             try? await Task.sleep(for: Self.idlePollInterval)
         }
     }
@@ -1024,7 +1097,10 @@ final class SessionAdminWindowsWorktreeHost: SessionAdminWorktreeHost {
         // their repositories, as `createWorktree` does; the user still decides in the review prompt.
         // Capture only: the saved operation owns its endpoints, so no default repository is elected.
         let operation = try viewModel.statusWorktreeMerge(sessionID: sessionID, operationID: operationID)
-        let capture = try await captureTarget(sessionID)
+        guard let command = try SessionAdminWindows.preparedCommand(for: sessionID, allowingPreparation: false) else {
+            throw SessionAdminHostError.sessionUnavailable
+        }
+        let capture = try await captureTarget(command)
         guard !capture.repos.isEmpty else {
             throw SessionAdminHostError.invalid("The target session's workspace has no Git repository.")
         }

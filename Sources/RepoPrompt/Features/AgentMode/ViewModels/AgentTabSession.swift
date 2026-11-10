@@ -243,7 +243,7 @@ final class AgentTabSession: ObservableObject {
     private var toolCorrelationIndexes = ToolCorrelationIndexes()
     private var nextEphemeralToolResultPayloadRevision: Int = 1
     var rawToolResultPayloadRenderRevisionByItemID: [UUID: Int] = [:]
-    var onSourceItemsChanged: ((AgentTabSession, AgentModeViewModel.SourceItemsMutation) -> Void)?
+    var onSourceItemsChanged: ((AgentTabSession, AgentSourceItemsMutation) -> Void)?
     var onRunStateChanged: ((AgentTabSession) -> Void)?
     /// Activation went set → cleared/replaced. Fired synchronously from `oversight.didSet`; never
     /// for nil → nil or nil → set.
@@ -387,8 +387,11 @@ final class AgentTabSession: ObservableObject {
         }
     }
 
+    /// A direct setter takes over the gate; an old runtime lease may only clear its own token.
+    var executionLocationChangeOwner: UUID?
     var isChangingExecutionLocation: Bool = false {
         didSet {
+            executionLocationChangeOwner = nil
             if oldValue != isChangingExecutionLocation {
                 noteMonitorObservationInputsChanged()
             }
@@ -400,7 +403,10 @@ final class AgentTabSession: ObservableObject {
     /// unbound state; Handoff performs the destination's first save explicitly afterwards.
     var isInstallingHandoffWorktreeBindings = false
 
-    var worktreeBindingTransitionInProgress: Bool = false
+    var worktreeBindingTransitionOwner: UUID?
+    var worktreeBindingTransitionInProgress: Bool = false {
+        didSet { worktreeBindingTransitionOwner = nil }
+    }
 
     /// Runtime-only: an execution-worktree change this session requested for itself from its own
     /// live turn, applied at that turn's completed terminal boundary and then continued
@@ -540,11 +546,10 @@ final class AgentTabSession: ObservableObject {
 
     var applyEditsApprovalSubscriptionID: UUID?
     var applyEditsApprovalSubscriptionTask: Task<Void, Never>?
-    var worktreeMergeReviewContinuation: CheckedContinuation<WorktreeMergeReviewDecision, Never>?
-    var worktreeMergeReviewTimeoutTask: Task<Void, Never>?
+    var worktreeMergeReviewWait: AgentWorktreeMergeReviewWait?
     /// External MCP control attachment. Its presence and effective task label determine whether this
     /// exact session may act as an oversight observer.
-    var mcpControlContext: AgentModeViewModel.AgentMCPControlContext? {
+    var mcpControlContext: AgentMCPControlContext? {
         didSet {
             if mcpControlContext != nil { oversight.overseerActivation = nil }
             guard oldValue?.taskLabelKind != mcpControlContext?.taskLabelKind
@@ -571,8 +576,11 @@ final class AgentTabSession: ObservableObject {
     }
 
     var mcpFollowUpRunPendingUpdatedAt: Date?
+    /// The self-relocation lease only. Any direct setter transfers ownership away from old cleanup.
+    var selfWorktreeRelocationFollowUpOwner: UUID?
     var mcpFollowUpRunPending: Bool = false {
         didSet {
+            selfWorktreeRelocationFollowUpOwner = nil
             if oldValue != mcpFollowUpRunPending {
                 mcpFollowUpRunPendingUpdatedAt = Date()
                 noteMonitorObservationInputsChanged()
@@ -848,12 +856,22 @@ final class AgentTabSession: ObservableObject {
     }
 
     /// Instruction steering coordination state
-    var instructionContinuation: CheckedContinuation<UserInstructionResponse, Error>? {
+    var instructionWait: AgentInstructionWait? {
         didSet { noteMonitorObservationInputsChanged() }
     }
 
-    var instructionTimeoutTask: Task<Void, Never>?
-    var instructionWaitID: UUID?
+    /// Read-only projections; installation, consumption and cleanup own the exact wait record.
+    var instructionContinuation: CheckedContinuation<UserInstructionResponse, Error>? {
+        instructionWait?.continuation
+    }
+
+    var instructionTimeoutTask: Task<Void, Never>? {
+        instructionWait?.timeoutTask
+    }
+
+    var instructionWaitID: UUID? {
+        instructionWait?.id
+    }
 
     /// Agent run — transient run-attempt lifecycle/settlement state is owned by
     /// the extracted `AgentRunAttemptLifecycle` facade. Run identity is
@@ -977,6 +995,17 @@ final class AgentTabSession: ObservableObject {
         selectedAgent.usesClaudeTooling ? selectedClaudeEffortRaw : selectedReasoningEffortRaw
     }
 
+    /// Capture provider request values at dispatch, without exporting this mutable host object.
+    var acpRunInput: AgentACPRunInput {
+        AgentACPRunInput(
+            agent: selectedAgent,
+            selectedModelRaw: selectedModelRaw,
+            providerSessionID: providerSessionID,
+            taskLabelKind: mcpControlContext?.taskLabelKind,
+            modelParameterSelections: acpModelParameterSelections
+        )
+    }
+
     private var acpModelParameterSelectionRevisionByIdentity: [ACPModelParameterIdentity: UInt64] = [:]
     private var nextACPModelParameterSelectionRevision: UInt64 = 0
     var acpModelParameterSelections: [ACPModelParameterSelection] = [] {
@@ -1044,7 +1073,10 @@ final class AgentTabSession: ObservableObject {
     var attachmentTurnState: AgentModeViewModel.AttachmentTurnState = .idle
     /// `AgentSessions/attachments` of the workspace this turn was sent from, captured when its
     /// images are reserved so a mid-turn workspace switch cannot retain them elsewhere.
-    var attachmentRetentionRoot: URL?
+    var attachmentRetentionPlacement: AgentSessionAttachmentPlacement?
+    var attachmentRetentionRoot: URL? {
+        attachmentRetentionPlacement?.location.retainedRoot
+    }
 
     /// Provider session ID for resumption (e.g., Claude CLI session_id)
     var providerSessionID: String?
@@ -1174,7 +1206,10 @@ final class AgentTabSession: ObservableObject {
     var contextCompactedAt: Date? {
         didSet {
             // A compaction invalidates the count; the window is unchanged.
-            if contextCompactedAt != oldValue { vouchedContextCount = nil }
+            if contextCompactedAt != oldValue {
+                vouchedContextCount = nil
+                oracleBackgroundAwareness.resetContext()
+            }
         }
     }
 
@@ -1434,6 +1469,20 @@ final class AgentTabSession: ObservableObject {
     ///
     /// Never persisted: it describes a live process-local controller generation.
     var codexSessionLinkCatalogRepairCycle: AgentSessionLinkCodexCatalogRepair.Cycle?
+    /// Retained across controller replacements, but not persisted across cold restoration.
+    var codexContextWindowSelection: CodexContextWindowPreferences.Selection?
+
+    func clearCodexConversationIdentity() {
+        codexConversationID = nil
+        codexContextWindowSelection = nil
+    }
+
+    func codexContextWindowForBinding(current: CodexContextWindowPreferences.Selection) -> CodexContextWindowPreferences.Selection {
+        if let selection = codexContextWindowSelection { return selection }
+        codexContextWindowSelection = current
+        return current
+    }
+
     /// The permission profile the current Codex controller was created with.
     /// Used to detect when MCP control changes require controller recycling.
     var codexControllerPermissionProfile: AgentModeViewModel.AgentPermissionProfile?
@@ -1463,6 +1512,8 @@ final class AgentTabSession: ObservableObject {
 
     var claudeController: (any NativeAgentRuntimeControlling)?
     var acpController: ACPAgentSessionController?
+    /// Retained input, not liveness: use only with its exact ownership and restoration binding.
+    var acpWorkspaceAdmission: AgentACPWorkspaceAdmission?
 
     var codexEventTask: Task<Void, Never>?
     var codexEventTaskRunID: UUID?
@@ -1506,8 +1557,10 @@ final class AgentTabSession: ObservableObject {
 
     /// Handoff payload (injected into provider-facing text on first user send).
     /// Cleared only after the provider accepts the turn.
-    var pendingHandoff: AgentModeViewModel.PendingHandoffState = .init() {
+    private(set) var pendingHandoffRevision: UInt64 = 0
+    var pendingHandoff: AgentPendingHandoffState = .init() {
         didSet {
+            if oldValue != pendingHandoff { pendingHandoffRevision &+= 1 }
             if oldValue.executionLocationFailure != pendingHandoff.executionLocationFailure
                 || oldValue.providerSwitchDelivery != pendingHandoff.providerSwitchDelivery
                 || oldValue.providerSwitchDispatch != pendingHandoff.providerSwitchDispatch
@@ -1524,10 +1577,21 @@ final class AgentTabSession: ObservableObject {
     var selfCompactState = AgentSelfCompactState() {
         didSet {
             if oldValue != selfCompactState { isDirty = true }
+            // Only correlated native/ACP completion enters the verified note boundary.
+            if let active = selfCompactState.active, active.phase == .awaitingNoteBoundary,
+               active.compactTurnSucceeded == true, active.acpCompletionUnverified != true
+            {
+                selfCompactVerifiedWakeRequestID = active.id
+            }
+            if selfCompactState.active?.id != selfCompactVerifiedWakeRequestID {
+                selfCompactVerifiedWakeRequestID = nil
+            }
             noteMonitorObservationInputsChanged()
         }
     }
 
+    /// Runtime evidence from the correlated completion coordinator, never restored as authority.
+    var selfCompactVerifiedWakeRequestID: UUID?
     var selfCompactPersistenceWarning = false
 
     /// Runtime-only fence: a same-key MCP retry cannot claim a scheduled receipt until the
@@ -1537,10 +1601,12 @@ final class AgentTabSession: ObservableObject {
     /// Runtime-only owner/exclusivity fence, rechecked at provider-bound send seams after startup awaits.
     /// A restored attempt has no executable fence and cannot resume dispatch.
     var selfCompactDispatchIsCurrent: (@MainActor () -> Bool)?
+    /// Notes need the same ownership proof, but not the expired compact-start deadline.
+    var selfCompactNoteOwnerIsCurrent: (@MainActor () -> Bool)?
 
     @MainActor
     func selfCompactNoteDispatchIsCurrent(_ dispatchID: AgentSelfCompactionDispatchID) -> Bool {
-        guard selfCompactDispatchIsCurrent?() != false else {
+        guard (selfCompactNoteOwnerIsCurrent ?? selfCompactDispatchIsCurrent)?() != false else {
             selfCompactNativeCompletion?.cancelUnattemptedNoteIfOwnerLost(dispatchID)
             return false
         }
@@ -1562,9 +1628,13 @@ final class AgentTabSession: ObservableObject {
         hasSentFirstMessage && !pendingHandoff.defersProviderLockUntilSend
     }
 
-    // Persistence
-    /// Synchronous derived-index maintenance for the window owning this live object.
+    /// Persistence
+    /// Synchronous derived-index maintenance for the runtime store owning this live object.
     var persistentSessionBindingDidChange: (() -> Void)?
+    /// Process-local Oracle lifetime is independent of run attempts and parent provider teardown.
+    var oracleBackgroundOwner: OracleBackgroundInvocationRegistry.Owner?
+    var oracleBackgroundDrain: Task<Void, Never>?
+    var oracleBackgroundAwareness = OracleBackgroundAwareness()
     private(set) var persistentSessionBindingIdentity: AgentPersistentSessionBindingIdentity?
     var activeAgentSessionID: UUID? {
         persistentSessionBindingIdentity?.sessionID
@@ -1636,6 +1706,8 @@ final class AgentTabSession: ObservableObject {
     var lastUserMessageAt: Date?
     var lastCommandOutputSaveAt: Date?
     var saveDebounceTask: Task<Void, Never>?
+    /// Identifies a pending timer independently of the payload/save revision.
+    var saveDebounceRequestID: UUID?
     var isDirty: Bool = false {
         didSet {
             if isDirty {
@@ -1645,11 +1717,11 @@ final class AgentTabSession: ObservableObject {
     }
 
     var sourceItemsRevision: Int = 0
-    var pendingSourceItemsMutationSummary: AgentModeViewModel.PendingSourceItemsMutationSummary?
-    var pendingDerivedTranscriptRefreshReason: AgentModeViewModel.DerivedTranscriptRefreshReason?
+    var pendingSourceItemsMutationSummary: AgentPendingSourceItemsMutationSummary?
+    var pendingDerivedTranscriptRefreshReason: AgentDerivedTranscriptRefreshReason?
     var derivedTranscriptRefreshTask: Task<Void, Never>?
     var derivedTranscriptRefreshGeneration: UInt64 = 0
-    var derivedTranscriptSyncState: AgentModeViewModel.DerivedTranscriptSyncState?
+    var derivedTranscriptSyncState: AgentDerivedTranscriptSyncState?
     var pendingCommandRunningByKey: [String: CodexNativeSessionController.CommandExecutionRunningUpdate] = [:]
     var pendingCommandRunningFlushTask: Task<Void, Never>?
     var pendingCommandRunningFlushUsesLiveOutputDelay: Bool = false
@@ -1762,6 +1834,7 @@ final class AgentTabSession: ObservableObject {
         guard codexHookGateDispatchOwnerToken == token else { return }
         codexHookGateDispatchOwnerToken = nil
         codexHookGateActiveBinding = nil
+        codexHookGateOrigin = nil
         let continuations = Array(codexHookGateCoalescedContinuations.values)
         codexHookGateCoalescedContinuations.removeAll()
         for continuation in continuations {
@@ -1795,10 +1868,19 @@ final class AgentTabSession: ObservableObject {
         return true
     }
 
+    struct CodexHookGateOrigin: Equatable {
+        let writer: AgentSessionRuntimeStore.WriterIdentity
+        let runID: UUID?
+        let runAttemptID: UUID?
+    }
+
+    var codexHookGateOrigin: CodexHookGateOrigin?
+
     func resetCodexHookGateBinding() {
         _ = cancelCodexHookReview()
         codexHookGateInventoryFingerprint = nil
         codexHookGateActiveBinding = nil
+        codexHookGateOrigin = nil
         codexHookGateBindingMemo = nil
         codexHookGateAudit = nil
     }
@@ -1967,7 +2049,7 @@ final class AgentTabSession: ObservableObject {
     /// The view model additionally checks runtime-map ownership and the workspace carrier.
     func restoreReadinessAfterRefusedTransition(
         _ previousReadiness: AgentSessionRestorationReadiness,
-        expectedTransition: AgentModeViewModel.PersistentBindingTransitionToken
+        expectedTransition: AgentPersistentBindingTransitionToken
     ) {
         guard !bindingTransitionInProgress,
               persistentBindingTransitionToken() == expectedTransition,
@@ -2023,8 +2105,8 @@ final class AgentTabSession: ObservableObject {
             || !queuedMCPElicitationRequests.isEmpty
     }
 
-    func persistentBindingTransitionToken() -> AgentModeViewModel.PersistentBindingTransitionToken {
-        AgentModeViewModel.PersistentBindingTransitionToken(
+    func persistentBindingTransitionToken() -> AgentPersistentBindingTransitionToken {
+        AgentPersistentBindingTransitionToken(
             tabID: tabID,
             sessionIdentity: ObjectIdentifier(self),
             binding: persistentSessionBindingIdentity,
@@ -2603,7 +2685,7 @@ final class AgentTabSession: ObservableObject {
 
     private enum SourceItemsDispatch {
         case silent
-        case notify(AgentModeViewModel.SourceItemsMutation)
+        case notify(AgentSourceItemsMutation)
     }
 
     private enum SourceItemPayloadUpdate {
@@ -2995,7 +3077,7 @@ final class AgentTabSession: ObservableObject {
     }
 
     private func finishIncrementalSourceItemsMutation(
-        _ mutation: AgentModeViewModel.SourceItemsMutation
+        _ mutation: AgentSourceItemsMutation
     ) {
         switch mutation {
         case let .replace(index, _, _), let .mutate(index, _):
@@ -3119,7 +3201,7 @@ final class AgentTabSession: ObservableObject {
 
     @discardableResult
     func mutateItemsBatch(
-        mutation: AgentModeViewModel.SourceItemsMutation = .structural,
+        mutation: AgentSourceItemsMutation = .structural,
         touchActivity: Bool = true,
         preservesQuietRange: Bool = false,
         _ body: (inout [AgentChatItem]) -> Void

@@ -3,7 +3,7 @@ import RepoPromptDomainRuntime
 
 /// One-shot, exact-object managed Stop. The authority fence precedes every target mutation;
 /// cancellation then follows the same run-service path as the lane user's Stop.
-extension AgentModeViewModel {
+extension AgentSessionLinkExecutionRuntime {
     func agentSessionLinkPerformStop(
         to candidate: AgentSessionLinkEndpointCandidate,
         request: AgentSessionLinkStopRequest,
@@ -18,10 +18,16 @@ extension AgentModeViewModel {
         },
         beforeCleanupTask: @escaping @MainActor () -> Void = {}
     ) async -> AgentSessionLinkStopTransactionOutcome {
-        guard let session = agentSessionLinkLiveSession(matching: candidate), liveness().permitsDelivery else {
+        guard let command = admit(candidate), liveness().permitsDelivery else {
             return .blocked(.endpointInvalidated)
         }
-        guard (try? mcpSettledLiveSessionForStop(sessionID: candidate.sessionID)) === session else {
+        defer { withExtendedLifetime(command) {} }
+        let writer = command.writer
+        let session = writer.session
+        guard let interactions = writer.scope.installedInteractions,
+              writer.scope.execution != nil,
+              writer.scope.mcp.settledSession(for: writer) === session
+        else {
             return .blocked(.targetLoading)
         }
         let initial = Self.agentSessionLinkDeliveryReadinessSnapshot(
@@ -36,10 +42,10 @@ extension AgentModeViewModel {
         guard commit == .committed else { return .blocked(commit.refusal) }
 
         // No suspension from this recheck through selection, queue withdrawal and gate claim.
-        guard agentSessionLinkLiveSession(matching: candidate) === session,
+        guard command.isCurrent,
+              agentSessionLinkObserverEndpoint(tabID: candidate.tabID) == candidate.domainEndpoint,
               liveness().permitsDelivery,
-              workspaceManager?.activeWorkspace?.id == candidate.workspaceID,
-              (try? mcpSettledLiveSessionForStop(sessionID: candidate.sessionID)) === session
+              writer.scope.mcp.settledSession(for: writer) === session
         else { return .blocked(.endpointInvalidated) }
         let snapshot = Self.agentSessionLinkDeliveryReadinessSnapshot(
             session: session, endpointMatchesGrant: true, isClosing: false
@@ -48,13 +54,18 @@ extension AgentModeViewModel {
         if case let .blocked(failure) = selection { return .blocked(failure) }
         if queueHasCommittedDrain() { return .blocked(.targetBusy) }
         guard let binding = session.persistentSessionBindingIdentity else { return .blocked(.targetBusy) }
+        let oracleHadWork = session.oracleBackgroundOwner.map { OracleBackgroundInvocationRegistry.shared.hasLiveOwner($0) } ?? false
+        var oracleDrained = !oracleHadWork
 
         if selection == .notRunning {
-            prepareAgentRunCancellation(session: session, intent: .userStop, origin: .explicitStop)
+            interactions.prepareRunCancellation(session: session, intent: .userStop, origin: .explicitStop, links: self)
+            oracleDrained = await interactions.awaitOracleBackgroundDrain(for: session, timeout: teardownDeadlineSeconds)
             return .settled(Self.agentSessionLinkStopReceipt(
                 request: request, targetSessionID: candidate.sessionID,
-                result: .notRunning, stopRequested: false, audit: .notRequired,
-                runState: session.runState.rawValue
+                result: oracleHadWork ? (oracleDrained ? .stopped : .stopFailed) : .notRunning,
+                failure: oracleDrained ? nil : .cancellationUnconfirmed,
+                stopRequested: oracleHadWork, teardownCompleted: oracleHadWork ? oracleDrained : nil, audit: .notRequired,
+                runState: session.persistentSessionBindingIdentity == binding ? session.runState.rawValue : nil
             ))
         }
         if selection == .activeRun, session.activeRunOwnership == nil || session.runID == nil {
@@ -70,11 +81,7 @@ extension AgentModeViewModel {
             expectedRunID: session.runID,
             cancellationGeneration: session.stopState.cancellationGeneration,
             pendingStartFence: nil,
-            validateAndClaim: { [weak self, weak session] in
-                guard let self, let session else { return false }
-                return agentSessionLinkLiveSession(matching: candidate) === session
-                    && workspaceManager?.activeWorkspace?.id == candidate.workspaceID
-            }
+            validateAndClaim: { writer.isCurrent }
         )
 
         if selection == .pendingStart {
@@ -86,10 +93,22 @@ extension AgentModeViewModel {
                 ))
             }
             let itemID = agentSessionLinkAppendStopRow(
-                request: request, candidate: candidate, session: session, binding: binding
+                request: request, candidate: candidate, session: session, binding: binding, writer: writer
             )
+            guard await interactions.awaitOracleBackgroundDrain(for: session, timeout: teardownDeadlineSeconds) else {
+                return .settled(Self.agentSessionLinkStopReceipt(
+                    request: request,
+                    targetSessionID: candidate.sessionID,
+                    result: .stopFailed,
+                    failure: .cancellationUnconfirmed,
+                    stopRequested: true,
+                    teardownCompleted: false,
+                    itemID: itemID,
+                    audit: itemID == nil ? .notRequired : .unknown
+                ))
+            }
             let audit = await agentSessionLinkFlushStopAudit(
-                candidate: candidate, session: session, binding: binding,
+                candidate: candidate, session: session, binding: binding, writer: writer,
                 itemID: itemID, deadlineSeconds: auditDeadlineSeconds,
                 deadlineSleep: deadlineSleep
             )
@@ -109,8 +128,9 @@ extension AgentModeViewModel {
             return .blocked(.targetBusy)
         }
         // Claim-time withdrawal is independent of whether the run still exists when cleanup starts.
-        prepareAgentRunCancellation(session: session, intent: .userStop, origin: .explicitStop)
+        interactions.prepareRunCancellation(session: session, intent: .userStop, origin: .explicitStop, links: self)
         withdrawQueuedWorkForManagedStop(session: session)
+        let oracleDrain = session.oracleBackgroundDrain
         let claimedAdmission = AgentRunCancellationAdmission(
             scope: .activeRun, session: session, binding: binding,
             expectedOwnership: admission.expectedOwnership, expectedRunID: admission.expectedRunID,
@@ -123,31 +143,36 @@ extension AgentModeViewModel {
             expectedOwnership: ownership,
             expectedRunID: session.runID,
             expectedBinding: binding,
-            onAcceptedPrimaryPublication: { [weak self, weak session] _ in
-                guard let self, let session else { return }
+            onAcceptedPrimaryPublication: { [weak self] _ in
+                guard let self else { return }
                 _ = agentSessionLinkAppendStopRow(
-                    request: request, candidate: candidate, session: session, binding: binding
+                    request: request, candidate: candidate, session: session, binding: binding, writer: writer
                 )
             }
         )
         let teardown = AgentSessionLinkStopSignal<Bool>()
         let audit = AgentSessionLinkStopSignal<DomainAgentSessionLinkStopReceipt.AuditStatus>()
-        Task { [weak self, weak session] in
-            session?.stopState.markCleanupStarted(id: request.requestID, binding: binding)
-            guard let self, let session else {
-                if let session {
-                    _ = session.stopState.releaseManagedStop(id: request.requestID, binding: binding)
-                    session.noteMonitorObservationInputsChanged()
-                }
+        let cleanup = Task { [weak self, command] in
+            session.stopState.markCleanupStarted(id: request.requestID, binding: binding)
+            guard let self else {
+                _ = session.stopState.releaseManagedStop(id: request.requestID, binding: binding)
+                session.noteMonitorObservationInputsChanged()
                 teardown.finish(false)
                 audit.finish(.unknown)
                 return
+            }
+            defer {
+                pendingStopEffects.removeValue(forKey: request.requestID)
+                withExtendedLifetime(command) {}
             }
             beforeCleanupTask()
             let routed = await cancelAgentRunForSessionLink(
                 session: session, admission: claimedAdmission, outcomeRecorder: recorder
             )
-            teardown.finish(routed && recorder.teardownCompleted)
+            if let oracleDrain {
+                oracleDrained = await OracleBackgroundInvocationRegistry.awaitDrain(oracleDrain, timeout: teardownDeadlineSeconds)
+            }
+            teardown.finish(routed && recorder.teardownCompleted && oracleDrained)
             if session.stopState.releaseManagedStop(id: request.requestID, binding: binding) {
                 session.noteMonitorObservationInputsChanged()
                 requestUIRefresh(tabID: candidate.tabID, urgent: true)
@@ -155,11 +180,12 @@ extension AgentModeViewModel {
             let itemID = session.items.contains(where: { $0.id == request.requestID })
                 ? request.requestID : nil
             await audit.finish(agentSessionLinkFlushStopAudit(
-                candidate: candidate, session: session, binding: binding,
+                candidate: candidate, session: session, binding: binding, writer: writer,
                 itemID: itemID, deadlineSeconds: auditDeadlineSeconds,
                 deadlineSleep: deadlineSleep
             ))
         }
+        pendingStopEffects[request.requestID] = PendingSendEffect(sessionIdentity: ObjectIdentifier(session), task: cleanup)
         Task {
             await deadlineSleep(teardownDeadlineSeconds)
             teardown.finish(false)
@@ -183,6 +209,18 @@ extension AgentModeViewModel {
         let accepted = if case .accepted? = recorder.publicationResult { true } else { false }
         let itemID = session.items.contains(where: { $0.id == request.requestID })
             ? request.requestID : nil
+        if !recorder.initiatedCancellation, oracleHadWork {
+            return .settled(Self.agentSessionLinkStopReceipt(
+                request: request,
+                targetSessionID: candidate.sessionID,
+                result: oracleDrained ? .stopped : .stopFailed,
+                failure: oracleDrained ? nil : .cancellationUnconfirmed,
+                stopRequested: true,
+                teardownCompleted: oracleDrained,
+                audit: .notRequired,
+                runState: matchedTerminalRunState()
+            ))
+        }
         if !teardownCompleted {
             if !recorder.initiatedCancellation, let terminalState = matchedTerminalRunState() {
                 return .settled(Self.agentSessionLinkStopReceipt(
@@ -191,7 +229,7 @@ extension AgentModeViewModel {
                     audit: .notRequired, runState: terminalState
                 ))
             }
-            if recorder.initiatedCancellation, recorder.teardownCompleted,
+            if recorder.initiatedCancellation, recorder.teardownCompleted, oracleDrained,
                recorder.publicationResult == nil, let terminalState = matchedTerminalRunState()
             {
                 return .settled(Self.agentSessionLinkStopReceipt(
@@ -254,9 +292,10 @@ extension AgentModeViewModel {
         request: AgentSessionLinkStopRequest,
         candidate: AgentSessionLinkEndpointCandidate,
         session: TabSession,
-        binding: AgentPersistentSessionBindingIdentity
+        binding: AgentPersistentSessionBindingIdentity,
+        writer: AgentSessionRuntimeStore.Writer
     ) -> UUID? {
-        guard agentSessionLinkLiveSession(matching: candidate) === session,
+        guard writer.isCurrent, writer.session === session,
               session.persistentSessionBindingIdentity == binding
         else { return nil }
         if session.items.contains(where: { $0.id == request.requestID }) { return request.requestID }
@@ -274,29 +313,35 @@ extension AgentModeViewModel {
         candidate: AgentSessionLinkEndpointCandidate,
         session: TabSession,
         binding: AgentPersistentSessionBindingIdentity,
+        writer: AgentSessionRuntimeStore.Writer,
         itemID: UUID?,
         deadlineSeconds: TimeInterval,
         deadlineSleep: @escaping @MainActor (TimeInterval) async -> Void
     ) async -> DomainAgentSessionLinkStopReceipt.AuditStatus {
         guard let itemID else { return .failed }
-        guard agentSessionLinkLiveSession(matching: candidate) === session,
+        guard writer.isCurrent, writer.session === session,
               session.persistentSessionBindingIdentity == binding
         else { return .failed }
         let signal = AgentSessionLinkStopSignal<DomainAgentSessionLinkStopReceipt.AuditStatus>()
-        Task { [weak self, weak session] in
-            guard let self, let session else { signal.finish(.unknown)
+        let effectID = UUID()
+        let flush = Task { [weak self, writer] in
+            guard let self else { signal.finish(.unknown)
                 return
             }
-            guard agentSessionLinkLiveSession(matching: candidate) === session,
+            defer {
+                pendingStopEffects.removeValue(forKey: effectID)
+                withExtendedLifetime(writer) {}
+            }
+            guard writer.isCurrent, writer.session === session,
                   session.persistentSessionBindingIdentity == binding,
                   session.items.contains(where: { $0.id == itemID })
             else { signal.finish(.failed)
                 return
             }
-            let result = await flushSaveRequired(
-                for: candidate.tabID, workspaceID: candidate.workspaceID
+            let result = await writer.scope.persistence.flushSaveRequired(
+                writer: writer
             )
-            guard agentSessionLinkLiveSession(matching: candidate) === session,
+            guard writer.isCurrent, writer.session === session,
                   session.persistentSessionBindingIdentity == binding,
                   session.items.contains(where: { $0.id == itemID })
             else { signal.finish(.failed)
@@ -307,11 +352,68 @@ extension AgentModeViewModel {
             case .failure: signal.finish(.failed)
             }
         }
+        pendingStopEffects[effectID] = PendingSendEffect(sessionIdentity: ObjectIdentifier(session), task: flush)
         Task {
             await deadlineSleep(deadlineSeconds)
             signal.finish(.unknown)
         }
         return await signal.value()
+    }
+
+    /// Teardown joins these effects separately from terminal publication: a Stop cleanup itself
+    /// waits for terminal publication, so the terminal hook must never join this collection.
+    func drainPendingStopEffects() async {
+        while !pendingStopEffects.isEmpty {
+            let pending = Array(pendingStopEffects.values)
+            for effect in pending {
+                await effect.task.value
+            }
+        }
+    }
+
+    /// Uses the scope's same execution service as provider start, with the caller's exact
+    /// cancellation admission. It never looks up another window or chooses a replacement object.
+    @discardableResult
+    func cancelAgentRunForSessionLink(
+        session: TabSession,
+        admission: AgentRunCancellationAdmission,
+        outcomeRecorder: AgentRunCancellationOutcomeRecorder,
+        completion: AgentModeRunService.CancellationCompletion = .terminalTeardownCompleted
+    ) async -> Bool {
+        guard let scope, let sessionID = session.activeAgentSessionID,
+              case let .unique(writer) = scope.resolveWriter(sessionID: sessionID),
+              writer.scope === scope, writer.session === session,
+              let execution = scope.execution else { return false }
+        defer { withExtendedLifetime(writer) {} }
+        await execution.cancelRun(
+            tabID: session.tabID, session: session, intent: .userStop,
+            completion: completion, origin: .explicitStop,
+            admission: admission, outcomeRecorder: outcomeRecorder
+        )
+        return outcomeRecorder.initiatedCancellation
+    }
+
+    @discardableResult
+    func withdrawPendingStartForSessionLink(session: TabSession, admission: AgentRunCancellationAdmission) -> Bool {
+        guard let scope, let sessionID = session.activeAgentSessionID,
+              case let .unique(writer) = scope.resolveWriter(sessionID: sessionID),
+              writer.scope === scope, writer.session === session,
+              let execution = scope.execution else { return false }
+        let withdrawn = execution.withdrawPendingStartForSessionLink(tabID: session.tabID, session: session, admission: admission)
+        if withdrawn {
+            updateBindingsFromSession(session)
+            scheduleSave(for: session)
+            requestUIRefresh(tabID: session.tabID, urgent: true)
+        }
+        return withdrawn
+    }
+
+    func withdrawQueuedWorkForManagedStop(session: TabSession) {
+        guard let scope, scope.sessions[session.tabID] === session else { return }
+        scope.installedInteractions?.closeOracleBackground(for: session)
+        scope.execution?.withdrawQueuedWorkForManagedStop(tabID: session.tabID, session: session)
+        updateBindingsFromSession(session)
+        scheduleSave(for: session)
     }
 
     private static func agentSessionLinkStopReceipt(

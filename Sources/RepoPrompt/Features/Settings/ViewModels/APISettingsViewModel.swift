@@ -1546,7 +1546,7 @@ public class APISettingsViewModel: ObservableObject {
             return .userInteractionCancelled
         case .itemNotFound:
             return .keychainError
-        case .duplicateItem, .invalidData, .unexpectedStatus:
+        case .duplicateItem, .invalidData, .invalidOwnerEdit, .deletionNotConfirmed, .unexpectedStatus:
             return .keychainError
         }
     }
