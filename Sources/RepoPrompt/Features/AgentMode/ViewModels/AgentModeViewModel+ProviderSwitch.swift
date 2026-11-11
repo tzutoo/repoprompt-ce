@@ -163,8 +163,9 @@ extension AgentModeViewModel {
     /// the source has not settled afterwards — a carrier rendered from it would repeat the stale
     /// in-flight-turn defect this path exists to prevent. A settled terminal state (.cancelled
     /// with publication finished, teardown still running detached) is safe to project.
-    private func providerSwitchQuiesceSourceForForcedSwitch(_ session: TabSession) async -> Bool {
-        providerSwitchDeclinePendingInteractions(for: session)
+    private func providerSwitchQuiesceSourceForForcedSwitch(_ claim: AgentComposerSubmitClaim) async -> Bool {
+        guard interactionRuntime.declinePendingInteractionsForProviderSwitch(claim: claim) else { return false }
+        let session = claim.sourceSession
         agentSelfCompactCancelForAcceptedLocalInput(session)
         guard providerSwitchSourceRunIsLive(session) else {
             // Queued work with no live run gets the same claim-time withdrawal an explicit Stop
@@ -968,7 +969,7 @@ extension AgentModeViewModel {
         providerSwitchExactOwnerProbe?(session) ?? false
     }
 
-    private func providerSwitchClaim(_ preview: ProviderSwitchPreview, discard: Bool = false) -> AgentComposerSubmitClaim? {
+    private func providerSwitchClaim(_ preview: ProviderSwitchPreview, discard: Bool = false, allowsPendingStartWithdrawal: Bool = true) -> AgentComposerSubmitClaim? {
         guard providerSwitchPreviewIsCurrent(preview, content: !discard), providerSwitchHasExactOwner(preview.session),
               let target = makeComposerSubmitTarget(tabID: preview.session.tabID, session: preview.session) else { return nil }
         let attempt = AgentComposerSubmitAttempt(
@@ -978,7 +979,7 @@ extension AgentModeViewModel {
             noticeRevision: 0,
             rawDraftSnapshot: preview.session.draftText
         )
-        guard case let .claimed(claim) = claimComposerSubmitAttempt(attempt, requireActiveTabOwnership: false) else { return nil }
+        guard case let .claimed(claim) = claimComposerSubmitAttempt(attempt, requireActiveTabOwnership: false, allowsPendingStartWithdrawal: allowsPendingStartWithdrawal) else { return nil }
         return claim
     }
 
@@ -1136,7 +1137,9 @@ extension AgentModeViewModel {
               ? providerSwitchDiscardBlocker(preview) == nil
               : providerSwitchPreviewAdmission(preview).isAdmissible(forcing: forcing),
               discard ? preview.isReview : (preview.chosen != nil && preview.chosen?.unavailable == nil),
-              let claim = providerSwitchClaim(preview, discard: discard), let workspaceID = workspaceManager?.activeWorkspaceID else { return false }
+              // This claim owns a lifecycle mutation, not an input waiting to start. Forced
+              // quiescence withdraws queued input through Stop without cancelling its own claim.
+              let claim = providerSwitchClaim(preview, discard: discard, allowsPendingStartWithdrawal: false), let workspaceID = workspaceManager?.activeWorkspaceID else { return false }
         defer { releaseComposerSubmitClaim(claim) }
         let session = preview.session
         var rollback = ProviderSwitchRollback(session)
@@ -1203,7 +1206,7 @@ extension AgentModeViewModel {
             if !discard {
                 var stagedRevision: Int?
                 if forcing {
-                    guard await providerSwitchQuiesceSourceForForcedSwitch(session), current() else {
+                    guard await providerSwitchQuiesceSourceForForcedSwitch(claim), current() else {
                         // The quiesce already ran; a late refusal must surface, not fail silently.
                         surfaceReviewFailure()
                         return false
