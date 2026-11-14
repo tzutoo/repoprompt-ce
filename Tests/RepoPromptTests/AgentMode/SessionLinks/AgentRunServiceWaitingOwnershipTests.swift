@@ -149,7 +149,7 @@ final class AgentRunServiceWaitingOwnershipTests: XCTestCase {
             XCTAssertNil(session.activeRunOwnership)
             let binding = session.currentRestorationBindingToken
             for turn in 1 ... 2 {
-                _ = await harness.composition.startRun(tabID: tabID, session: session, initialUserMessage: "turn \(turn)", initialMessageForRun: "turn \(turn)", attachments: [])
+                _ = try await harness.composition.startRun(tabID: tabID, session: session, origin: harness.startCommand(for: session), initialUserMessage: "turn \(turn)", initialMessageForRun: "turn \(turn)", attachments: [])
                 let owner = try XCTUnwrap(session.activeRunOwnership, "\(agent) turn \(turn)")
                 XCTAssertTrue(session.isCurrentRunAttemptForCurrentBinding(owner))
                 XCTAssertTrue(session.quietLedger.isOpen(owner: owner))
@@ -199,7 +199,7 @@ final class AgentRunServiceWaitingOwnershipTests: XCTestCase {
                     let response = try await waiting.value
                     XCTAssertEqual(response.text, frame)
                     XCTAssertFalse(response.timedOut)
-                    XCTAssertEqual(host.retrieveDraftText(for: tabID), "untouched local draft")
+                    XCTAssertEqual(host.draftRuntime.text(for: tabID), "untouched local draft")
                     XCTAssertEqual(session.items.count(where: { $0.kind == .user && $0.text == frame }), 1)
                     XCTAssertNil(session.instructionContinuation)
                     XCTAssertEqual(session.activeRunOwnership, owner)

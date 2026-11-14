@@ -319,7 +319,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
             lastTurnUsage = (usage.input, usage.output, usage.cost?.total ?? 0)
         }
         lastStopReason = "compact"
-        completePendingTurn()
+        await completePendingTurn()
         return turnID
     }
 
@@ -804,9 +804,9 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
             // or queued continuations; only agent_settled is the session boundary.
             break
         case .agentSettled:
-            // Round-trip from a nested task so the stdout consumer can keep
-            // reading the get_session_stats response.
-            Task { [weak self] in
+            // Leave this actor before the stats round trip. Awaiting it here blocks
+            // the stdout consumer, so the response can never be read.
+            Task.detached { [weak self] in
                 await self?.refreshSessionStatsThenCompletePendingTurn()
             }
         case .turnStart:
@@ -1029,7 +1029,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
 
     private func refreshSessionStatsThenCompletePendingTurn() async {
         await refreshSessionStatsBestEffort()
-        completePendingTurn()
+        await completePendingTurn()
     }
 
     private func refreshSessionStatsBestEffort() async {
@@ -1047,7 +1047,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
         }
     }
 
-    private func completePendingTurn() {
+    private func completePendingTurn() async {
         turnInFlight = false
         guard let turnID = pendingTurnIDBuffer.first else { return }
         pendingTurnIDBuffer.removeFirst()

@@ -50,16 +50,21 @@ final class AgentSessionWorktreeRuntime {
         let fallbackWorkspacePath: String?
         let declaredRepoPaths: [String]
         let storageDirectory: URL?
+        /// Hydrating a saved session does not imply its workspace roots have finished loading.
+        let awaitRootReadiness: @MainActor () async throws -> Void
         let isCurrent: @MainActor () -> Bool
 
         init(
             store: WorkspaceFileContextStore?, fallbackWorkspacePath: String?,
-            declaredRepoPaths: [String], storageDirectory: URL? = nil, isCurrent: @escaping @MainActor () -> Bool
+            declaredRepoPaths: [String], storageDirectory: URL? = nil,
+            awaitRootReadiness: @escaping @MainActor () async throws -> Void,
+            isCurrent: @escaping @MainActor () -> Bool
         ) {
             self.store = store
             self.fallbackWorkspacePath = fallbackWorkspacePath
             self.declaredRepoPaths = declaredRepoPaths
             self.storageDirectory = storageDirectory
+            self.awaitRootReadiness = awaitRootReadiness
             self.isCurrent = isCurrent
         }
     }
@@ -98,7 +103,7 @@ final class AgentSessionWorktreeRuntime {
     struct Effects {
         let drainOracle: @MainActor (AgentTabSession) async -> Bool
         let cancelRun: @MainActor (AgentTabSession) async -> Void
-        let stageRecovery: @MainActor (AgentTabSession) async -> AgentSessionHandoffRuntime.RecoveryResult
+        let stageRecovery: @MainActor (AgentSessionRuntimeStore.Command) async -> AgentSessionHandoffRuntime.RecoveryResult
         /// Must detach synchronously before its first await and retire only captured instances.
         let retireProvider: @MainActor (AgentTabSession) async -> Void
     }
@@ -317,7 +322,7 @@ final class AgentSessionWorktreeRuntime {
                     try commitAuthority? {}
                     try requireCurrent()
                     let previousHandoff = session.pendingHandoff
-                    switch await effects.stageRecovery(session) {
+                    switch await effects.stageRecovery(command) {
                     case let .staged(staged): handoffRollback = (previousHandoff, staged)
                     case .unchanged: break
                     case .refused: throw TransitionError.stale

@@ -505,10 +505,10 @@ final class MCPBecomeOverseerActivationProof: @unchecked Sendable {
               let window = WindowStatesManager.shared.modelRoutingWindow(withID: endpoint.windowID),
               ObjectIdentifier(window) == windowIdentity.windowStateIdentity,
               ObjectIdentifier(window.mcpServer) == windowIdentity.serverViewModelIdentity,
-              window.mcpServer.hasCurrentRunRouteMapping(
+              window.mcpServer.runRouteBindings.hasCurrentMapping(
                   runID: routeToken.runID, connectionID: routeToken.connectionID, expectedTabID: endpoint.tabID
               ),
-              window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
+              window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
         else {
             valid = false
             return false
@@ -631,7 +631,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
             return policyWindowID
         }
         let resolvedWindowID = await MainActor.run {
-            WindowStatesManager.shared.allWindows.first { $0.mcpServer.hasLiveRunID(runID) }?.windowID
+            WindowStatesManager.shared.allWindows.first { $0.mcpServer.runRouteBindings.connectionID(forRunID: runID) != nil }?.windowID
         }
         if let resolvedWindowID {
             presentationWindowByRun[runID] = resolvedWindowID
@@ -3002,58 +3002,53 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         else {
             return nil
         }
+        // The bridge's two predicates only forward to this exact canonical authority.
+        // Read it directly: no presentation/MainActor state participates in membership.
+        let linkAuthority = AgentSessionLinkRuntimeBridge.sharedLinkAuthority
         let hasAnyActiveLink: Bool
         let hasActiveOutboundLink: Bool
         #if DEBUG
             if let debugAnyActiveSessionLinkEndpointsForTesting {
                 hasAnyActiveLink = debugAnyActiveSessionLinkEndpointsForTesting.contains(routeToken.observerEndpoint)
             } else {
-                hasAnyActiveLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveLink(
+                hasAnyActiveLink = await linkAuthority.hasActiveLink(
                     endpoint: routeToken.observerEndpoint
                 )
             }
             if let debugOutboundSessionLinkEndpointsForTesting {
                 hasActiveOutboundLink = debugOutboundSessionLinkEndpointsForTesting.contains(routeToken.observerEndpoint)
             } else {
-                hasActiveOutboundLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveOutboundLink(
+                hasActiveOutboundLink = await linkAuthority.hasActiveOutboundLink(
                     observerEndpoint: routeToken.observerEndpoint
                 )
             }
         #else
-            hasAnyActiveLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveLink(
+            hasAnyActiveLink = await linkAuthority.hasActiveLink(
                 endpoint: routeToken.observerEndpoint
             )
-            hasActiveOutboundLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveOutboundLink(
+            hasActiveOutboundLink = await linkAuthority.hasActiveOutboundLink(
                 observerEndpoint: routeToken.observerEndpoint
             )
         #endif
-        let bootstrapState = await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint)
-        // One main-actor read, before route revalidation: no new suspension after the fences below.
-        let (oversightEnabled, globalOverseer) = await MainActor.run {
-            (
+        // One immutable, request-local sample from the owning actor; never a capability cache.
+        // Scope discovery is read-only. Collecting it alongside the other role facts removes
+        // an intermediate route fence, not the final fence after all owner reads below.
+        let (bootstrapState, oversightEnabled, globalOverseer, holdsLiveScope) = await MainActor.run {
+            let bridge = AgentSessionLinkRuntimeBridge.shared
+            return (
+                bridge.overseerBootstrapState(for: routeToken.observerEndpoint),
                 ToolAvailabilityStore.shared.isEnabled(MCPWindowToolName.agentSessionLink),
-                OverseerAuthorizationEngine.current.listsFullOversightSurface
+                OverseerAuthorizationEngine.current.listsFullOversightSurface,
+                bridge.delegationScopes.hasLiveScopeForCatalog(grantedTo: routeToken.observerEndpoint.sessionID)
             )
         }
+        // Still qualify the complete sample against the exact current run/endpoint and bootstrap
+        // incarnation after suspension. A tab rebind or activation change must fail closed.
         guard let revalidatedRouteToken = await (
             modelOnly
                 ? cachedModelCatalogRouteToken(connectionID: connectionID)
                 : authoritativeRunCatalogRouteToken(runID: routeToken.runID, windowID: runState.windowID, tabID: tabID)
         ), revalidatedRouteToken == routeToken,
-        await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint) == bootstrapState else {
-            return nil
-        }
-        // Scopes bind durable session identity; routing still binds the exact run endpoint.
-        let callerSessionID = routeToken.observerEndpoint.sessionID
-        let holdsLiveScope = await MainActor.run {
-            AgentSessionLinkRuntimeBridge.shared.delegationScopes.hasLiveScopeForCatalog(grantedTo: callerSessionID)
-        }
-        // Scope lookup suspends too: a tab rebind must not publish the old run's grants.
-        guard let scopeRevalidatedRouteToken = await (
-            modelOnly
-                ? cachedModelCatalogRouteToken(connectionID: connectionID)
-                : authoritativeRunCatalogRouteToken(runID: routeToken.runID, windowID: runState.windowID, tabID: tabID)
-        ), scopeRevalidatedRouteToken == routeToken,
         await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint) == bootstrapState else {
             return nil
         }
@@ -3239,6 +3234,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         guard let runID else { return }
 
         let initialRevision = runCatalogObservationByRunID[runID]?.projectionRevision ?? 0
+        // Advertisement crossed other owners above. This fresh read is intentional: reusing its
+        // initial role sample could qualify a catalog after revocation, rebind or activation change.
         let finalSnapshot = await liveSessionLinkGrantSnapshot(connectionID: connectionID)
         let currentOfferInputs: MCPRunCatalogOfferInputs? = if let route = finalSnapshot?.routeToken {
             await runCatalogOfferInputs(route: route)
@@ -4060,12 +4057,12 @@ actor ServerNetworkManager: MCPServerConnectionHost {
 
         let resolved = await MainActor.run { () -> (runID: UUID, windowID: Int)? in
             for window in WindowStatesManager.shared.allWindows {
-                guard let candidateRunID = window.mcpServer.connectionIDToRunID[connectionID],
+                guard let candidateRunID = window.mcpServer.runRouteBindings.connectionIDToRunID[connectionID],
                       let runID = Self.validatedLiveRunID(
                           candidateRunID: candidateRunID,
                           connectionID: connectionID,
-                          connectionIDByRunID: window.mcpServer.connectionIDByRunID,
-                          connectionIDToRunID: window.mcpServer.connectionIDToRunID
+                          connectionIDByRunID: window.mcpServer.runRouteBindings.connectionIDByRunID,
+                          connectionIDToRunID: window.mcpServer.runRouteBindings.connectionIDToRunID
                       )
                 else {
                     continue
@@ -4097,8 +4094,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
     ) async -> Bool {
         let connectionID = await MainActor.run { () -> UUID? in
             guard let window = WindowStatesManager.shared.window(withID: windowID),
-                  let connectionID = window.mcpServer.connectionIDByRunID[runID],
-                  window.mcpServer.hasCurrentRunRouteMapping(
+                  let connectionID = window.mcpServer.runRouteBindings.connectionIDByRunID[runID],
+                  window.mcpServer.runRouteBindings.hasCurrentMapping(
                       runID: runID,
                       connectionID: connectionID,
                       expectedTabID: tabID
@@ -4124,7 +4121,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
             guard let window = WindowStatesManager.shared.window(withID: windowID) else {
                 return false
             }
-            return window.mcpServer.hasCurrentRunRouteMapping(
+            return window.mcpServer.runRouteBindings.hasCurrentMapping(
                 runID: runID,
                 connectionID: connectionID,
                 expectedTabID: tabID
@@ -4159,13 +4156,13 @@ actor ServerNetworkManager: MCPServerConnectionHost {
     ) async -> AgentSessionLinkRunCatalogRouteToken? {
         let candidate = await MainActor.run { () -> (UUID, DomainAgentSessionLinkEndpointIdentity)? in
             guard let window = WindowStatesManager.shared.window(withID: windowID),
-                  let connectionID = window.mcpServer.connectionIDByRunID[runID],
-                  window.mcpServer.hasCurrentRunRouteMapping(
+                  let connectionID = window.mcpServer.runRouteBindings.connectionIDByRunID[runID],
+                  window.mcpServer.runRouteBindings.hasCurrentMapping(
                       runID: runID,
                       connectionID: connectionID,
                       expectedTabID: tabID
                   ),
-                  let endpoint = window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: tabID)
+                  let endpoint = window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: tabID)
             else { return nil }
             return (connectionID, endpoint)
         }
@@ -4182,13 +4179,13 @@ actor ServerNetworkManager: MCPServerConnectionHost {
 
         let mappingIsStillCurrent = await MainActor.run {
             guard let window = WindowStatesManager.shared.window(withID: windowID),
-                  window.mcpServer.hasCurrentRunRouteMapping(
+                  window.mcpServer.runRouteBindings.hasCurrentMapping(
                       runID: runID,
                       connectionID: connectionID,
                       expectedTabID: tabID
                   )
             else { return false }
-            return window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: tabID) == endpoint
+            return window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: tabID) == endpoint
         }
         guard mappingIsStillCurrent,
               let revalidatedActorSnapshot = authoritativeRunRouteActorSnapshot(
@@ -4334,8 +4331,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
 
         let connectionID = await MainActor.run { () -> UUID? in
             guard let window = WindowStatesManager.shared.window(withID: windowID),
-                  let connectionID = window.mcpServer.connectionIDByRunID[runID],
-                  window.mcpServer.hasCurrentRunRouteMapping(
+                  let connectionID = window.mcpServer.runRouteBindings.connectionIDByRunID[runID],
+                  window.mcpServer.runRouteBindings.hasCurrentMapping(
                       runID: runID,
                       connectionID: connectionID,
                       expectedTabID: tabID
@@ -4356,7 +4353,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                 guard let window = WindowStatesManager.shared.window(withID: windowID) else {
                     return false
                 }
-                return window.mcpServer.hasCurrentRunRouteMapping(
+                return window.mcpServer.runRouteBindings.hasCurrentMapping(
                     runID: runID,
                     connectionID: connectionID,
                     expectedTabID: tabID
@@ -4504,9 +4501,12 @@ actor ServerNetworkManager: MCPServerConnectionHost {
     private func cachedModelCatalogRouteToken(connectionID: UUID) async -> AgentSessionLinkRunCatalogRouteToken? {
         guard let route = cachedModelRunRoute(connectionID: connectionID) else { return nil }
         let admittedModelRouteToken = MCPInvocationContextBridge.current?.dispatchAuthorization?.windowIdentity?.modelRouteToken
-        let endpoint = await MainActor.run {
-            WindowStatesManager.shared.modelRoutingWindow(withID: route.windowID)?.mcpServer
-                .cachedModelObserverEndpoint(connectionID: connectionID, route: route, modelRouteToken: admittedModelRouteToken)
+        let endpoint = await MainActor.run { () -> DomainAgentSessionLinkEndpointIdentity? in
+            guard let server = WindowStatesManager.shared.modelRoutingWindow(withID: route.windowID)?.mcpServer else { return nil }
+            return server.cachedModelObserverEndpoint(
+                resources: server.routeResources, connectionID: connectionID,
+                route: route, modelRouteToken: admittedModelRouteToken
+            )
         }
         guard let endpoint, cachedModelRunRoute(connectionID: connectionID) == route else { return nil }
         return AgentSessionLinkRunCatalogRouteToken(
@@ -4658,8 +4658,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
             guard let window = WindowStatesManager.shared.window(withID: windowID) else {
                 return false
             }
-            let mappedRun = window.mcpServer.connectionIDToRunID[connectionID]
-            let mappedConnection = window.mcpServer.connectionID(forRunID: runID)
+            let mappedRun = window.mcpServer.runRouteBindings.connectionIDToRunID[connectionID]
+            let mappedConnection = window.mcpServer.runRouteBindings.connectionID(forRunID: runID)
             return mappedRun == runID && mappedConnection == connectionID
         }
         if alreadyMapped {
@@ -4685,6 +4685,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
 
             // Update bidirectional mappings in MCPServerViewModel
             let didRegister = window.mcpServer.registerRunIDMapping(
+                route: window.mcpServer.routeResources,
                 connectionID: connectionID,
                 runID: runID,
                 windowID: windowID,
@@ -4742,6 +4743,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                 return nil
             }
             return window.mcpServer.registerPendingPolicyRunIDMapping(
+                route: window.mcpServer.routeResources,
                 connectionID: connectionID,
                 runID: runID,
                 windowID: windowID,
@@ -5192,9 +5194,11 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                 return window.windowID == windowID
             }
             for window in windows {
-                if let connectionID = window.mcpServer.connectionID(forRunID: runID) {
+                if let connectionID = window.mcpServer.runRouteBindings.connectionID(forRunID: runID) {
                     window.mcpServer.cleanupRunIDMapping(
-                        runID: runID, connectionID: connectionID,
+                        route: window.mcpServer.routeResources,
+                        runID: runID,
+                        connectionID: connectionID,
                         signalRoutingFailure: routingWaitGeneration != nil,
                         routingWaitGeneration: routingWaitGeneration
                     )
@@ -7853,8 +7857,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         guard let displacedConnectionID = token.displacedConnectionID else { return }
         let replacementStillOwnsRun = await MainActor.run {
             guard let window = WindowStatesManager.shared.window(withID: windowID) else { return false }
-            return window.mcpServer.isCurrentPendingPolicyRunIDMapping(token)
-                && window.mcpServer.connectionIDToRunID[displacedConnectionID] == nil
+            return window.mcpServer.isCurrentPendingPolicyRunIDMapping(route: window.mcpServer.routeResources, token)
+                && window.mcpServer.runRouteBindings.connectionIDToRunID[displacedConnectionID] == nil
         }
         guard replacementStillOwnsRun else {
             connectionLog("Skipping stale pending-policy replacement old=\(displacedConnectionID) new=\(token.connectionID) runID=\(token.runID)")
@@ -8054,6 +8058,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
 
         for state in targets {
             await state.mcpServer.finishReadFileAutoSelectionForConnectionTeardown(
+                route: state.mcpServer.routeResources,
                 connectionID: connectionID
             )
         }
@@ -8061,6 +8066,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         if let detachContextBuilderRunID {
             for state in targets {
                 didDetachContextBuilderContext = state.mcpServer.detachContextBuilderTabContextForDiscoveryTeardown(
+                    route: state.mcpServer.routeResources,
                     connectionID: connectionID,
                     runID: detachContextBuilderRunID
                 ) || didDetachContextBuilderContext
@@ -8068,6 +8074,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         }
         for state in targets {
             state.mcpServer.removeTabContext(
+                route: state.mcpServer.routeResources,
                 forConnectionID: connectionID,
                 clientName: clientName,
                 windowID: cleanupWindowID,
@@ -8079,6 +8086,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                 && closeContext.initiator == .peer
             for state in targets {
                 let wasDetached = state.mcpServer.isDetachedContextBuilderConnection(
+                    route: state.mcpServer.routeResources,
                     connectionID: connectionID,
                     runID: contextBuilderRunID
                 )
@@ -8413,7 +8421,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     let bindingSnapshots = windows.map { windowState in
                         (
                             windowState: windowState,
-                            binding: windowState.mcpServer.connectionBindingSnapshot(forConnection: connectionID)
+                            binding: windowState.mcpServer.connectionBindingSnapshot(route: windowState.mcpServer.routeResources, forConnection: connectionID)
                         )
                     }
                     let authoritativeBinding = bindingSnapshots.first {
@@ -10019,7 +10027,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
             private func debugBindingSnapshot(for connectionID: UUID, selectedWindowID: Int?) async -> MCPServerViewModel.ConnectionBindingSnapshot {
                 await MainActor.run {
                     let windows = WindowStatesManager.shared.allWindows
-                    let snapshots = windows.map { $0.mcpServer.connectionBindingSnapshot(forConnection: connectionID) }
+                    let snapshots = windows.map { $0.mcpServer.connectionBindingSnapshot(route: $0.mcpServer.routeResources, forConnection: connectionID) }
                     if let explicit = snapshots.first(where: { $0.bindingKind == .tabContext && $0.explicitlyBound && $0.runID == nil }) {
                         return explicit
                     }
@@ -12707,7 +12715,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     guard let window = WindowStatesManager.shared.window(withID: policy.windowID) else {
                         return false
                     }
-                    return window.mcpServer.isCurrentPendingPolicyRunIDMapping(token)
+                    return window.mcpServer.isCurrentPendingPolicyRunIDMapping(route: window.mcpServer.routeResources, token)
                 } ?? true
             }
             guard routeMappingIsCurrent,
@@ -12926,6 +12934,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                 guard let window = WindowStatesManager.shared.window(withID: policy.windowID) else { return nil }
                 if let pendingPolicyRunIDMappingToken {
                     return window.mcpServer.rollbackPendingPolicyRunIDMapping(
+                        route: window.mcpServer.routeResources,
                         pendingPolicyRunIDMappingToken,
                         clientName: clientName,
                         windowID: policy.windowID,
@@ -12934,12 +12943,14 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     )
                 }
                 window.mcpServer.removeTabContext(
+                    route: window.mcpServer.routeResources,
                     forConnectionID: connectionID,
                     clientName: clientName,
                     windowID: policy.windowID,
                     runID: runID
                 )
                 window.mcpServer.cleanupRunIDMapping(
+                    route: window.mcpServer.routeResources,
                     runID: runID,
                     connectionID: connectionID,
                     signalRoutingFailure: signalRoutingFailure && routingWaitGeneration != nil,
@@ -13084,6 +13095,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     return
                 }
                 let replacementToken = windowState.mcpServer.installTabContext(
+                    route: windowState.mcpServer.routeResources,
                     clientID: clientID,
                     clientName: clientName,
                     windowID: windowID,
@@ -13143,8 +13155,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     throw MCPError.invalidParams("Window \(windowID) not found")
                 }
                 // Fast path: already bound to this exact tab+run in this window.
-                let alreadyBoundTab = windowState.mcpServer.boundTabID(forConnection: connectionID) == tabID
-                let alreadyBoundRun = windowState.mcpServer.connectionIDToRunID[connectionID] == runID
+                let alreadyBoundTab = windowState.mcpServer.boundTabID(route: windowState.mcpServer.routeResources, forConnection: connectionID) == tabID
+                let alreadyBoundRun = windowState.mcpServer.runRouteBindings.connectionIDToRunID[connectionID] == runID
                 if alreadyBoundTab, alreadyBoundRun {
                     return (false, cached.workspaceID)
                 }
@@ -13153,6 +13165,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                     throw MCPError.invalidParams("Tab \(tabID) not found in any workspace for window \(windowID)")
                 }
                 try windowState.mcpServer.bindTabForConnection(
+                    route: windowState.mcpServer.routeResources,
                     connectionID: connectionID,
                     clientName: resolvedClientName,
                     tabID: tabID,

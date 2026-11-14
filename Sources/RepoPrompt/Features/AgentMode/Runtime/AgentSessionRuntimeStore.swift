@@ -67,6 +67,32 @@ final class AgentSessionRuntimeStore {
         }
     }
 
+    /// Persistent tasks remember their admitted writer without retaining the scope through its
+    /// session/task graph. This is not new admission and cannot adopt a replacement writer.
+    @MainActor
+    struct WriterReceipt {
+        enum Disposition {
+            case current, ownedSuspended, claimLost
+        }
+
+        private weak var scope: Scope?
+        private let identity: WriterIdentity
+
+        init?(_ command: Command) {
+            guard case .restored = command.requirement else { return nil }
+            scope = command.writer.scope
+            identity = command.identity
+        }
+
+        func disposition(for session: AgentTabSession) -> Disposition {
+            guard let writer = scope?.originatingWriter(identity: identity, session: session) else {
+                return .claimLost
+            }
+            if case .success = writer.admitCommand(.restored) { return .current }
+            return .ownedSuspended
+        }
+    }
+
     /// Exact-object capability. Holding one keeps its scope alive across suspension; it does
     /// not grant consent, bypass restoration, or survive replacement/rebinding in the store.
     @MainActor
@@ -93,6 +119,7 @@ final class AgentSessionRuntimeStore {
             guard !AgentSessionDeletionRegistry.shared.isPermanentlyDeleted(sessionID: binding.sessionID),
                   !AgentSessionDeletionRegistry.shared.isDeletionInProgress(sessionID: binding.sessionID)
             else { return .deleted }
+            guard !scope.isAwaitingWorkspaceAdoption else { return .restorationUnavailable }
             switch requirement {
             case .restored:
                 guard session.permitsBoundOperationAndSave else { return .restorationUnavailable }
@@ -147,7 +174,7 @@ final class AgentSessionRuntimeStore {
         /// New binding work needs exclusive ownership; originating transition cleanup may
         /// still use isCurrent while retirement or a conflicting claim blocks new work.
         var permitsBindingPreparation: Bool {
-            isCurrent && !scope.isRetiring
+            isCurrent && !scope.isRetiring && !scope.isAwaitingWorkspaceAdoption
                 && !scope.store.scopes.values.contains { reference in
                     guard let other = reference.value, other !== scope else { return false }
                     return other.sessions[session.tabID] === session
@@ -245,7 +272,14 @@ final class AgentSessionRuntimeStore {
         let owners = scopes.values.compactMap(\.value).filter { $0.sessions[session.tabID] === session }
         guard !owners.isEmpty else {
             session.persistentSessionBindingDidChange = nil
+            session.workspaceAdoptionPending = { false }
             return
+        }
+        // Read through the actual holders without retaining their session/scope graphs. Multiple
+        // claims remain conflicts; none can hide another holder's negative readiness fence.
+        let references = owners.map { WeakScope(value: $0) }
+        session.workspaceAdoptionPending = {
+            references.contains { $0.value?.isAwaitingWorkspaceAdoption == true }
         }
         session.persistentSessionBindingDidChange = { [weak self, weak session] in
             guard let self, let session else { return }
@@ -402,6 +436,14 @@ final class AgentSessionRuntimeStore {
         lazy var drafts = AgentSessionDraftRuntime(scope: self)
         var saveQueue: AgentSessionSaveQueue {
             persistence.queue
+        }
+
+        /// The host fences readiness synchronously when destructive owner adoption is queued,
+        /// and releases it only after that adoption's discard slice (or its own abandoned exit).
+        private(set) var isAwaitingWorkspaceAdoption = false
+
+        func setWorkspaceAdoptionPending(_ pending: Bool) {
+            isAwaitingWorkspaceAdoption = pending
         }
 
         private(set) var isRetiring = false

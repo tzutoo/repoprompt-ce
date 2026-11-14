@@ -9,12 +9,15 @@ extension AgentSessionRuntimeStore.Scope {
     /// Provider events enter through the canonical scope, never through a presenter callback.
     func adoptClaudeProviderTurn(session: AgentTabSession, listener: ClaudeControllerEventListener, turnID: UUID, fence: AgentRunStartStopFence) async -> AgentModeRunService.ClaudeProviderTurnAdoption {
         guard sessions[session.tabID] === session else { return .superseded }
-        guard let sessionID = session.activeAgentSessionID else { return .superseded }
-        let resolution = resolveWriter(sessionID: sessionID)
-        guard case let .unique(writer) = resolution,
-              writer.scope === self, writer.session === session else { return .superseded }
-        guard case let .success(command) = writer.admitCommand(), let execution else { return .refused(writer) }
-        return await execution.adoptClaudeProviderTurn(command: command, listener: listener, turnID: turnID, fence: fence)
+        do {
+            let command = try admit(session: session)
+            guard let execution else { return .refused(command.writer) }
+            return await execution.adoptClaudeProviderTurn(command: command, listener: listener, turnID: turnID, fence: fence)
+        } catch let .command(writer, _) {
+            return .refused(writer)
+        } catch {
+            return .superseded
+        }
     }
 }
 
@@ -95,6 +98,10 @@ final class AgentModeRunService {
 
     #if DEBUG
         var testBeforeCancellationCommit: (@MainActor (AgentTabSession) async -> Void)?
+        var testAfterACPExistingControllerProbe: ((ACPIntegratedAgentModeRunner.ExistingControllerProbe) -> Void)? {
+            get { acpRunner.testAfterExistingControllerProbe }
+            set { acpRunner.testAfterExistingControllerProbe = newValue }
+        }
 
         func test_consumeClaudeTerminalEvents(
             _ events: AsyncStream<NativeAgentRuntimeEvent>, session: AgentTabSession,
@@ -196,11 +203,15 @@ final class AgentModeRunService {
     ) async -> ClaudeProviderTurnAdoption {
         let writer = command.writer
         let session = writer.session
+        func admissionRefusal() -> ClaudeProviderTurnAdoption? {
+            guard command.rejection != nil else { return nil }
+            return writer.isCurrent ? .refused(writer) : .superseded
+        }
         guard writer.scope.execution === self else { return .refused(writer) }
-        guard command.isCurrent else { return writer.isCurrent ? .refused(writer) : .superseded }
+        if let refusal = admissionRefusal() { return refusal }
         let activation = session.mcpControlActivationGeneration
         defer {
-            if writer.isCurrent || writer.scope.sessions[session.tabID] !== session,
+            if writer.isCurrentOrSlotReplaced,
                session.currentRestorationBindingToken == writer.identity.restoration,
                session.mcpControlActivationGeneration == activation, fence.permitsStart(of: session),
                listener.subscription == nil || session.activeRunOwnership != nil
@@ -210,10 +221,10 @@ final class AgentModeRunService {
             }
         }
         await listener.awaitTerminalPublication()
-        guard command.isCurrent else { return writer.isCurrent ? .refused(writer) : .superseded }
+        if let refusal = admissionRefusal() { return refusal }
         if let previous = session.lastTerminalCommitRevision {
             await terminalCommitBarrier.awaitTerminalPublication(for: previous.ownership, lifecycle: session.runLifecycle)
-            guard command.isCurrent else { return writer.isCurrent ? .refused(writer) : .superseded }
+            if let refusal = admissionRefusal() { return refusal }
         }
         if session.mcpControlContext != nil, session.lastTerminalCommitRevision != nil {
             guard case .accepted = session.runLifecycle.lastTerminalPublicationResult else { return .refused(writer) }
@@ -226,7 +237,7 @@ final class AgentModeRunService {
               session.pendingInstructions.isEmpty, session.operationAdmissionFailureMessage == nil
         else { return listener.subscription != nil ? .accepted : .refused(writer) }
         let prepared = await writer.scope.mcp.prepareClaudeProviderEpoch(command: command, fence: fence)
-        guard command.isCurrent else { return writer.isCurrent ? .refused(writer) : .superseded }
+        if let refusal = admissionRefusal() { return refusal }
         guard prepared, !Task.isCancelled, listener.isCurrent(), fence.permitsStart(of: session),
               listener.pendingProviderTurnID == turnID, listener.subscription == nil, listener.runtimeFailure == nil,
               !session.runState.isActive, session.agentTask == nil, session.pendingInstructions.isEmpty,
@@ -287,6 +298,7 @@ final class AgentModeRunService {
     func prepareRun(
         tabID: UUID,
         session: AgentTabSession,
+        origin: AgentSessionRuntimeStore.Command,
         workspace: AgentRunWorkspaceInput,
         initialUserMessage: String,
         initialMessageForRun: String,
@@ -304,15 +316,22 @@ final class AgentModeRunService {
         var claudeEventsTransferred = false
         defer {
             if !claudeEventsTransferred, let preparedClaudeEvents {
-                preparedClaudeEvents.listener.close(preparedClaudeEvents.subscription, returningTail: true)
+                preparedClaudeEvents.listener.close(
+                    preparedClaudeEvents.subscription,
+                    returningTail: origin.writer.session === session && origin.writer.ownsPersistentClaim
+                )
                 preparedClaudeEvents.listener.terminalPublished(for: preparedClaudeEvents.subscription)
             }
         }
         var candidateTransferred = false
         defer {
-            if !candidateTransferred {
+            if !candidateTransferred, origin.writer.session === session, origin.writer.ownsPersistentClaim {
                 session.settleLocalComposerOrigin(localComposerCandidate, disposition: .retained)
             }
+        }
+        guard case .restored = origin.requirement, origin.writer.session === session, origin.isCurrent else {
+            startOutcome?.recordStartFailure(message: nil)
+            return .completed(nil)
         }
         guard stopFence?.permitsStart(of: session) ?? true else {
             startOutcome?.recordStartFailure(message: "This scheduled run was cancelled by Stop.")
@@ -350,7 +369,7 @@ final class AgentModeRunService {
         do {
             workspacePath = try workspace.resolve(bindings: session.worktreeBindings)
         } catch {
-            let message = Self.providerStartupFailureMessage(for: error)
+            let message = AgentRunExecutionContracts.providerStartupFailureMessage(for: error)
             await failBeforeProviderStartup(session: session, message: message)
             // The non-Codex return is `nil`, which is indistinguishable from success. The recorder is
             // the only channel that tells a caller this run never reached a provider.
@@ -368,6 +387,7 @@ final class AgentModeRunService {
             let outcome = await codexRunner.startRun(
                 tabID: tabID,
                 session: session,
+                origin: origin,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
                 fallbackContext: codexFallbackContext,
@@ -415,6 +435,7 @@ final class AgentModeRunService {
             await piRunner.startRun(
                 tabID: tabID,
                 session: session,
+                origin: origin,
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
@@ -435,6 +456,7 @@ final class AgentModeRunService {
             await claudeRunner.startRun(
                 tabID: tabID,
                 session: session,
+                origin: origin,
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
                 attachments: attachments,
@@ -455,6 +477,7 @@ final class AgentModeRunService {
             let resources = await acpRunner.prepareRun(
                 tabID: tabID,
                 session: session,
+                origin: origin,
                 workspace: workspace,
                 initialUserMessage: initialUserMessage,
                 initialMessageForRun: initialMessageForRun,
@@ -468,6 +491,10 @@ final class AgentModeRunService {
             )
             if let resources {
                 return .resources(resources)
+            }
+            guard origin.writer.ownsPersistentClaim else {
+                startOutcome?.recordStartFailure(message: nil)
+                return .completed(nil)
             }
             recordNonCodexStartOutcome(startOutcome, session: session)
             return .completed(nil)
@@ -495,14 +522,16 @@ final class AgentModeRunService {
     ///
     /// Every non-Codex runner performs the same synchronous prologue — begin an attempt, set
     /// `runState = .running`, then hand the provider work to `session.agentTask`. Any path that
-    /// refuses before that handoff commits a terminal state first, so an inactive run state on
-    /// return is exactly "never reached the provider pipeline". Checking the state rather than
-    /// `agentTask` avoids mistaking a previous attempt's retained task for this one's acceptance.
+    /// refuses explicitly keeps its recorded outcome, even if a successor run remains active.
+    /// For legacy paths without a receipt, checking state rather than `agentTask` avoids
+    /// mistaking a previous attempt's retained task for this one's acceptance.
     private func recordNonCodexStartOutcome(
         _ startOutcome: AgentRunStartOutcomeRecorder?,
         session: AgentTabSession
     ) {
-        guard let startOutcome else { return }
+        // A stale startup may leave a successor's run active. An explicit refusal must not
+        // be overwritten by inferring acceptance from that shared run state.
+        guard let startOutcome, !startOutcome.hasRecordedOutcome else { return }
         if session.runState.isActive {
             startOutcome.recordAccepted()
         } else {
@@ -519,8 +548,10 @@ final class AgentModeRunService {
         targetRunID: UUID?,
         targetRunAttemptID: UUID?,
         targetController: ACPAgentSessionController,
-        writeReceipt: ACPAgentSessionController.PromptWriteReceipt? = nil
+        writeReceipt: ACPAgentSessionController.PromptWriteReceipt? = nil,
+        inputResourcesAreCurrent: @escaping @MainActor () -> Bool = { true }
     ) async -> Bool {
+        guard inputResourcesAreCurrent() else { return false }
         guard session.operationAdmissionFailureMessage == nil else { return false }
         let selectedAgent = session.selectedAgent
         let runtimePermission = dependencies.providerRuntimePermissionResolver(selectedAgent, session.permissionProfile)
@@ -542,7 +573,7 @@ final class AgentModeRunService {
         do {
             workspacePath = try admission.input.resolve(bindings: session.worktreeBindings)
         } catch {
-            let message = Self.providerStartupFailureMessage(for: error)
+            let message = AgentRunExecutionContracts.providerStartupFailureMessage(for: error)
             await failBeforeProviderStartup(session: session, message: message)
             return false
         }
@@ -561,7 +592,8 @@ final class AgentModeRunService {
             targetRunID: targetRunID,
             targetRunAttemptID: targetRunAttemptID,
             targetController: targetController,
-            writeReceipt: writeReceipt
+            writeReceipt: writeReceipt,
+            inputResourcesAreCurrent: inputResourcesAreCurrent
         )
         steeringDebugLog("[AgentRunSteeringWake] ACP active submit runner returned sent=\(sent) agent=\(selectedAgent.rawValue) model=\(runRequest.modelString ?? "default") runID=\(String(describing: targetRunID)) attempt=\(String(describing: targetRunAttemptID))")
         return sent
@@ -703,30 +735,42 @@ final class AgentModeRunService {
                 session.pendingACPSteeringInstructions.removeFirst(queuedBatch.count)
                 let steeringBatch = currentACPSteeringInstructions(queuedBatch, session: session)
                 guard !steeringBatch.isEmpty else {
+                    session.pendingNonCodexUserInputTokenQueue.removeFirst(min(queuedBatch.count, session.pendingNonCodexUserInputTokenQueue.count))
                     releaseSupersedingProtectionIfUnused()
                     continue
                 }
 
                 let providerTextForSend = coalescedACPProviderText(for: steeringBatch)
                 var dequeuedUserInputTokens: [Int] = []
-                for _ in steeringBatch {
+                let retainedIDs = Set(steeringBatch.map(\.id))
+                for instruction in queuedBatch {
                     guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { break }
-                    dequeuedUserInputTokens.append(session.pendingNonCodexUserInputTokenQueue.removeFirst())
+                    let tokens = session.pendingNonCodexUserInputTokenQueue.removeFirst()
+                    if retainedIDs.contains(instruction.id) { dequeuedUserInputTokens.append(tokens) }
                 }
                 let steeringUserInputTokens = dequeuedUserInputTokens.count == steeringBatch.count
                     ? dequeuedUserInputTokens.reduce(0, +)
                     : hooks.usage.estimateRuntimeTokens(providerTextForSend)
                 hooks.usage.addUserInputTokensToActiveNonCodexTurn(steeringUserInputTokens, session)
 
+                var preparationRefused = false
                 let augmentedSteeringText = await hooks.providerInput.augmentUserMessageForProviderSend(
                     providerTextForSend,
                     steeringBatch.flatMap(\.attachments),
-                    steeringBatch.flatMap(\.taggedFileAttachments),
-                    session, steeringBatch.contains(where: \.skipsSlashExpansion)
+                    steeringBatch.flatMap { $0.providerTaggedFileAttachments ?? $0.taggedFileAttachments },
+                    session, steeringBatch.contains(where: \.skipsSlashExpansion),
+                    {
+                        if Task.isCancelled || session.acpSteeringFlushID != flushID
+                            || session.acpController !== controller
+                        {
+                            preparationRefused = true
+                        }
+                        return !preparationRefused
+                    }
                 )
                 // Augmentation suspended. A retired flush owns this dequeued batch, which teardown
                 // cannot see in the queue; withdraw it rather than requeueing into a dead controller.
-                guard !Task.isCancelled, session.acpSteeringFlushID == flushID,
+                guard augmentedSteeringText.dispatchIsCurrent(), !preparationRefused, !Task.isCancelled, session.acpSteeringFlushID == flushID,
                       session.acpController === controller
                 else {
                     releaseSupersedingProtectionIfUnused()
@@ -747,6 +791,15 @@ final class AgentModeRunService {
                 let stillCurrent = currentACPSteeringInstructions(steeringBatch, session: session)
                 if stillCurrent.count != steeringBatch.count {
                     releaseSupersedingProtectionIfUnused()
+                    if steeringBatch.contains(where: { $0.runtimeInputAdmission?.isCurrent() == false }) {
+                        let ids = Set(stillCurrent.map(\.id))
+                        let retainedTokens = dequeuedUserInputTokens.enumerated().compactMap { index, tokens in
+                            ids.contains(steeringBatch[index].id) ? tokens : nil
+                        }
+                        session.pendingACPSteeringInstructions.insert(contentsOf: stillCurrent, at: 0)
+                        session.pendingNonCodexUserInputTokenQueue.insert(contentsOf: retainedTokens, at: 0)
+                        continue // Recompose healthy siblings; never turn them into follow-ups for one stale managed row.
+                    }
                     if !dequeuedUserInputTokens.isEmpty {
                         session.pendingNonCodexUserInputTokenQueue.insert(contentsOf: dequeuedUserInputTokens, at: 0)
                     }
@@ -760,17 +813,24 @@ final class AgentModeRunService {
                 let writeReceipt = ACPAgentSessionController.PromptWriteReceipt()
                 let sent = await submitActiveACPPromptIfSupported(
                     session: session,
-                    messageForRun: augmentedSteeringText,
+                    messageForRun: augmentedSteeringText.text,
                     attachments: steeringBatch.flatMap(\.attachments),
                     targetRunID: runID,
                     targetRunAttemptID: runAttemptID,
                     targetController: controller,
-                    writeReceipt: writeReceipt
+                    writeReceipt: writeReceipt,
+                    inputResourcesAreCurrent: {
+                        augmentedSteeringText.dispatchIsCurrent()
+                            && steeringBatch.allSatisfy { $0.runtimeInputAdmission?.isCurrent() != false }
+                    }
                 )
                 if !Task.isCancelled, session.acpSteeringFlushID == flushID,
                    session.acpController === controller,
                    hooks.queuedWorkRecovery.isCurrentSessionBinding(session, flushStopFence)
                 {
+                    if sent || writeReceipt.wasWritten {
+                        hooks.providerInput.recordTaggedFileFailures(augmentedSteeringText.failures, session)
+                    }
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, sent || writeReceipt.wasWritten)
                 }
                 if !sent, writeReceipt.wasWritten {
@@ -800,6 +860,16 @@ final class AgentModeRunService {
                         restoreLocalACPSteeringDrafts(steeringBatch, tabID: tabID, session: session, stopFence: flushStopFence)
                         return
                     }
+                    if steeringBatch.contains(where: { $0.runtimeInputAdmission?.isCurrent() == false }) {
+                        let retained = currentACPSteeringInstructions(steeringBatch, session: session)
+                        let ids = Set(retained.map(\.id))
+                        let retainedTokens = dequeuedUserInputTokens.enumerated().compactMap { index, tokens in
+                            ids.contains(steeringBatch[index].id) ? tokens : nil
+                        }
+                        session.pendingACPSteeringInstructions.insert(contentsOf: retained, at: 0)
+                        session.pendingNonCodexUserInputTokenQueue.insert(contentsOf: retainedTokens, at: 0)
+                        continue
+                    }
                     session.pendingACPSteeringInstructions.insert(contentsOf: steeringBatch, at: 0)
                     if !dequeuedUserInputTokens.isEmpty {
                         session.pendingNonCodexUserInputTokenQueue.insert(contentsOf: dequeuedUserInputTokens, at: 0)
@@ -817,17 +887,6 @@ final class AgentModeRunService {
         }
 
         return true
-    }
-
-    private static func providerStartupFailureMessage(for error: Error) -> String {
-        if let localized = error as? LocalizedError,
-           let description = localized.errorDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !description.isEmpty
-        {
-            return description
-        }
-        let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        return description.isEmpty ? String(describing: error) : description
     }
 
     private func failBeforeProviderStartup(session: AgentTabSession, message: String) async {
@@ -966,15 +1025,17 @@ final class AgentModeRunService {
         var removedRow = false
         for instruction in instructions {
             guard let managed = instruction.managed else { continue }
-            if mayMutateOriginalBinding,
+            if mayMutateOriginalBinding, instruction.runtimeInputAdmission?.ownsCleanup() != false,
                let index = session.items.firstIndex(where: { $0.id == managed.attributedItemID })
             {
                 _ = session.removeItem(at: index)
                 removedRow = true
             }
-            managed.sink.resolve(.notAccepted(
-                message: "The ACP steer was withdrawn before the provider accepted it."
-            ))
+            if instruction.runtimeInputAdmission?.ownsCleanup() == false {
+                managed.sink.resolve(.unconfirmed(message: "The originating ACP writer changed before input settlement."))
+            } else {
+                managed.sink.resolve(.notAccepted(message: "The ACP steer was withdrawn before the provider accepted it."))
+            }
         }
         if removedRow {
             session.isDirty = true
@@ -989,7 +1050,7 @@ final class AgentModeRunService {
     ) -> [AgentTabSession.ACPSteeringInstruction] {
         instructions.filter { instruction in
             guard let managed = instruction.managed else { return true }
-            guard managedACPSteeringIsCurrent(managed, session: session) else {
+            guard managedACPSteeringIsCurrent(managed, session: session), instruction.runtimeInputAdmission?.isCurrent() != false else {
                 withdrawManagedACPSteering([instruction], session: session)
                 return false
             }
@@ -1022,6 +1083,27 @@ final class AgentModeRunService {
             )
         }
     #endif
+
+    func withdrawQueuedManagedACPSteering(id: UUID, session: AgentTabSession, stopFence: AgentRunStartStopFence) {
+        guard let index = session.pendingACPSteeringInstructions.firstIndex(where: { $0.id == id }) else { return }
+        let instruction = session.pendingACPSteeringInstructions.remove(at: index)
+        if index < session.pendingNonCodexUserInputTokenQueue.count { session.pendingNonCodexUserInputTokenQueue.remove(at: index) }
+        withdrawManagedACPSteering([instruction], session: session, stopFence: stopFence)
+    }
+
+    /// Submission can lose the flush race to a terminal/attempt transition. The run service owns
+    /// typed follow-up recovery too; no presentation is needed to retain managed provider text.
+    func settleRejectedACPSteeringSubmission(
+        id: UUID, session: AgentTabSession, stopFence: AgentRunStartStopFence
+    ) {
+        guard stopFence.permitsStart(of: session),
+              let index = session.pendingACPSteeringInstructions.firstIndex(where: { $0.id == id }) else { return }
+        let queued = session.pendingACPSteeringInstructions.remove(at: index)
+        requeueACPSteeringAsFollowUp(
+            [queued], tabID: session.tabID, session: session,
+            reason: "submission lost active flush admission", stopFence: stopFence
+        )
+    }
 
     private func requeueACPSteeringAsFollowUp(
         _ instructions: [AgentTabSession.ACPSteeringInstruction],
@@ -1192,14 +1274,21 @@ final class AgentModeRunService {
 
         let tabID = session.tabID
         steeringDebugLog("[AgentRunSteeringWake] Claude flush start tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) queue=\(session.pendingClaudeSteeringInstructions.count)")
-        session.claudeSteeringFlushTask = Task { [weak self, weak session] in
+        let flushID = UUID()
+        let task = Task { [weak self, weak session] in
             guard let self, let session else { return }
+            @MainActor func ownsFlush() -> Bool {
+                session.claudeSteeringFlushTask?.id == flushID
+            }
             defer {
-                session.claudeSteeringFlushTask = nil
-                if session.activeRunOwnership == ownership {
+                let ownedSlot = ownsFlush()
+                if ownedSlot { session.claudeSteeringFlushTask = nil }
+                // A current-owner withdrawal may already have cleared the slot. Preserve its
+                // original-attempt settlement signal, but never signal through a replacement.
+                if ownedSlot || session.claudeSteeringFlushTask == nil, session.activeRunOwnership == ownership {
                     self.nativeCoordinator(for: session.selectedAgent).recheckSteeringSettlement(session: session)
                 }
-                if session.runState == .running || session.runState == .waitingForApproval,
+                if ownedSlot, session.runState == .running || session.runState == .waitingForApproval,
                    session.selectedAgent.usesNativeInteractiveRuntime,
                    !session.pendingClaudeSteeringInstructions.isEmpty
                 {
@@ -1210,14 +1299,16 @@ final class AgentModeRunService {
                 }
             }
 
+            @MainActor func restoreAttemptDrafts() {
+                restoreQueuedClaudeSteeringDrafts(
+                    tabID: tabID, session: session, strategy: .prependAlways,
+                    matching: { $0.targetRunID == runID && $0.targetRunAttemptID == runAttemptID }
+                )
+            }
             while true {
+                guard ownsFlush() else { return }
                 guard isCurrentClaudeSteeringAttempt(session: session, runID: runID, runAttemptID: runAttemptID) else {
-                    restoreQueuedClaudeSteeringDrafts(
-                        tabID: tabID,
-                        session: session,
-                        strategy: .prependAlways,
-                        matching: { $0.targetRunID == runID && $0.targetRunAttemptID == runAttemptID }
-                    )
+                    restoreAttemptDrafts()
                     return
                 }
                 guard !session.pendingClaudeSteeringInstructions.isEmpty else { return }
@@ -1245,11 +1336,14 @@ final class AgentModeRunService {
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush waiting MCP idle tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) queue=\(session.pendingClaudeSteeringInstructions.count)")
                 do {
                     try await session.awaitObserverWaitRelease(runID: runID, runAttemptID: runAttemptID)
+                    guard ownsFlush() else { return }
                     try await dependencies.awaitNoActiveMCPTools(runID)
                     steeringDebugLog("[AgentRunSteeringWake] Claude flush MCP idle returned tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) queue=\(session.pendingClaudeSteeringInstructions.count)")
                 } catch {
                     steeringDebugLog("[AgentRunSteeringWake] Claude flush MCP idle cancelled tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) error=\(error)")
-                    // Task cancelled (user cancelled the run) — restore all remaining drafts.
+                    // Current-owner withdrawal restores its queue itself. A replaced flush
+                    // must not restore instructions appended after that withdrawal.
+                    guard ownsFlush() else { return }
                     restoreAllQueuedClaudeSteeringDrafts(tabID: tabID, session: session, strategy: .prependAlways)
                     return
                 }
@@ -1258,17 +1352,15 @@ final class AgentModeRunService {
                 // ordinary active MCP tool tracking. Before a Claude native interrupt, also
                 // wait briefly for parent-owned child-agent wait scopes to drain after the
                 // upstream steering wake has had a chance to return `interrupted_by_steering`.
-                guard await awaitClaudeChildAgentRunWaitScopesDrained(
+                guard ownsFlush() else { return }
+                let childWaitsDrained = await awaitClaudeChildAgentRunWaitScopesDrained(
                     session: session,
                     runID: runID,
                     runAttemptID: runAttemptID
-                ) else {
-                    restoreQueuedClaudeSteeringDrafts(
-                        tabID: tabID,
-                        session: session,
-                        strategy: .prependAlways,
-                        matching: { $0.targetRunID == runID && $0.targetRunAttemptID == runAttemptID }
-                    )
+                )
+                guard ownsFlush() else { return }
+                guard childWaitsDrained else {
+                    restoreAttemptDrafts()
                     return
                 }
 
@@ -1280,51 +1372,88 @@ final class AgentModeRunService {
                 guard isCurrentClaudeSteeringAttempt(session: session, runID: runID, runAttemptID: runAttemptID),
                       !session.pendingClaudeSteeringInstructions.isEmpty
                 else {
+                    restoreAttemptDrafts()
+                    return
+                }
+
+                // Keep recoverable input in the queue while preparation suspends. Current-owner
+                // withdrawal can then restore it, rather than losing an already-dequeued draft.
+                let steering = session.pendingClaudeSteeringInstructions[0]
+                if steering.runtimeInputAdmission?.isCurrent() == false {
+                    restoreQueuedClaudeSteeringDrafts(tabID: tabID, session: session, strategy: .prependAlways, matching: { $0.id == steering.id })
+                    if !session.pendingNonCodexUserInputTokenQueue.isEmpty { session.pendingNonCodexUserInputTokenQueue.removeFirst() }
+                    continue
+                }
+                var preparationRefused = false
+                @MainActor func admitsPreparation() -> Bool {
+                    if !ownsFlush()
+                        || !self.isCurrentClaudeSteeringAttempt(session: session, runID: runID, runAttemptID: runAttemptID)
+                        || session.pendingClaudeSteeringInstructions.first?.id != steering.id
+                    {
+                        preparationRefused = true
+                    }
+                    return !preparationRefused
+                }
+                let augmentedSteeringText = await hooks.providerInput.augmentUserMessageForProviderSend(
+                    steering.providerText,
+                    steering.attachments,
+                    steering.providerTaggedFileAttachments ?? steering.taggedFileAttachments,
+                    session, steering.skipsSlashExpansion, admitsPreparation
+                )
+                guard ownsFlush() else { return }
+                if steering.runtimeInputAdmission != nil,
+                   steering.runtimeInputAdmission?.isCurrent() == false || !augmentedSteeringText.dispatchIsCurrent()
+                {
+                    restoreQueuedClaudeSteeringDrafts(tabID: tabID, session: session, strategy: .prependAlways, matching: { $0.id == steering.id })
+                    if !session.pendingNonCodexUserInputTokenQueue.isEmpty { session.pendingNonCodexUserInputTokenQueue.removeFirst() }
+                    continue
+                }
+                guard augmentedSteeringText.dispatchIsCurrent(), admitsPreparation() else {
+                    if session.pendingClaudeSteeringInstructions.first?.id != steering.id,
+                       isCurrentClaudeSteeringAttempt(session: session, runID: runID, runAttemptID: runAttemptID)
+                    {
+                        continue
+                    }
                     restoreQueuedClaudeSteeringDrafts(
-                        tabID: tabID,
-                        session: session,
-                        strategy: .prependAlways,
+                        tabID: tabID, session: session, strategy: .prependAlways,
                         matching: { $0.targetRunID == runID && $0.targetRunAttemptID == runAttemptID }
                     )
                     return
                 }
-
-                let steering = session.pendingClaudeSteeringInstructions.removeFirst()
-                steeringDebugLog("[AgentRunSteeringWake] Claude flush dequeued steering id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) remaining=\(session.pendingClaudeSteeringInstructions.count)")
+                session.pendingClaudeSteeringInstructions.removeFirst()
                 let dequeuedUserInputTokens: Int? = {
                     guard !session.pendingNonCodexUserInputTokenQueue.isEmpty else { return nil }
                     return session.pendingNonCodexUserInputTokenQueue.removeFirst()
                 }()
-
-                let augmentedSteeringText = await hooks.providerInput.augmentUserMessageForProviderSend(
-                    steering.providerText,
-                    steering.attachments,
-                    steering.taggedFileAttachments,
-                    session, steering.skipsSlashExpansion
-                )
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush sending native interrupt id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID)")
                 var inputWasAttempted = false
                 // Queued image attachments are a pi-native send. Claude steering stays text-only.
                 let queuedAttachments = session.selectedAgent.usesPiNativeRuntime ? steering.attachments : []
                 let sendOutcome = await nativeCoordinator(for: session.selectedAgent).sendClaudeNativeMessage(
                     session: session,
-                    text: augmentedSteeringText,
+                    text: augmentedSteeringText.text,
                     attachments: queuedAttachments,
                     intent: .runAttempt(ownership: ownership, runID: runID),
                     // The active runner owns the current controller's event stream. Replacing it
                     // here would strand the runner, so steering must keep failing closed.
                     allowsCatalogRouteControllerRecovery: false,
-                    inputAttemptChanged: { inputWasAttempted = $0 }
+                    inputAttemptChanged: { inputWasAttempted = $0 },
+                    inputResourcesAreCurrent: {
+                        augmentedSteeringText.dispatchIsCurrent() && steering.runtimeInputAdmission?.isCurrent() != false
+                    }
                 )
                 steeringDebugLog("[AgentRunSteeringWake] Claude flush send completed id=\(steering.id) tab=\(tabID) runID=\(runID) attempt=\(runAttemptID) outcome=\(String(describing: sendOutcome))")
                 switch sendOutcome {
                 case .sent:
+                    hooks.providerInput.recordTaggedFileFailures(augmentedSteeringText.failures, session)
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, true)
                     await hooks.continuation.signalMCPInstructionDelivered(session)
                 case .failed:
                     if inputWasAttempted, session.activeRunOwnership == ownership {
+                        hooks.providerInput.recordTaggedFileFailures(augmentedSteeringText.failures, session)
                         nativeCoordinator(for: session.selectedAgent).notifySteeringSettlement(session: session, protectedIDs: steering.supersedingProtectedTurnIDs, inputWasAttempted: true)
                     }
+                    guard ownsFlush() else { return }
                     hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
                     // Re-insert the failed instruction so it's included in the restore.
                     // The coordinator deliberately leaves the live run state and
@@ -1339,6 +1468,13 @@ final class AgentModeRunService {
                     if let dequeuedUserInputTokens {
                         session.pendingNonCodexUserInputTokenQueue.insert(dequeuedUserInputTokens, at: 0)
                     }
+                    if !inputWasAttempted, steering.runtimeInputAdmission != nil,
+                       steering.runtimeInputAdmission?.isCurrent() == false || !augmentedSteeringText.dispatchIsCurrent()
+                    {
+                        restoreQueuedClaudeSteeringDrafts(tabID: tabID, session: session, strategy: .prependAlways, matching: { $0.id == steering.id })
+                        if dequeuedUserInputTokens != nil, !session.pendingNonCodexUserInputTokenQueue.isEmpty { session.pendingNonCodexUserInputTokenQueue.removeFirst() }
+                        continue
+                    }
                     restoreAllQueuedClaudeSteeringDrafts(tabID: tabID, session: session, strategy: .prependAlways)
                     return
                 case .superseded:
@@ -1347,6 +1483,7 @@ final class AgentModeRunService {
             }
         }
 
+        session.claudeSteeringFlushTask = .init(id: flushID, task: task)
         return true
     }
 

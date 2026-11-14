@@ -274,7 +274,7 @@ final class AgentSessionLinkAutonomousPipelineTests: XCTestCase {
     private func acceptWake(_ node: Node, wakeID: UUID) throws {
         try syncRunCatalogProjection(node)
         let claim = try XCTUnwrap(
-            node.viewModel.agentSessionLinkPromptClaim(
+            node.viewModel.linkExecutionRuntime.agentSessionLinkPromptClaim(
                 for: node.session,
                 dispatchID: .autoWake(wakeID: wakeID)
             ),
@@ -287,13 +287,13 @@ final class AgentSessionLinkAutonomousPipelineTests: XCTestCase {
         preparing.phase = .preparingDispatch
         node.session.oversight.pendingAutoWake = preparing
         XCTAssertTrue(
-            node.viewModel.agentSessionLinkAcquirePhysicalDispatch(
+            node.viewModel.linkExecutionRuntime.agentSessionLinkAcquirePhysicalDispatch(
                 for: node.session,
                 dispatchID: claim.dispatchID
             ),
             "the idle follow-up must cross the shared immutable-claim acquisition fence"
         )
-        node.viewModel.acceptAgentSessionLinkPromptClaim(claim)
+        node.viewModel.linkExecutionRuntime.acceptAgentSessionLinkPromptClaim(claim)
         XCTAssertNil(node.session.oversight.pendingAutoWake, "an accepted wake settles")
     }
 
@@ -538,7 +538,7 @@ final class AgentSessionLinkAutonomousPipelineTests: XCTestCase {
                 }
             }
         #endif
-        node.viewModel.agentSessionLinkPublishRunCatalogProjection(
+        node.viewModel.linkExecutionRuntime.agentSessionLinkPublishRunCatalogProjection(
             AgentSessionLinkRunCatalogProjection(
                 runID: runID,
                 routeToken: routeToken,
@@ -698,7 +698,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         guard let viewModel = owningViewModel(for: endpoint) else {
             return .failure(.observerUnavailable)
         }
-        return viewModel.agentSessionLinkAutoWakeSnoozeProjection(
+        return viewModel.linkExecutionRuntime.agentSessionLinkAutoWakeSnoozeProjection(
             endpoint: endpoint,
             targetSessionID: targetSessionID,
             expectedReference: expectedReference
@@ -715,7 +715,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         guard let viewModel = owningViewModel(for: endpoint) else {
             return .failure(.observerUnavailable)
         }
-        return viewModel.agentSessionLinkMutateAutoWakeSnooze(
+        return viewModel.linkExecutionRuntime.agentSessionLinkMutateAutoWakeSnooze(
             endpoint: endpoint,
             targetSessionID: targetSessionID,
             expectedReference: expectedReference,
@@ -744,7 +744,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         to endpoint: DomainAgentSessionLinkEndpointIdentity
     ) {
         owningViewModel(for: endpoint)?
-            .agentSessionLinkPublishPromptInventory(inventory, to: endpoint)
+            .linkExecutionRuntime.agentSessionLinkPublishPromptInventory(inventory, to: endpoint)
     }
 
     func agentSessionLinkPublishPassiveStatusNotices(
@@ -752,13 +752,13 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         to endpoint: DomainAgentSessionLinkEndpointIdentity
     ) {
         owningViewModel(for: endpoint)?
-            .agentSessionLinkPublishPassiveStatusNotices(snapshot, to: endpoint)
+            .linkExecutionRuntime.agentSessionLinkPublishPassiveStatusNotices(snapshot, to: endpoint)
     }
 
     func agentSessionLinkWithholdPromptInventory(
         for endpoint: DomainAgentSessionLinkEndpointIdentity
     ) -> UInt64? {
-        owningViewModel(for: endpoint)?.agentSessionLinkWithholdPromptInventory(for: endpoint)
+        owningViewModel(for: endpoint)?.linkExecutionRuntime.agentSessionLinkWithholdPromptInventory(for: endpoint)
     }
 
     func agentSessionLinkReleasePromptInventoryHold(
@@ -766,7 +766,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         for endpoint: DomainAgentSessionLinkEndpointIdentity,
         publishing inventory: AgentSessionLinkPromptInventory?
     ) {
-        owningViewModel(for: endpoint)?.agentSessionLinkReleasePromptInventoryHold(
+        owningViewModel(for: endpoint)?.linkExecutionRuntime.agentSessionLinkReleasePromptInventoryHold(
             token,
             for: endpoint,
             publishing: inventory
@@ -808,7 +808,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
 
     func agentSessionLinkStartStopFence(for candidate: AgentSessionLinkEndpointCandidate) -> AgentRunStartStopFence? {
         guard let viewModel = viewModelsByWindowID[candidate.windowID],
-              let session = viewModel.agentSessionLinkLiveSession(matching: candidate)
+              let session = viewModel.linkExecutionRuntime.agentSessionLinkLiveSession(matching: candidate)
         else { return nil }
         return AgentRunStartStopFence(session: session)
     }
@@ -822,7 +822,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         guard let viewModel = viewModelsByWindowID[candidate.windowID] else {
             return .blocked(.endpointInvalidated)
         }
-        return await viewModel.agentSessionLinkPerformSend(
+        return await viewModel.linkExecutionRuntime.agentSessionLinkPerformSend(
             to: candidate,
             request: request,
             liveness: liveness,
@@ -856,7 +856,7 @@ final class LiveWindowEndpointHost: AgentSessionLinkEndpointHost {
         for endpoint: DomainAgentSessionLinkEndpointIdentity
     ) -> AgentModeViewModel? {
         guard let viewModel = viewModelsByWindowID[endpoint.windowID],
-              viewModel.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
+              viewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
         else {
             return nil
         }

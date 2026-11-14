@@ -21,6 +21,7 @@ final class AgentModeRunComposition {
     func startRun(
         tabID: UUID,
         session: AgentTabSession,
+        origin: AgentSessionRuntimeStore.Command,
         initialUserMessage: String,
         initialMessageForRun: String,
         attachments: [AgentFileAttachment],
@@ -37,6 +38,7 @@ final class AgentModeRunComposition {
         switch await execution.prepareRun(
             tabID: tabID,
             session: session,
+            origin: origin,
             workspace: workspace,
             initialUserMessage: initialUserMessage,
             initialMessageForRun: initialMessageForRun,
@@ -74,6 +76,19 @@ final class AgentRunProviderComposition {
         self.headless = headless
         self.acp = acp
         self.controller = controller
+    }
+
+    static func live() -> AgentRunProviderComposition {
+        .init(
+            headless: makeHeadlessProvider,
+            acp: { try await ACPAgentProviderFactory.makeProvider(for: $0, modelString: $1) },
+            controller: { try ACPAgentSessionController(provider: $0, runRequest: $1) }
+        )
+    }
+
+    nonisolated static func makeHeadlessProvider(agent: AgentProviderKind, modelString: String?) -> HeadlessAgentProvider {
+        assert(agent != .codexExec, "Codex native runs must not use headless provider factory.")
+        return AgentRuntimeProviderService.shared.makeProvider(for: agent, modelString: modelString)
     }
 
     func fulfill(_ first: AgentRunResourceRequest?) async {

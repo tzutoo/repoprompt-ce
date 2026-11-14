@@ -231,20 +231,20 @@ final class AgentSessionStreamRuntimeTests: XCTestCase {
         _ = session.setRunningStatus("Thinking", source: .reasoning)
         let deltas = ["First line\nInvest", "igating the ", "parser."]
         for delta in deltas {
-            XCTAssertTrue(viewModel.test_applyClaudeReasoningStatusDelta(delta, session: session))
+            XCTAssertTrue(viewModel.streamRuntime.test_applyClaudeReasoningStatusDelta(delta, session: session))
         }
         let fullBlock = deltas.joined()
         XCTAssertEqual(session.claudeReasoningStatusBuffer, fullBlock)
         XCTAssertEqual(session.runningStatusText, "Investigating the parser.")
 
         // The translator can emit the complete multiline thinking block after its chunks.
-        XCTAssertFalse(viewModel.test_applyClaudeReasoningStatusDelta(fullBlock, session: session))
+        XCTAssertFalse(viewModel.streamRuntime.test_applyClaudeReasoningStatusDelta(fullBlock, session: session))
         XCTAssertEqual(session.runningStatusText, "Investigating the parser.")
 
         let oversizedDelta = String(repeating: "🧠", count: 4000) + "\nLatest "
-        XCTAssertTrue(viewModel.test_applyClaudeReasoningStatusDelta(oversizedDelta, session: session))
+        XCTAssertTrue(viewModel.streamRuntime.test_applyClaudeReasoningStatusDelta(oversizedDelta, session: session))
         XCTAssertEqual(session.claudeReasoningStatusBuffer.count, 4000)
-        XCTAssertTrue(viewModel.test_applyClaudeReasoningStatusDelta("bounded line", session: session))
+        XCTAssertTrue(viewModel.streamRuntime.test_applyClaudeReasoningStatusDelta("bounded line", session: session))
         XCTAssertEqual(session.claudeReasoningStatusBuffer, String((oversizedDelta + "bounded line").suffix(4000)))
         XCTAssertEqual(session.claudeReasoningStatusBuffer.count, 4000)
         XCTAssertEqual(session.runningStatusText, "Latest bounded line")
@@ -1594,7 +1594,7 @@ final class AgentSessionInteractionRuntimeTests: XCTestCase {
                 fatalError("Composing terminal hooks must not launch a provider")
             }
         )
-        viewModel?.ensureRunServiceMaterializedForRunStart()
+        _ = viewModel?.runService
         let runtime = try XCTUnwrap(viewModel?.interactionRuntime)
         weak let codex = viewModel?.codexCoordinator
         weak let claude = runtime.claudeCommands
@@ -2644,9 +2644,12 @@ final class AgentSessionHandoffRuntimeTests: XCTestCase {
     }
 
     func testMissingRecoveryHostCannotStartContextlessClaudeReplacement() async {
+        let scope = AgentSessionRuntimeStore.shared.makeScope()
+        defer { scope.replaceSessions([:]) }
         let session = AgentTabSession(tabID: UUID())
+        scope.replaceSessions([session.tabID: session])
         session.hasLoadedPersistedState = true
-        session.testInstallPersistentSessionBinding(sessionID: UUID())
+        session.installPersistentSessionBinding(.init(tabID: session.tabID, sessionID: UUID(), workspaceID: UUID()))
         session.recordRestorationAuthoritative(.persistedPayloadApplied)
         session.selectedAgent = .claudeCode
         session.providerSessionID = "missing-original-session"
@@ -2662,7 +2665,7 @@ final class AgentSessionHandoffRuntimeTests: XCTestCase {
         let runID = UUID()
         session.installRunID(runID)
         let owner = session.beginRunAttempt(source: "test.handoff.missingHost")
-        let result = await coordinator.ensureClaudeNativeSession(session: session, intent: .runAttempt(ownership: owner, runID: runID))
+        let result = await coordinator.test_ensureClaudeNativeSession(session: session, intent: .runAttempt(ownership: owner, runID: runID))
         XCTAssertNotEqual(result, .ready)
         XCTAssertEqual(creations, 1, "No fresh controller without acknowledged recovery preparation")
         let attempts = await controller.startOrResumeExistingSessionIDs

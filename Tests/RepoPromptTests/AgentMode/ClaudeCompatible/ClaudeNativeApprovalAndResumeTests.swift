@@ -476,7 +476,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         }, write: { writes.append($0) })
         let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
         let send = Task {
-            await coordinator.sendClaudeNativeMessage(
+            await coordinator.test_sendClaudeNativeMessage(
                 session: session, text: "first ordinary turn", attachments: [], intent: intent,
                 allowsCatalogRouteControllerRecovery: false
             )
@@ -672,8 +672,11 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         session.selectedAgent = .claudeCode
         session.selectedModelRaw = "claude-opus-5-5:high"
         session.hasLoadedPersistedState = true
-        session.testInstallPersistentSessionBinding(sessionID: UUID())
+        let scope = AgentSessionRuntimeStore.shared.makeScope()
+        scope.replaceSessions([session.tabID: session])
+        session.installPersistentSessionBinding(.init(tabID: session.tabID, sessionID: UUID(), workspaceID: UUID()))
         session.recordRestorationAuthoritative(.persistedPayloadApplied)
+        addTeardownBlock { @MainActor in scope.replaceSessions([:]) }
         _ = try XCTUnwrap(
             session.permitsBoundOperationAndSave ? session.currentRestorationBindingToken : nil,
             "The restored conversation must be ready before exercising native configuration."
@@ -696,7 +699,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
             )
             let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
             let send = Task {
-                await coordinator.sendClaudeNativeMessage(
+                await coordinator.test_sendClaudeNativeMessage(
                     session: session, text: "ordinary", attachments: [], intent: intent,
                     allowsCatalogRouteControllerRecovery: false
                 )
@@ -726,7 +729,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         )
         let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
         let send = Task {
-            await coordinator.sendClaudeNativeMessage(
+            await coordinator.test_sendClaudeNativeMessage(
                 session: session, text: "ordinary", attachments: [], intent: intent,
                 allowsCatalogRouteControllerRecovery: false
             )
@@ -752,7 +755,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
                 initialized: true, controlRequest: { _ in throw failure }, write: { writes.append($0) }
             )
             let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
-            let outcome = await coordinator.sendClaudeNativeMessage(
+            let outcome = await coordinator.test_sendClaudeNativeMessage(
                 session: session, text: "ordinary", attachments: [], intent: intent,
                 allowsCatalogRouteControllerRecovery: false
             )
@@ -773,10 +776,10 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         }, write: { writes.append($0) })
         await replacement.test_installConfigurationTransport(initialized: true, write: { writes.append($0) })
         let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller, replacement: replacement)
-        let ready = await coordinator.ensureClaudeNativeSession(session: session, intent: intent)
+        let ready = await coordinator.test_ensureClaudeNativeSession(session: session, intent: intent)
         XCTAssertEqual(ready, .ready)
         session.selectedModelRaw = "claude-sonnet-4-6:high"
-        let outcome = await coordinator.sendClaudeNativeMessage(
+        let outcome = await coordinator.test_sendClaudeNativeMessage(
             session: session, text: "ordinary after model switch", attachments: [], intent: intent,
             allowsCatalogRouteControllerRecovery: false
         )
@@ -807,7 +810,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
             initialized: true, controlRequest: { try await requests.respond($0) }, write: { writes.append($0) }
         )
         let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
-        let outcome = await coordinator.sendClaudeNativeMessage(
+        let outcome = await coordinator.test_sendClaudeNativeMessage(
             session: session, text: "ordinary", attachments: [], intent: intent,
             allowsCatalogRouteControllerRecovery: false,
             autoEffortSelection: .init(
@@ -866,7 +869,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
             let disabled = AgentAutomationTurnAudit.Feature(configured: false, eligible: false, judgmentRequested: false, decision: .disabled)
             session.appendAutomationAudit(.init(turnID: auditID, createdAt: Date(), router: disabled, autoEffort: disabled))
             let send = Task {
-                await coordinator.sendClaudeNativeMessage(
+                await coordinator.test_sendClaudeNativeMessage(
                     session: session, text: "ordinary", attachments: [], intent: intent,
                     allowsCatalogRouteControllerRecovery: false
                 )
@@ -895,7 +898,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
                 XCTAssertEqual(session.selfCompactState.active?.noteDispatchStarted, false)
                 XCTAssertEqual(session.selfCompactState.active?.note, "keep this exact note")
                 XCTAssertNil(session.selfCompactState.latest)
-                let retry = await coordinator.sendClaudeNativeMessage(
+                let retry = await coordinator.test_sendClaudeNativeMessage(
                     session: session, text: "retry", attachments: [], intent: intent,
                     allowsCatalogRouteControllerRecovery: false
                 )
@@ -929,7 +932,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
             }, write: { writes.append($0) })
             let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller)
             let send = Task {
-                await coordinator.sendClaudeNativeMessage(
+                await coordinator.test_sendClaudeNativeMessage(
                     session: session, text: "ordinary", attachments: [], intent: intent,
                     allowsCatalogRouteControllerRecovery: false,
                     autoEffortSelection: .init(
@@ -968,7 +971,7 @@ final class ClaudeNativeApprovalAndResumeTests: XCTestCase {
         await replacement.test_installConfigurationTransport(initialized: true, write: { writes.append($0) })
         let (coordinator, session, intent) = try ordinaryTurnFixture(controller: controller, replacement: replacement)
         let send = Task {
-            await coordinator.sendClaudeNativeMessage(
+            await coordinator.test_sendClaudeNativeMessage(
                 session: session, text: "ordinary", attachments: [], intent: intent,
                 allowsCatalogRouteControllerRecovery: false
             )
@@ -1512,7 +1515,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         // A live provider conversation already has a persistent runtime writer, whether or
         // not its turn is MCP-controlled. Unbound local creation is covered separately.
         let persistentSessionID = UUID()
-        XCTAssertNil(harness.host.test_bindingRejection(sessionID: persistentSessionID, on: session))
+        XCTAssertNil(harness.host.runtimeSessionStore.bindingRejection(persistentSessionID, on: session))
         session.installPersistentSessionBinding(.init(tabID: session.tabID, sessionID: persistentSessionID, workspaceID: UUID()))
         session.recordRestorationAuthoritative(.persistedPayloadApplied)
         XCTAssertNotNil(try harness.host.runtimeCommand(sessionID: persistentSessionID))
@@ -1556,7 +1559,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
     private func cleanup(_ fixture: Fixture) async {
         await fixture.harness.host.claudeCoordinator.shutdownClaudeSession(fixture.session)
         if let context = fixture.session.mcpControlContext { await AgentRunSessionStore.cleanup(registration: context.registration) }
-        fixture.harness.host.test_setAfterMCPStoreEpochBegan(nil)
+        fixture.harness.host.mcpRuntime.test_afterEpochBegan = nil
     }
 
     private func feed(_ payload: [String: Any], _ controller: ClaudeNativeProcessSessionController) async throws {
@@ -1698,8 +1701,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -1736,8 +1739,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -1761,14 +1764,196 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         await h.host.claudeCoordinator.shutdownClaudeSession(session)
     }
 
+    func testStaleManagedResourceAdmissionDoesNotRestoreTheLocalClaudeSibling() async throws {
+        let (h, session, controller, _) = try await spyFixture()
+        let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
+        let initial = AgentChatItem.user("host input", sequenceIndex: session.nextSequenceIndex)
+        session.appendItem(initial)
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: initial.text,
+            initialMessageForRun: initial.text, attachments: [], initialUserItemID: initial.id
+        )
+        await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
+        let originalMessages = await controller.sentMessages
+        h.host.storeDraftText(for: session.tabID, "private composer")
+        let managedRow = AgentChatItem.user("managed recovery witness", sequenceIndex: session.nextSequenceIndex)
+        session.appendItem(managedRow)
+        session.pendingClaudeSteeringInstructions.append(.init(
+            id: UUID(), targetRunID: session.runID, targetRunAttemptID: session.activeRunAttemptID,
+            providerText: managedRow.text, attachments: [], taggedFileAttachments: [], draftText: "",
+            optimisticUserItemID: managedRow.id, createdAt: Date(),
+            runtimeInputAdmission: .init(isCurrent: { false }, ownsCleanup: { true })
+        ))
+        try queueSteer("healthy local sibling", in: session, service: service)
+        session.pendingNonCodexUserInputTokenQueue = [11, 17]
+        let accepted = await service.submitQueuedClaudeSteeringIfSupported(session: session)
+        XCTAssertTrue(accepted)
+        await session.claudeSteeringFlushTask?.task.value
+        let sent = await controller.sentMessages
+        XCTAssertEqual(sent, originalMessages + ["healthy local sibling"])
+        XCTAssertEqual(h.host.draftRuntime.text(for: session.tabID), "private composer")
+        XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+        XCTAssertTrue(session.pendingNonCodexUserInputTokenQueue.isEmpty)
+        XCTAssertTrue(session.items.contains { $0.id == managedRow.id }, "The accepted managed row remains the recovery witness, never a composer draft")
+        await service.cancelRun(tabID: session.tabID, session: session, completion: .terminalTeardownCompleted)
+        await h.host.claudeCoordinator.shutdownClaudeSession(session)
+    }
+
+    func testWithdrawnClaudeFlushCannotRecoverOrClearItsReplacement() async throws {
+        for releaseThrows in [false, true] {
+            let (h, session, controller, _) = try await spyFixture()
+            let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
+            let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
+            session.appendItem(row)
+            try await h.host.test_composeRunService(service).startRun(
+                tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
+                initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
+            )
+            await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
+            let originalOwner = try XCTUnwrap(session.activeRunOwnership)
+            let originalMessages = await controller.sentMessages
+            let firstGate = Gate(), secondGate = Gate()
+            var waits = 0
+            h.host.test_beforeACPToolIdleWait = {
+                waits += 1
+                if waits == 1 {
+                    await firstGate.wait()
+                    if releaseThrows { throw CancellationError() }
+                } else {
+                    await secondGate.wait()
+                }
+            }
+            addTeardownBlock { @MainActor in
+                firstGate.open()
+                secondGate.open()
+                h.host.test_beforeACPToolIdleWait = nil
+                await service.cancelRun(tabID: session.tabID, session: session, completion: .terminalTeardownCompleted)
+                await h.host.claudeCoordinator.shutdownClaudeSession(session)
+            }
+
+            try queueSteer("withdrawn draft", in: session, service: service)
+            session.pendingNonCodexUserInputTokenQueue = [17]
+            let acceptedFirst = await service.submitQueuedClaudeSteeringIfSupported(session: session)
+            XCTAssertTrue(acceptedFirst)
+            await until("first flush is held") { firstGate.isWaiting }
+            let first = try XCTUnwrap(session.claudeSteeringFlushTask)
+            service.withdrawQueuedWorkForManagedStop(tabID: session.tabID, session: session)
+            XCTAssertNil(session.claudeSteeringFlushTask)
+            XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+            XCTAssertTrue(session.pendingNonCodexUserInputTokenQueue.isEmpty)
+            XCTAssertEqual(session.draftText, "withdrawn draft")
+            XCTAssertEqual(session.activeRunOwnership, originalOwner, "Withdraw alone does not end the attempt")
+
+            try queueSteer("replacement B", in: session, service: service)
+            session.pendingNonCodexUserInputTokenQueue = [29]
+            let acceptedSecond = await service.submitQueuedClaudeSteeringIfSupported(session: session)
+            XCTAssertTrue(acceptedSecond)
+            await until("replacement flush is held") { secondGate.isWaiting }
+            let second = try XCTUnwrap(session.claudeSteeringFlushTask)
+            let replacementQueue = session.pendingClaudeSteeringInstructions
+            XCTAssertNotEqual(first.id, second.id)
+            firstGate.open()
+            await first.task.value
+            XCTAssertEqual(session.claudeSteeringFlushTask?.id, second.id)
+            XCTAssertEqual(session.pendingClaudeSteeringInstructions, replacementQueue)
+            XCTAssertEqual(session.pendingNonCodexUserInputTokenQueue, [29])
+            XCTAssertEqual(session.draftText, "withdrawn draft", "Old recovery must not prepend the replacement")
+            let messagesBeforeRelease = await controller.sentMessages
+            XCTAssertEqual(messagesBeforeRelease, originalMessages, "Only the installed flush may release B")
+
+            await controller.setTurnInFlight(false)
+            secondGate.open()
+            await second.task.value
+            let messages = await controller.sentMessages
+            XCTAssertEqual(messages, originalMessages + ["replacement B"])
+            XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+            XCTAssertTrue(session.pendingNonCodexUserInputTokenQueue.isEmpty)
+            XCTAssertNil(session.claudeSteeringFlushTask)
+            h.host.test_beforeACPToolIdleWait = nil
+            await service.cancelRun(tabID: session.tabID, session: session, completion: .terminalTeardownCompleted)
+            await h.host.claudeCoordinator.shutdownClaudeSession(session)
+        }
+    }
+
+    func testClaudeSteeringPreparationKeepsRecoverableInputUntilAdmission() async throws {
+        for withdraw in [false, true] {
+            let (h, session, controller, _) = try await spyFixture()
+            let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
+            let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
+            session.appendItem(row)
+            try await h.host.test_composeRunService(service).startRun(
+                tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
+                initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
+            )
+            await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
+            let originalMessages = await controller.sentMessages
+            let gate = Gate()
+            let catalog = h.host.test_providerSwitchSkillCatalog
+            catalog.markDirty()
+            catalog.test_beforePublish = { await gate.wait() }
+            addTeardownBlock { @MainActor in
+                gate.open()
+                catalog.test_beforePublish = nil
+                await service.cancelRun(tabID: session.tabID, session: session, completion: .terminalTeardownCompleted)
+                await h.host.claudeCoordinator.shutdownClaudeSession(session)
+            }
+            session.pendingHandoff = .init(payload: "<forked_session>Retained continuity</forked_session>", createdAt: Date())
+            try queueSteer("prepared steer", in: session, service: service)
+            session.pendingNonCodexUserInputTokenQueue = [17]
+            let accepted = await service.submitQueuedClaudeSteeringIfSupported(session: session)
+            XCTAssertTrue(accepted)
+            await until("real skill discovery is held") { gate.isWaiting }
+            let first = try XCTUnwrap(session.claudeSteeringFlushTask)
+            XCTAssertEqual(session.pendingClaudeSteeringInstructions.map(\.draftText), ["prepared steer"])
+            XCTAssertEqual(session.pendingNonCodexUserInputTokenQueue, [17])
+            XCTAssertFalse(session.pendingHandoff.isStagedForSend)
+            if withdraw {
+                service.withdrawQueuedWorkForManagedStop(tabID: session.tabID, session: session)
+                XCTAssertEqual(session.draftText, "prepared steer")
+                XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+                XCTAssertTrue(session.pendingNonCodexUserInputTokenQueue.isEmpty)
+            }
+            catalog.test_beforePublish = nil
+            await controller.setTurnInFlight(false)
+            gate.open()
+            await first.task.value
+            let messages = await controller.sentMessages
+            if withdraw {
+                XCTAssertEqual(messages, originalMessages)
+                XCTAssertFalse(session.pendingHandoff.isStagedForSend, "Refused discovery must not stage handoff continuity")
+                XCTAssertTrue(session.pendingHandoff.hasPayload)
+                XCTAssertEqual(session.draftText, "prepared steer")
+                // The next installed drain can use the retained handoff exactly once.
+                try queueSteer("replacement B", in: session, service: service)
+                let replacementAccepted = await service.submitQueuedClaudeSteeringIfSupported(session: session)
+                XCTAssertTrue(replacementAccepted)
+                let replacement = try XCTUnwrap(session.claudeSteeringFlushTask)
+                await replacement.task.value
+                let replacementMessages = await controller.sentMessages
+                XCTAssertEqual(replacementMessages.count, originalMessages.count + 1)
+                XCTAssertTrue(try XCTUnwrap(replacementMessages.last).contains("replacement B"))
+                XCTAssertTrue(try XCTUnwrap(replacementMessages.last).contains("Retained continuity"))
+            } else {
+                XCTAssertEqual(messages.count, originalMessages.count + 1)
+                XCTAssertTrue(try XCTUnwrap(messages.last).contains("prepared steer"))
+                XCTAssertTrue(try XCTUnwrap(messages.last).contains("Retained continuity"))
+                XCTAssertTrue(session.pendingClaudeSteeringInstructions.isEmpty)
+                XCTAssertTrue(session.pendingNonCodexUserInputTokenQueue.isEmpty)
+            }
+            XCTAssertNil(session.claudeSteeringFlushTask)
+            await service.cancelRun(tabID: session.tabID, session: session, completion: .terminalTeardownCompleted)
+            await h.host.claudeCoordinator.shutdownClaudeSession(session)
+        }
+    }
+
     func testSteeringRetainedProviderSuccessorDoesNotCancelReplacement() async throws {
         for successorFinishesBeforeSend in [true, false] {
             let (h, session, controller, _) = try await spyFixture()
             let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
             session.appendItem(row)
             let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-            await h.host.test_composeRunService(service).startRun(
-                tabID: session.tabID, session: session, initialUserMessage: row.text,
+            try await h.host.test_composeRunService(service).startRun(
+                tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
                 initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
             )
             await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -1810,8 +1995,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("A registers") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -1865,8 +2050,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("A registers") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -1925,8 +2110,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -2005,8 +2190,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
             let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
             session.appendItem(row)
             let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-            await h.host.test_composeRunService(service).startRun(
-                tabID: session.tabID, session: session, initialUserMessage: row.text,
+            try await h.host.test_composeRunService(service).startRun(
+                tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
                 initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
             )
             await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -2029,8 +2214,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
         session.appendItem(row)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -2100,7 +2285,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         // A live provider conversation already has a persistent runtime writer, whether or
         // not its turn is MCP-controlled. Unbound local creation is covered separately.
         let persistentSessionID = UUID()
-        XCTAssertNil(harness.host.test_bindingRejection(sessionID: persistentSessionID, on: session))
+        XCTAssertNil(harness.host.runtimeSessionStore.bindingRejection(persistentSessionID, on: session))
         session.installPersistentSessionBinding(.init(tabID: session.tabID, sessionID: persistentSessionID, workspaceID: UUID()))
         session.recordRestorationAuthoritative(.persistedPayloadApplied)
         XCTAssertNotNil(try harness.host.runtimeCommand(sessionID: persistentSessionID))
@@ -2111,7 +2296,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let runID = UUID()
         session.installRunID(runID)
         session.providerSessionID = "monitor-native-session"
-        let outcome = await harness.host.claudeCoordinator.ensureClaudeNativeSession(session: session, intent: .reconnect(runID: runID, providerSessionID: "monitor-native-session", currency: session.persistentBindingTransitionToken()))
+        let outcome = await harness.host.claudeCoordinator.test_ensureClaudeNativeSession(session: session, intent: .reconnect(runID: runID, providerSessionID: "monitor-native-session", currency: session.persistentBindingTransitionToken()))
         XCTAssertEqual(outcome, .ready)
         let installed = await harness.host.claudeCoordinator.test_installEventListener(for: session)
         if let id = controlledSessionID {
@@ -2148,7 +2333,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
     func testViewModelAdoptionRaceAugmentsLocalAttachmentOnceAndDoesNotConvertLaneWake() async throws {
         let (h, session, controller, _) = try await spyFixture(mcp: true)
         let gate = Gate()
-        h.host.test_setAfterMCPStoreEpochBegan { await gate.wait() }
+        h.host.mcpRuntime.test_afterEpochBegan = { await gate.wait() }
         let providerID = UUID()
         await controller.setTurnInFlight(true)
         await controller.emit(.providerTurnStarted(turnID: providerID))
@@ -2188,7 +2373,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         XCTAssertEqual(session.items.count { $0.kind == .user }, 1, "The lane wake must not create a synthetic input")
         let owner = try XCTUnwrap(session.lastTerminalCommitRevision?.ownership)
         if case let .exact(id) = session.terminalAnchor(for: owner) { XCTAssertEqual(id, row.id) } else { XCTFail("The transferred real user row owns the terminal anchor") }
-        h.host.test_setAfterMCPStoreEpochBegan(nil)
+        h.host.mcpRuntime.test_afterEpochBegan = nil
         await h.host.claudeCoordinator.shutdownClaudeSession(session)
         if let context = session.mcpControlContext { await AgentRunSessionStore.cleanup(registration: context.registration) }
     }
@@ -2201,7 +2386,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         await until("provider adoption has already finished") { session.runState == .running && listener.adoptionTask == nil }
         let owner = try XCTUnwrap(session.activeRunOwnership)
         let refused = AgentRunStartOutcomeRecorder()
-        await h.host.test_composeRunService(h.service).startRun(tabID: session.tabID, session: session, initialUserMessage: "contending startup", initialMessageForRun: "contending startup", attachments: [], startOutcome: refused)
+        try await h.host.test_composeRunService(h.service).startRun(tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: "contending startup", initialMessageForRun: "contending startup", attachments: [], startOutcome: refused)
         XCTAssertFalse(refused.outcome.didStart, "Another active owner must not overwrite a startup refusal as accepted")
         XCTAssertEqual(session.activeRunOwnership, owner)
         let row = AgentChatItem.user("local after adoption", sequenceIndex: session.nextSequenceIndex)
@@ -2229,9 +2414,9 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
             let writer = command.writer
             let binding = f.session.currentRestorationBindingToken
             let gate = Gate()
-            f.harness.host.test_setAfterMCPStoreEpochBegan { await gate.wait() }
+            f.harness.host.mcpRuntime.test_afterEpochBegan = { await gate.wait() }
             defer { gate.open()
-                f.harness.host.test_setAfterMCPStoreEpochBegan(nil)
+                f.harness.host.mcpRuntime.test_afterEpochBegan = nil
             }
             try await feed(assistant("provider work held at epoch acknowledgement"), f.controller)
             await until("provider epoch preparation is held") { gate.isWaiting }
@@ -2337,7 +2522,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
     func testInternalCancellationDuringPendingAdoptionPreservesQueuedLocalWork() async throws {
         let f = try await fixture(mcp: true)
         let gate = Gate()
-        f.harness.host.test_setAfterMCPStoreEpochBegan { await gate.wait() }
+        f.harness.host.mcpRuntime.test_afterEpochBegan = { await gate.wait() }
         try await feed(assistant("pending provider"), f.controller)
         await until("provider epoch preparation is held") { gate.isWaiting }
         f.session.pendingInstructions.append("queued local input")
@@ -2359,8 +2544,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         await h.host.claudeCoordinator.shutdownClaudeSession(session)
         await replacement.setImmediateReplyDuringSend(true)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: "fresh replacement input",
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: "fresh replacement input",
             initialMessageForRun: "fresh replacement input", attachments: [], preparedClaudeEvents: reservation
         )
         await until("fresh process answer reaches its replacement reservation") { session.runState == .completed && session.agentTask == nil }
@@ -2391,8 +2576,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         XCTAssertTrue(listener.subscription === reservation.subscription)
         await controller.setImmediateReplyDuringSend(true)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: "host start",
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: "host start",
             initialMessageForRun: "host start", attachments: [], preparedClaudeEvents: reservation
         )
         await until("host answer completes its sole attempt") { session.runState == .completed && session.agentTask == nil }
@@ -2508,8 +2693,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
             let row = AgentChatItem.user("host A", sequenceIndex: session.nextSequenceIndex)
             session.appendItem(row)
             let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-            await h.host.test_composeRunService(service).startRun(
-                tabID: session.tabID, session: session, initialUserMessage: row.text,
+            try await h.host.test_composeRunService(service).startRun(
+                tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
                 initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
             )
             await until("host input is registered") { !session.claudeExpectedTurnIDs.isEmpty }
@@ -2840,7 +3025,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let transcript = AgentTranscriptProjectionBuilder.normalizedFrozenDetailedToolTailLimits(in: saved)
         let canonicalItems = AgentTranscriptIO.workingSourceItems(from: transcript)
         session.setItemsSilently(canonicalItems, reason: .persistedSessionHydration)
-        harness.host.applyTranscriptPresentation(transcript, sourceItems: canonicalItems, to: session, isColdLoad: true)
+        AgentSessionTranscriptRefreshRuntime.applyTranscriptPresentation(transcript, sourceItems: canonicalItems, to: session, isColdLoad: true)
         session.nextSequenceIndex = transcript.nextSequenceIndex
         session.hasSentFirstMessage = transcript.turns.contains { $0.request != nil }
         XCTAssertEqual(session.transcript, transcript)
@@ -2861,8 +3046,8 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         }
         await controller.setImmediateReplyDuringSend(true)
         let service = h.host.test_initializeRunService(expectedPIDPolicyArmer: { _ in true })
-        await h.host.test_composeRunService(service).startRun(
-            tabID: session.tabID, session: session, initialUserMessage: row.text,
+        try await h.host.test_composeRunService(service).startRun(
+            tabID: session.tabID, session: session, origin: h.startCommand(for: session), initialUserMessage: row.text,
             initialMessageForRun: row.text, attachments: [], initialUserItemID: row.id
         )
         await until("ordinary saved-history attempt publishes", timeout: .seconds(120)) { terminalStarted != nil && session.agentTask == nil && session.runState == .completed && !session.runLifecycle.terminalCommitInProgress }
@@ -2931,7 +3116,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
             print("C2 routing fixture ready seed=\(seedCount) setup=\(setupStarted.duration(to: .now))")
             var resume: CheckedContinuation<Void, Never>?
             var preparationCount = 0
-            f.harness.host.test_setAfterMCPStoreEpochBegan {
+            f.harness.host.mcpRuntime.test_afterEpochBegan = {
                 preparationCount += 1
                 if preparationCount == 2, let terminalStarted { terminalDurations.append(terminalStarted.duration(to: .now)) }
                 if preparationCount == 1 { await withCheckedContinuation { resume = $0 } }
@@ -3073,7 +3258,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
                     XCTAssertNotEqual(result["isError"] as? Bool, true)
                     let routed = await manager.debugCachedRunID(for: connection.connectionID)
                     XCTAssertEqual(routed, runID)
-                    XCTAssertEqual(window.mcpServer.connectionID(forRunID: runID), connection.connectionID)
+                    XCTAssertEqual(window.mcpServer.runRouteBindings.connectionID(forRunID: runID), connection.connectionID)
                 }
                 let connection = try await connect(runID)
                 var epochs: [AgentRunTurnEpoch] = []
@@ -3087,19 +3272,19 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
                     await controller.emit(.stream(.init(type: "content", text: "route answer \(index)")))
                     await controller.emit(.turnsCompleted(turnIDs: [turnID], status: .completed))
                     await until("real-route terminal publishes") { live.runState == .completed && !live.runLifecycle.terminalCommitInProgress }
-                    XCTAssertEqual(window.mcpServer.connectionID(forRunID: runID), connection.connectionID)
+                    XCTAssertEqual(window.mcpServer.runRouteBindings.connectionID(forRunID: runID), connection.connectionID)
                 }
                 XCTAssertNotEqual(epochs[0], epochs[1])
                 let preparation = Gate()
-                vm.test_setAfterMCPStoreEpochBegan { await preparation.wait() }
+                vm.mcpRuntime.test_afterEpochBegan = { await preparation.wait() }
                 defer { preparation.open()
-                    vm.test_setAfterMCPStoreEpochBegan(nil)
+                    vm.mcpRuntime.test_afterEpochBegan = nil
                 }
                 let installedListener = await vm.claudeCoordinator.test_installEventListener(for: live)
                 let listener = try XCTUnwrap(installedListener)
                 await controller.emit(.providerTurnStarted(turnID: UUID()))
                 await until("third turn waits in fresh epoch preparation") { preparation.isWaiting }
-                XCTAssertEqual(vm.mcpSnapshot(for: live)?.status, .running)
+                XCTAssertEqual(vm.mcpRuntime.mcpSnapshot(for: live)?.status, .running)
                 let adoption = listener.adoptionTask
                 let candidate = try XCTUnwrap(vm.agentSessionLinkCandidate(tabID: tabID, sessionID: sessionID, tabName: "Claude route", isWindowClosing: false))
                 let observer = DomainAgentSessionLinkEndpointIdentity(windowID: 2, workspaceID: UUID(), tabID: UUID(), sessionID: UUID(), persistentBindingGeneration: UUID(), bindingTransitionGeneration: 1)
@@ -3121,7 +3306,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
                 try await AsyncTestWait.waitUntil("Stop retires the process route", timeout: 3) {
                     await manager.debugCachedRunID(for: connection.connectionID) == nil
                 }
-                XCTAssertNil(window.mcpServer.connectionID(forRunID: runID))
+                XCTAssertNil(window.mcpServer.runRouteBindings.connectionID(forRunID: runID))
                 let successorID = UUID()
                 runIDs.append(successorID)
                 live.installRunID(successorID)
@@ -3148,7 +3333,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         await until("first attempt starts") { f.session.runState == .running }
         let first = try XCTUnwrap(f.session.activeRunOwnership)
         let epochPreparation = Gate()
-        f.harness.host.test_setAfterMCPStoreEpochBegan { await epochPreparation.wait() }
+        f.harness.host.mcpRuntime.test_afterEpochBegan = { await epochPreparation.wait() }
         let bytes = try [result("first-final"), assistant("second")].map { try JSONSerialization.data(withJSONObject: $0) + Data([10]) }.reduce(Data(), +)
         await f.controller.test_handleConfigurationStdoutChunk(bytes)
         await until("prior publication is held") { gate.isWaiting && f.listener.pendingProviderTurnID != nil }
@@ -3158,7 +3343,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         gate.open()
         await until("handed-back turn is preparing its fresh epoch") { epochPreparation.isWaiting }
         XCTAssertTrue(f.session.mcpFollowUpRunPending)
-        XCTAssertEqual(f.harness.host.mcpSnapshot(for: f.session)?.status, .running)
+        XCTAssertEqual(f.harness.host.mcpRuntime.mcpSnapshot(for: f.session)?.status, .running)
         epochPreparation.open()
         await until("second starts after publication") { f.session.runState == .running && f.session.activeRunOwnership?.attemptID != first.attemptID }
         XCTAssertNotEqual(f.session.activeRunOwnership?.turnEpoch, first.turnEpoch)
@@ -3242,7 +3427,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         await f.harness.host.mcpRuntime.prepareWaitTrackingForRunStart(session: f.session, stopFence: .init(session: f.session))
         let prepared = try XCTUnwrap(f.session.mcpControlContext?.preparedEpoch)
         var preparations = 0
-        f.harness.host.test_setAfterMCPStoreEpochBegan { preparations += 1 }
+        f.harness.host.mcpRuntime.test_afterEpochBegan = { preparations += 1 }
         try await feed(assistant("prepared successor"), f.controller)
         await until("successor is adopted") { f.session.runState == .running }
         XCTAssertEqual(f.session.activeRunOwnership?.turnEpoch, prepared)
@@ -3258,7 +3443,7 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
         let f = try await fixture(mcp: true)
         let other = try await fixture()
         let gate = Gate()
-        f.harness.host.test_setAfterMCPStoreEpochBegan { await gate.wait() }
+        f.harness.host.mcpRuntime.test_afterEpochBegan = { await gate.wait() }
         try await feed(assistant("old binding"), f.controller)
         await until("old epoch preparation is held") { gate.isWaiting }
         let adoption = f.listener.adoptionTask
@@ -3281,14 +3466,14 @@ final class ClaudeNativeProviderTurnLifecycleTests: XCTestCase {
     func testStopDuringEpochPreparationCannotReadoptOrRetainRunningMask() async throws {
         let f = try await fixture(mcp: true)
         var resume: CheckedContinuation<Void, Never>?
-        f.harness.host.test_setAfterMCPStoreEpochBegan {
+        f.harness.host.mcpRuntime.test_afterEpochBegan = {
             await withCheckedContinuation { resume = $0 }
         }
         try await feed(assistant("pending adoption"), f.controller)
         await until("epoch preparation is suspended") { resume != nil }
         XCTAssertTrue(f.listener.isBusy)
         XCTAssertTrue(f.session.mcpFollowUpRunPending)
-        XCTAssertEqual(f.harness.host.mcpSnapshot(for: f.session)?.status, .running)
+        XCTAssertEqual(f.harness.host.mcpRuntime.mcpSnapshot(for: f.session)?.status, .running)
         let busy = await f.harness.host.preparedOversightRuntimeIsBusy()
         XCTAssertTrue(busy)
         let adoption = f.listener.adoptionTask

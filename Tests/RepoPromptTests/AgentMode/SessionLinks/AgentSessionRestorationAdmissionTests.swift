@@ -534,7 +534,7 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
             XCTAssertNil(source.oversight.overseerActivation, priorState)
             source.runState = .idle
             if priorState == "authoritative" {
-                let save = await fixture.vm.flushSaveRequired(for: source.tabID, workspaceID: workspace.id)
+                let save = await fixture.vm.persistenceRuntime.flushSaveRequired(for: source.tabID, workspaceID: workspace.id)
                 guard case .success = save else { return XCTFail("The unchanged source must remain saveable: \(save)") }
             }
             XCTAssertTrue(fixture.providerRequests.events.isEmpty, priorState)
@@ -821,11 +821,11 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         let autoEdit = failed.session.autoEditEnabled
         try await removeWriteObstruction(fixture, sessionID: failed.sessionID)
 
-        let genericSave = await fixture.vm.flushSaveRequired(for: failed.session.tabID, workspaceID: fixture.workspaceID)
+        let genericSave = await fixture.vm.persistenceRuntime.flushSaveRequired(for: failed.session.tabID, workspaceID: fixture.workspaceID)
         guard case .failure = genericSave else {
             return XCTFail("A ready configured creation still requires its exact owner to save")
         }
-        await fixture.vm.flushSave(for: failed.session.tabID)
+        await fixture.vm.persistenceRuntime.flushSave(for: failed.session.tabID)
         guard case .blocked = fixture.vm.submitUserTurn(text: "Do not dispatch before retry", tabID: failed.session.tabID) else {
             return XCTFail("A failed configured first save must keep submission blocked")
         }
@@ -942,8 +942,9 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         XCTAssertTrue(fixture.providerRequests.events.isEmpty)
     }
 
-    func testRunStartCommitsItsFreshBindingBeforeDispatchAndRefusesReacquiredAcknowledgement() async throws {
-        for reacquireAfterAcknowledgement in [false, true] {
+    func testRunStartKeepsItsOriginThroughPreparationAndConfiguredAcknowledgement() async throws {
+        for drift in ["none", "republished", "preparationReacquired", "acknowledgementReacquired"] {
+            let reacquireAfterAcknowledgement = drift == "acknowledgementReacquired"
             let fixture = try await makeFixture()
             let tabID = try XCTUnwrap(fixture.prompt.currentComposeTabs.first?.id)
             // Obtain the existing scope through an independently admitted identity, without
@@ -965,6 +966,9 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
             var acknowledgements = 0
             var dispatches = 0
             var created: AgentSessionCreationHandle?
+            var preparations = 0
+            let originalMembership = try XCTUnwrap(scope.membership(of: session))
+            let originalSaveRequestGeneration = session.saveRequestGeneration
             runtime.test_afterConfiguredCreationAcknowledgement = { handle in
                 acknowledgements += 1
                 XCTAssertTrue(handle.session === session)
@@ -979,7 +983,31 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
                 }
             }
             var environment = AgentSessionRunStartRuntime.Environment(
-                currentWorkspaceID: { fixture.workspaceID }, prepareSession: { _ in },
+                currentWorkspaceID: { fixture.workspaceID }, prepareSession: { exact in
+                    preparations += 1
+                    guard preparations == 1 else { return }
+                    XCTAssertTrue(exact === session)
+                    let originalBinding = session.currentRestorationBindingToken
+                    await Task.yield()
+                    if drift == "preparationReacquired" {
+                        let sessions = scope.sessions
+                        var removed = sessions
+                        removed.removeValue(forKey: tabID)
+                        scope.replaceSessions(removed)
+                        scope.replaceSessions(sessions)
+                        XCTAssertFalse(originalMembership.isCurrent)
+                    } else if drift == "republished" {
+                        let sessions = scope.sessions
+                        let sibling = scope.makeSession(tabID: UUID())
+                        var republished = sessions
+                        republished[sibling.tabID] = sibling
+                        scope.replaceSessions(republished)
+                        XCTAssertTrue(originalMembership.isCurrent)
+                        scope.replaceSessions(sessions)
+                        XCTAssertTrue(originalMembership.isCurrent)
+                    }
+                    XCTAssertEqual(session.currentRestorationBindingToken, originalBinding)
+                },
                 availabilityFailure: { _ in nil },
                 bindSession: { exact in
                     let admission = bind(exact)
@@ -1003,6 +1031,18 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
                 claudeCoordinator: .init(windowID: -1, workspacePathProvider: { _ in nil }),
                 links: fixture.vm.linkExecutionRuntime, environment: environment
             )
+            if drift == "preparationReacquired" {
+                XCTAssertNil(created, "Old preparation must not bind the reacquired blank draft")
+                XCTAssertNil(session.activeAgentSessionID)
+                XCTAssertEqual(preparations, 1)
+                XCTAssertEqual(acknowledgements, 0)
+                XCTAssertEqual(session.saveRequestGeneration, originalSaveRequestGeneration)
+                XCTAssertNil(session.saveDebounceRequestID)
+                XCTAssertEqual(dispatches, 0)
+                XCTAssertFalse(outcome.outcome.didStart)
+                XCTAssertTrue(fixture.providerRequests.events.isEmpty)
+                continue
+            }
             let handle = try XCTUnwrap(created)
             XCTAssertEqual(acknowledgements, 1)
             XCTAssertEqual(dispatches, reacquireAfterAcknowledgement ? 0 : 1)
@@ -1235,7 +1275,7 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         XCTAssertNotNil(fixture.vm.captureSessionCreationRetry(for: handle.session))
         XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile(root: fixture.root, sessionID: sessionID).path))
 
-        fixture.vm.scheduleSave(for: handle.session.tabID)
+        fixture.vm.persistenceRuntime.scheduleSave(for: handle.session.tabID)
         XCTAssertEqual(handle.session.saveRequestGeneration, generation, "A generic scheduling request must not invalidate the owned write")
         XCTAssertNil(handle.session.saveDebounceTask)
         fixture.vm.test_afterFreshForegroundSessionCreation = nil
@@ -1346,7 +1386,7 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
             }
         }
         let saving = Task { @MainActor in
-            await fixture.vm.flushSaveRequired(for: tabID, workspaceID: fixture.workspaceID)
+            await fixture.vm.persistenceRuntime.flushSaveRequired(for: tabID, workspaceID: fixture.workspaceID)
         }
         addTeardownBlock { @MainActor in
             await fixture.writer.test_setBeforeSessionWriteHook(nil)
@@ -1376,7 +1416,7 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         session.saveDebounceTask = nil
         retryWrite.release()
         await scheduled?.value
-        let retried = await fixture.vm.flushSaveRequired(for: tabID, workspaceID: fixture.workspaceID)
+        let retried = await fixture.vm.persistenceRuntime.flushSaveRequired(for: tabID, workspaceID: fixture.workspaceID)
         guard case .success = retried else { return XCTFail("The current placement must remain saveable: \(retried)") }
         XCTAssertFalse(session.isDirty)
         XCTAssertEqual(session.currentRestorationBindingToken, binding)
@@ -1562,13 +1602,13 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         XCTAssertTrue(session.qualifiedRestorationReadiness.isCreating)
         XCTAssertNil(fixture.vm.captureSessionCreationRetry(for: session))
         let blocker = try XCTUnwrap(session.operationAdmissionFailureMessage)
-        let requiredSave = await fixture.vm.flushSaveRequired(for: session.tabID, workspaceID: fixture.workspaceID)
+        let requiredSave = await fixture.vm.persistenceRuntime.flushSaveRequired(for: session.tabID, workspaceID: fixture.workspaceID)
         guard case let .failure(error) = requiredSave else {
             return XCTFail("Generic required save must reject a preparing creation")
         }
         XCTAssertEqual(error.message, blocker)
         session.isDirty = true
-        await fixture.vm.flushSave(for: session.tabID)
+        await fixture.vm.persistenceRuntime.flushSave(for: session.tabID)
         let submission = fixture.vm.submitUserTurn(text: "Do not dispatch while preparing", tabID: session.tabID)
         guard case let .blocked(message) = submission else {
             return XCTFail("A preparing creation must reject submission before admitting a user row")
@@ -1640,14 +1680,14 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         let candidate = try XCTUnwrap(fixture.vm.agentSessionLinkCandidate(
             tabID: session.tabID, sessionID: sessionID, tabName: "Unavailable", isWindowClosing: false
         ), file: file, line: line)
-        XCTAssertTrue(fixture.vm.agentSessionLinkLiveSession(matching: candidate) === session, file: file, line: line)
+        XCTAssertTrue(fixture.vm.linkExecutionRuntime.agentSessionLinkLiveSession(matching: candidate) === session, file: file, line: line)
         let request = AgentSessionLinkSendRequest(
             linkID: UUID(), linkGeneration: 1,
             observerEndpoint: AgentSessionLinkIdentityTestSupport.endpoint(sessionID: UUID(), windowID: 2),
             observerDisplayName: "Observer", message: "Do not append attributed history", workflow: nil
         )
         var authorizationCommits = 0
-        let delivery = await fixture.vm.agentSessionLinkPerformSend(
+        let delivery = await fixture.vm.linkExecutionRuntime.agentSessionLinkPerformSend(
             to: candidate, request: request,
             liveness: { .init(observerEndpointIsLive: true, targetEndpointIsLive: true, targetWindowIsClosing: false) },
             commitAuthorization: { authorizationCommits += 1
@@ -1662,7 +1702,7 @@ final class AgentSessionRestorationAdmissionTests: XCTestCase {
         // a later setting/draft mutation must not make the same unavailable session overwriteable.
         for dirty in [false, true] {
             session.isDirty = dirty
-            let flush = await fixture.vm.flushSaveRequired(for: session.tabID, workspaceID: workspace.id)
+            let flush = await fixture.vm.persistenceRuntime.flushSaveRequired(for: session.tabID, workspaceID: workspace.id)
             guard case let .failure(error) = flush else {
                 return XCTFail("Unavailable restoration must reject required save even when clean", file: file, line: line)
             }

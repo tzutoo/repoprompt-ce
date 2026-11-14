@@ -304,11 +304,13 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
                 .receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.schedulePreparedOversightCleanup() }
         }
+        guard !owner.agentModeViewModel.isAwaitingWorkspaceAdoption else { return .failure(.changed) }
         let ready = await owner.agentModeViewModel.prepareSavedOversightSession(
             tabID: location.tab.id, sessionID: target, workspaceID: location.workspace.id,
             isStillAuthorized: { isStillAuthorized() && location.isCurrent }
         )
-        guard isStillAuthorized(), location.isCurrent else { return .failure(.changed) }
+        guard isStillAuthorized(), location.isCurrent,
+              !owner.agentModeViewModel.isAwaitingWorkspaceAdoption else { return .failure(.changed) }
         guard ready else { return .failure(.unreadable) }
         guard case let .unique(writer) = AgentSessionRuntimeStore.shared.resolveWriter(
             sessionID: target, expectedWorkspaceID: location.workspace.id
@@ -751,7 +753,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else {
             return .refused(.observerUnavailable)
         }
-        return viewModel.agentSessionLinkRequestManualWakeNow(for: endpoint)
+        return viewModel.linkExecutionRuntime.agentSessionLinkRequestManualWakeNow(for: endpoint)
     }
 
     @discardableResult
@@ -776,7 +778,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else {
             return .failure(.observerUnavailable)
         }
-        return viewModel.agentSessionLinkAutoWakeSnoozeProjection(
+        return viewModel.linkExecutionRuntime.agentSessionLinkAutoWakeSnoozeProjection(
             endpoint: endpoint,
             targetSessionID: targetSessionID,
             expectedReference: expectedReference
@@ -798,7 +800,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else {
             return .failure(.observerUnavailable)
         }
-        return viewModel.agentSessionLinkMutateAutoWakeSnooze(
+        return viewModel.linkExecutionRuntime.agentSessionLinkMutateAutoWakeSnooze(
             endpoint: endpoint,
             targetSessionID: targetSessionID,
             expectedReference: expectedReference,
@@ -838,7 +840,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         to endpoint: DomainAgentSessionLinkEndpointIdentity
     ) {
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else { return }
-        viewModel.agentSessionLinkPublishPromptInventory(inventory, to: endpoint)
+        viewModel.linkExecutionRuntime.agentSessionLinkPublishPromptInventory(inventory, to: endpoint)
     }
 
     func agentSessionLinkPublishRunCatalogProjection(
@@ -847,7 +849,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         guard let endpoint = projection.routeToken?.observerEndpoint,
               let viewModel = agentSessionLinkOwningViewModel(for: endpoint)
         else { return }
-        viewModel.agentSessionLinkPublishRunCatalogProjection(projection, to: endpoint)
+        viewModel.linkExecutionRuntime.agentSessionLinkPublishRunCatalogProjection(projection, to: endpoint)
     }
 
     /// Routes one passive status-notice queue to the exact incarnation it was reduced for.
@@ -859,7 +861,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         to endpoint: DomainAgentSessionLinkEndpointIdentity
     ) {
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else { return }
-        viewModel.agentSessionLinkPublishPassiveStatusNotices(snapshot, to: endpoint)
+        viewModel.linkExecutionRuntime.agentSessionLinkPublishPassiveStatusNotices(snapshot, to: endpoint)
     }
 
     func agentSessionLinkWillActivate(_ endpoint: DomainAgentSessionLinkEndpointIdentity) async {
@@ -871,7 +873,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         for endpoint: DomainAgentSessionLinkEndpointIdentity
     ) -> UInt64? {
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else { return nil }
-        return viewModel.agentSessionLinkWithholdPromptInventory(for: endpoint)
+        return viewModel.linkExecutionRuntime.agentSessionLinkWithholdPromptInventory(for: endpoint)
     }
 
     func agentSessionLinkReleasePromptInventoryHold(
@@ -880,7 +882,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         publishing inventory: AgentSessionLinkPromptInventory?
     ) {
         guard let viewModel = agentSessionLinkOwningViewModel(for: endpoint) else { return }
-        viewModel.agentSessionLinkReleasePromptInventoryHold(
+        viewModel.linkExecutionRuntime.agentSessionLinkReleasePromptInventoryHold(
             token,
             for: endpoint,
             publishing: inventory
@@ -900,7 +902,7 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         let viewModel = window.agentModeViewModel
         // Full incarnation match, not `(tabID, sessionID)`: an in-place rebind keeps both while
         // advancing the binding generations.
-        guard viewModel.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint else {
+        guard viewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint else {
             return nil
         }
         return viewModel
@@ -1092,28 +1094,26 @@ extension WindowStatesManager: AgentSessionLinkEndpointHost, PreparedAgentSessio
         )
     }
 
-    /// Routes a read-only interaction inspection to the exact owning window. Never focuses it.
+    /// Inspects the canonical writer's interaction runtime without activating presentation.
     func agentSessionLinkPendingInteraction(
         for candidate: AgentSessionLinkEndpointCandidate
     ) -> AgentSessionLinkPendingInteractionInspection {
-        guard !isTerminating,
-              let window = window(withID: candidate.windowID),
-              !window.isClosing
+        guard !isTerminating, window(withID: candidate.windowID)?.isClosing == false,
+              let runtime = agentSessionLinkCommandRuntime(for: candidate)
         else { return .none }
-        return window.agentModeViewModel.agentSessionLinkPendingInteraction(for: candidate)
+        return runtime.agentSessionLinkPendingInteraction(for: candidate)
     }
 
-    /// Routes one observer answer to the exact owning window, refusing during teardown.
+    /// Routes an observer answer through the target writer, retaining request-scoped authority.
     func agentSessionLinkRespondToPendingInteraction(
         for candidate: AgentSessionLinkEndpointCandidate,
         request: AgentSessionLinkInteractionResponseRequest,
         authorize: @escaping @MainActor @Sendable () async -> Bool
     ) async -> AgentSessionLinkInteractionResponseOutcome {
-        guard !isTerminating,
-              let window = window(withID: candidate.windowID),
-              !window.isClosing
+        guard !isTerminating, window(withID: candidate.windowID)?.isClosing == false,
+              let runtime = agentSessionLinkCommandRuntime(for: candidate)
         else { return .unavailable }
-        return await window.agentModeViewModel.agentSessionLinkRespondToPendingInteraction(
+        return await runtime.agentSessionLinkRespondToPendingInteraction(
             for: candidate,
             request: request,
             authorize: authorize
