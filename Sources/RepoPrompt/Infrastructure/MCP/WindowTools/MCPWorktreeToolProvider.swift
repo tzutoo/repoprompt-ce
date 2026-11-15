@@ -91,7 +91,9 @@ final class MCPWorktreeToolProvider: MCPAppToolProviding {
             name: MCPWindowToolName.manageWorktree,
             freshnessPolicy: .providerManaged,
             description: """
-            Manage Git worktrees, per-agent-session worktree bindings, and session-bound worktree merges.
+            \(MCPWorktreeCreationCopy.manageWorktreeSummary)
+
+            \(MCPWorktreeCreationCopy.manageWorktreeUsage)
 
             **Management ops**: list | show | create | bind | select | unbind
             **Merge ops**: preview | apply | status | continue | abort
@@ -145,10 +147,10 @@ final class MCPWorktreeToolProvider: MCPAppToolProviding {
                     "offset": .integer(description: MCPWorktreeListPagination.offsetPropertyDescription),
                     "branch": .string(description: "Create: branch name to create/check out."),
                     "base_ref": .string(description: "Create: optional base ref/commit for the new worktree."),
-                    "path": .string(description: "Create: explicit absolute worktree path. External paths require allow_external_path=true."),
+                    "path": .string(description: MCPWorktreeCreationCopy.manageWorktreePathProperty),
                     "detach": .boolean(description: "Create: create a detached worktree."),
                     "force": .boolean(description: "Create: pass --force to git worktree add."),
-                    "allow_external_path": .boolean(description: "Create: allow explicit paths outside RepoPrompt's app-managed worktree container."),
+                    "allow_external_path": .boolean(description: MCPWorktreeCreationCopy.allowExternalPathProperty),
                     "clone_tracked_checkout": .boolean(description: "Create: attempt APFS CoW tracked checkout when safe. Default true for app-managed destinations; false opts out for faster Git checkout."),
                     "copy_worktree_include_untracked_files": .boolean(description: "Create: also copy non-ignored untracked files selected by .worktreeinclude; default false."),
                     "bind": .boolean(description: "Create: bind the created worktree to a target Agent session."),
@@ -326,8 +328,8 @@ final class MCPWorktreeToolProvider: MCPAppToolProviding {
 
         let logicalRoot = try await logicalRoot(for: context)
         let logicalRootPath = logicalRoot.standardizedFullPath
-        var mutationRootMappings = await context.lookupContext.domainMutationPhysicalRootMappings(
-            store: dependencies.context.promptVM.workspaceFileContextStore
+        var mutationRootMappings = try await context.lookupContext.domainMutationPhysicalRootMappings(
+            store: (dependencies.context.requirePromptVM()).workspaceFileContextStore
         )
         mutationRootMappings.append(
             .init(
@@ -983,7 +985,7 @@ final class MCPWorktreeToolProvider: MCPAppToolProviding {
         } else {
             activeWorkspace
         }
-        let visibleRoots = await dependencies.context.promptVM.workspaceFileContextStore.rootRefs(scope: lookupContext.rootScope)
+        let visibleRoots = try await (dependencies.context.requirePromptVM()).workspaceFileContextStore.rootRefs(scope: lookupContext.rootScope)
         let allRepos = await discoverGitRepos(in: visibleRoots)
         return DiscoveryContext(
             metadata: metadata,
