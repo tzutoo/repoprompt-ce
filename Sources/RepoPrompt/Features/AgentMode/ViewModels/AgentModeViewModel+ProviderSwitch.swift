@@ -451,7 +451,7 @@ extension AgentModeViewModel {
         let codexModel: String?
         let codexEffort: String?
         let computerUseActivation: CodexComputerUseActivation?
-        let computerUseArming: UUID?
+        // In-flight arming IDs belong to the async arming call, not rollback.
         let context: TabSession.ProviderSwitchContextSnapshot
         let handoff: PendingHandoffState
 
@@ -468,7 +468,6 @@ extension AgentModeViewModel {
             codexModel = session.codexModel
             codexEffort = session.codexReasoningEffort
             computerUseActivation = session.pendingCodexComputerUseActivation
-            computerUseArming = session.codexComputerUseArmingRequestID
             context = session.captureProviderSwitchContext()
             handoff = session.pendingHandoff
         }
@@ -486,7 +485,6 @@ extension AgentModeViewModel {
             session.codexModel = codexModel
             session.codexReasoningEffort = codexEffort
             session.pendingCodexComputerUseActivation = computerUseActivation
-            session.codexComputerUseArmingRequestID = computerUseArming
             session.restoreProviderSwitchContext(context)
             session.pendingHandoff = handoff
             session.isDirty = true

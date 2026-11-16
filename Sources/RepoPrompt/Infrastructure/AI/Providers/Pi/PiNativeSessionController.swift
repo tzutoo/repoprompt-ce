@@ -218,7 +218,7 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
             try await applyModelAndEffort(model: model, effortLevel: nil)
         }
         _ = effortLevel
-        Task { [weak self] in
+        Task.detached { [weak self] in
             await self?.refreshAvailableModelsBestEffort()
             await self?.refreshDiscoveredCommandsBestEffort()
         }
@@ -804,6 +804,14 @@ actor PiNativeSessionController: NativeAgentRuntimeControlling, PiNativeImagePro
             // or queued continuations; only agent_settled is the session boundary.
             break
         case .agentSettled:
+            // A failed turn already has its terminal reason. Complete it before any
+            // stats round trip so the error event is not stranded behind that request.
+            if lastStopReason == "error" || lastStopReason == "aborted" {
+                Task { [weak self] in
+                    await self?.completePendingTurn()
+                }
+                break
+            }
             // Leave this actor before the stats round trip. Awaiting it here blocks
             // the stdout consumer, so the response can never be read.
             Task.detached { [weak self] in

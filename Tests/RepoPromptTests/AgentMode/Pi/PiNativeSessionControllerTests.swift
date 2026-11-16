@@ -37,9 +37,6 @@ final class PiNativeSessionControllerTests: XCTestCase {
               ;;
             prompt)
               if printf '%s' "$line" | grep -q '"images"'; then
-                # A large image prompt can fill the pipe. Respond only after the
-                # controller has released the actor, otherwise this deadlocks.
-                sleep 0.2
                 printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
                 printf '{"type":"agent_start"}\n'
                 printf '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"image payload rejected"}}\n'
@@ -102,7 +99,8 @@ final class PiNativeSessionControllerTests: XCTestCase {
         await withCheckedContinuation { (continuation: CheckedContinuation<[NativeAgentRuntimeEvent], Never>) in
             let task = Task {
                 var events: [NativeAgentRuntimeEvent] = []
-                for await event in await controller.events {
+                let stream = await controller.events
+                for await event in stream {
                     events.append(event)
                     if predicate(event) {
                         continuation.resume(returning: events)
@@ -142,11 +140,12 @@ final class PiNativeSessionControllerTests: XCTestCase {
         await controller.ensureEventsStreamReady()
         _ = try await controller.startOrResume(existingSessionID: nil, model: nil, effortLevel: nil, systemPromptOverride: nil)
         let image = NativeAgentRuntimeImage(data: Data("image".utf8), mimeType: "image/png")
-        _ = try await controller.sendUserMessage("look", images: [image])
-        let events = await collectedEvents(from: controller, until: {
+        async let collected = collectedEvents(from: controller, until: {
             if case .turnCompleted = $0 { return true }
             return false
         })
+        _ = try await controller.sendUserMessage("look", images: [image])
+        let events = await collected
         XCTAssertTrue(events.contains {
             if case let .error(message) = $0 { return message == "image payload rejected" }
             return false
