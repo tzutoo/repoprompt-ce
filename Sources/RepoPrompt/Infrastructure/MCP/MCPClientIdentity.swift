@@ -65,6 +65,9 @@ enum MCPClientIdentity {
         if normalized == "pi-mcp" || normalized.hasPrefix("pi-mcp-") {
             return "pi-mcp"
         }
+        if normalized == "antigravity" || matchesFamily(normalized, tokens: ["antigravity", "client"]) {
+            return "antigravity-client"
+        }
         if matchesFamily(normalized, tokens: ["claude", "ai"]) { return "claude-ai" }
         if matchesFamily(normalized, tokens: ["repoprompt", "cli"]) { return "repoprompt-cli" }
         return nil

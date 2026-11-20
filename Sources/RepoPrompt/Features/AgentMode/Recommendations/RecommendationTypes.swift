@@ -21,6 +21,7 @@ enum RecommendationProviderKind: String, CaseIterable, Identifiable {
     case cursor
     case grokBuild
     case pi
+    case antigravity
     case openAI
 
     var id: String {
@@ -34,6 +35,7 @@ enum RecommendationProviderKind: String, CaseIterable, Identifiable {
         case .cursor: "Cursor CLI"
         case .grokBuild: "Grok Build"
         case .pi: "pi"
+        case .antigravity: "Google Antigravity"
         case .openAI: "OpenAI API"
         }
     }
@@ -45,6 +47,7 @@ enum RecommendationProviderKind: String, CaseIterable, Identifiable {
         case .cursor: "Cursor"
         case .grokBuild: "Grok"
         case .pi: "pi"
+        case .antigravity: "Antigravity"
         case .openAI: "OpenAI"
         }
     }
@@ -66,15 +69,16 @@ struct ProviderStatusSnapshot {
     let grokBuildCLI: Availability
 
     let openAI: Availability
+    var antigravityCLI: Availability = .notConfigured
 
     /// Returns true if at least one provider is ready for chat.
     var hasAnyReadyProvider: Bool {
-        [claudeCodeCLI, codexCLI, cursorCLI, grokBuildCLI, openAI].contains(.ready)
+        [claudeCodeCLI, codexCLI, cursorCLI, grokBuildCLI, openAI, antigravityCLI].contains(.ready)
     }
 
     /// Returns true if any CLI agent is ready.
     var hasAnyCLIAgentReady: Bool {
-        [claudeCodeCLI, codexCLI, cursorCLI, grokBuildCLI].contains(.ready)
+        [claudeCodeCLI, codexCLI, cursorCLI, grokBuildCLI, antigravityCLI].contains(.ready)
     }
 
     /// Returns a copy with providers outside the enabled set treated as unavailable.
@@ -84,7 +88,8 @@ struct ProviderStatusSnapshot {
             codexCLI: enabledProviders.contains(.codex) ? codexCLI : .notConfigured,
             cursorCLI: enabledProviders.contains(.cursor) ? cursorCLI : .notConfigured,
             grokBuildCLI: enabledProviders.contains(.grokBuild) ? grokBuildCLI : .notConfigured,
-            openAI: enabledProviders.contains(.openAI) ? openAI : .notConfigured
+            openAI: enabledProviders.contains(.openAI) ? openAI : .notConfigured,
+            antigravityCLI: enabledProviders.contains(.antigravity) ? antigravityCLI : .notConfigured
         )
     }
 }
@@ -96,12 +101,14 @@ enum ChatBackendKind: String, Codable {
     case claudeCode
     case codex
     case openAI
+    case antigravity
 
     var displayName: String {
         switch self {
         case .claudeCode: "Claude Code"
         case .codex: "Codex CLI"
         case .openAI: "OpenAI API"
+        case .antigravity: "Google Antigravity"
         }
     }
 }
@@ -139,6 +146,8 @@ struct ChatModelRecommendation {
     /// Option for Claude Code CLI, if available.
     let claudeCodeOption: ChatBackendOption?
 
+    let antigravityOption: ChatBackendOption?
+
     /// Priority path used to determine the default (e.g., ["OpenAI API", "Codex CLI"]).
     let priorityPath: [String]
 
@@ -147,7 +156,7 @@ struct ChatModelRecommendation {
 
     /// Returns all available options.
     var availableOptions: [ChatBackendOption] {
-        [openAIOption, codexOption, claudeCodeOption].compactMap(\.self)
+        [openAIOption, codexOption, claudeCodeOption, antigravityOption].compactMap(\.self)
     }
 
     /// Returns the option for a specific backend kind.
@@ -156,14 +165,16 @@ struct ChatModelRecommendation {
         case .claudeCode: claudeCodeOption
         case .codex: codexOption
         case .openAI: openAIOption
+        case .antigravity: antigravityOption
         }
     }
 
-    init(defaultBackend: ChatBackendKind, codexOption: ChatBackendOption?, openAIOption: ChatBackendOption?, claudeCodeOption: ChatBackendOption?, priorityPath: [String], upgradeHint: String? = nil) {
+    init(defaultBackend: ChatBackendKind, codexOption: ChatBackendOption?, openAIOption: ChatBackendOption?, claudeCodeOption: ChatBackendOption?, priorityPath: [String], upgradeHint: String? = nil, antigravityOption: ChatBackendOption? = nil) {
         self.defaultBackend = defaultBackend
         self.codexOption = codexOption
         self.openAIOption = openAIOption
         self.claudeCodeOption = claudeCodeOption
+        self.antigravityOption = antigravityOption
         self.priorityPath = priorityPath
         self.upgradeHint = upgradeHint
     }
