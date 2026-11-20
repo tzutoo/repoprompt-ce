@@ -29,8 +29,10 @@ final class PiNativeSessionControllerTests: XCTestCase {
         #"""
         #!/bin/bash
         while IFS= read -r line; do
-          id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-          type=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+          # Parse the envelope as JSON. Prompt lines embed image objects that also
+          # carry a "type" key, so regex scraping can pick the nested value
+          # depending on key serialization order.
+          read -r id type <<<"$(printf '%s' "$line" | /usr/bin/python3 -c 'import json, sys; payload = json.loads(sys.stdin.read() or "{}"); print(payload.get("id", ""), payload.get("type", ""))')"
           case "$type" in
             get_state)
               printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"fake-session-1","thinkingLevel":"off","isStreaming":false,"messageCount":0}}\n' "$id"
@@ -271,8 +273,10 @@ final class PiNativeSessionControllerTests: XCTestCase {
         let gatedScript = #"""
         #!/bin/bash
         while IFS= read -r line; do
-          id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-          type=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+          # Parse the envelope as JSON. Prompt lines embed image objects that also
+          # carry a "type" key, so regex scraping can pick the nested value
+          # depending on key serialization order.
+          read -r id type <<<"$(printf '%s' "$line" | /usr/bin/python3 -c 'import json, sys; payload = json.loads(sys.stdin.read() or "{}"); print(payload.get("id", ""), payload.get("type", ""))')"
           case "$type" in
             get_state)
               printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"fake-session-1"}}\n' "$id"

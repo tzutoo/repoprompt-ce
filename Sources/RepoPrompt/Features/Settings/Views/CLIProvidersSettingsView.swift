@@ -465,7 +465,8 @@ struct CLIProvidersSettingsView: View {
             title: "Claude Code CLI",
             subtitle: "Uses your Claude Code CLI login for Anthropic models. Compatible backends below only need the `claude` binary and their own API keys.",
             infoURL: "https://docs.claude.com/en/docs/claude-code/setup",
-            isConnected: viewModel.directConnectedCLIProviders.contains(.claudeCode),
+            isConnected: viewModel.showsClaudeCodeConnectedBadge,
+            disconnectedLabel: viewModel.claudeCodeError == nil ? "Not Connected" : "Check Failed",
             isExpanded: $isClaudeCodeExpanded
         ) {
             VStack(alignment: .leading, spacing: 12) {
@@ -524,16 +525,7 @@ struct CLIProvidersSettingsView: View {
                         .disabled(isLoadingClaudeCode)
                         .buttonStyle(CustomButtonStyle())
 
-                        if let error = viewModel.claudeCodeError, !error.isEmpty {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(error)
-                                    .foregroundColor(.red)
-                                Text("This only affects Anthropic Claude models. Compatible backends below use their own API keys when `claude` is installed.")
-                                    .foregroundColor(.secondary)
-                            }
-                            .font(.caption)
-                            .fixedSize(horizontal: false, vertical: true)
-                        } else {
+                        if viewModel.claudeCodeError == nil {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(
                                     viewModel.claudeCodeCLIStatus.isKnownMissing
@@ -548,6 +540,17 @@ struct CLIProvidersSettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                }
+
+                if let error = viewModel.claudeCodeError {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(error)
+                            .foregroundColor(.red)
+                        Text("Compatible backends below use their own API keys when `claude` is installed.")
+                            .foregroundColor(.secondary)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -2749,7 +2752,7 @@ struct CLIProvidersSettingsView: View {
                         alertMessage = "Claude Code CLI is connected and ready to use!"
                         showClaudeCodeTraceDump = false
                     } else {
-                        alertMessage = "Claude Code CLI is not connected. Please run 'claude login' in your terminal."
+                        alertMessage = viewModel.claudeCodeError ?? "The Claude Code CLI connection check failed."
                         showClaudeCodeTraceDump = viewModel.hasClaudeCodeTrace()
                     }
                     showAlert = true
@@ -2757,7 +2760,7 @@ struct CLIProvidersSettingsView: View {
                 }
             } catch {
                 await MainActor.run {
-                    alertMessage = "Error connecting to Claude Code CLI: \(error.asFriendlyString())"
+                    alertMessage = viewModel.claudeCodeError ?? "Error connecting to Claude Code CLI: \(error.asFriendlyString())"
                     showClaudeCodeTraceDump = viewModel.hasClaudeCodeTrace()
                     showAlert = true
                     isLoadingClaudeCode = false
