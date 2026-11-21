@@ -178,6 +178,7 @@ final class WorkspaceCodemapUIPresentationTests: XCTestCase {
             rootEpoch: WorkspaceCodemapRootEpoch(rootID: UUID(), rootLifetimeID: UUID()),
             availability: availability,
             isGenerationSuspended: false,
+            isNonGitCodeMapsPolicyDisabled: false,
             coverage: nil,
             graphRevision: nil,
             appliedGeneration: .init(rawValue: 0),

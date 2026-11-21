@@ -4004,6 +4004,7 @@ package actor WorkspaceFileContextStore {
         var replacementState = currentState
         replacementState.service = replacement
         rootStatesByID[rootID] = replacementState
+        publishCodemapRootStatusesIfChanged()
 
         do {
             #if DEBUG
@@ -11798,6 +11799,8 @@ package actor WorkspaceFileContextStore {
             filesystemCodemapEvidenceByRootEpoch.removeValue(forKey: rootEpoch)
             affectedRootIDs.append(rootID)
         }
+        // Policy-only changes must reach the sidebar even when no index job is admitted.
+        publishCodemapRootStatusesIfChanged()
         await awaitCodemapCleanupFlights(rootIDs: Set(affectedRootIDs))
         guard nonGitCodeMapsEnabled == enabled else { return }
         if enabled {
@@ -11809,6 +11812,7 @@ package actor WorkspaceFileContextStore {
                 ))
             }
         }
+        publishCodemapRootStatusesIfChanged()
     }
 
     /// Global suspension is independent of user-paused roots, so OFF never resumes a manual pause.
@@ -11919,6 +11923,17 @@ package actor WorkspaceFileContextStore {
         }
     }
 
+    /// True while a loaded plain folder is withheld from automatic Code Map work.
+    /// Git roots never match; enabling the non-Git opt-in admits later plain folders.
+    private func codemapNonGitPolicyIsDisabled(rootEpoch: WorkspaceCodemapRootEpoch) -> Bool {
+        guard !nonGitCodeMapsEnabled,
+              let state = rootStatesByID[rootEpoch.rootID],
+              state.lifetimeID == rootEpoch.rootLifetimeID,
+              case .nonGitRoot = state.service.ignoreRulePolicy
+        else { return false }
+        return true
+    }
+
     private func makeCodemapRootStatusSnapshot(
         rootEpoch: WorkspaceCodemapRootEpoch
     ) -> WorkspaceCodemapRootStatusSnapshot {
@@ -11932,8 +11947,6 @@ package actor WorkspaceFileContextStore {
             .retryExhausted
         } else if executionState == .exhausted {
             .workerRecoveryExhausted
-        } else if isNonGitCodeMapOptOut(rootEpoch: rootEpoch) {
-            .nonGitOptOut
         } else if executionState?.budget != nil {
             .budgetLimited
         } else {
@@ -11975,6 +11988,7 @@ package actor WorkspaceFileContextStore {
             rootEpoch: rootEpoch,
             availability: availability,
             isGenerationSuspended: suspended,
+            isNonGitCodeMapsPolicyDisabled: codemapNonGitPolicyIsDisabled(rootEpoch: rootEpoch),
             coverage: accounting?.coverage,
             graphRevision: accounting.flatMap { $0.graphRevision == 0 ? nil : $0.graphRevision },
             appliedGeneration: accounting?.appliedGeneration ?? zeroGeneration,
@@ -14325,17 +14339,6 @@ package actor WorkspaceFileContextStore {
         )
     }
 
-    /// True while a loaded plain folder is withheld from automatic Code Map work.
-    /// Git roots never match; enabling the non-Git opt-in admits later plain folders.
-    private func isNonGitCodeMapOptOut(rootEpoch: WorkspaceCodemapRootEpoch) -> Bool {
-        guard !nonGitCodeMapsEnabled,
-              let state = rootStatesByID[rootEpoch.rootID],
-              state.lifetimeID == rootEpoch.rootLifetimeID,
-              case .nonGitRoot = state.service.ignoreRulePolicy
-        else { return false }
-        return true
-    }
-
     /// Records launch state and creates the background task only. Git eligibility, runtime,
     /// integration-route, manifest, CAS, source, and graph work all begin in the task body.
     private func scheduleCodemapGraphIndexBuildAfterRootReady(
@@ -14346,7 +14349,7 @@ package actor WorkspaceFileContextStore {
             guard codemapGraphIndexBuildLaunchPolicyForTesting == .enabled else { return }
         #endif
         // Legacy plain roots do no automatic Code Map work until the persisted opt-in is on.
-        if isNonGitCodeMapOptOut(rootEpoch: rootEpoch) {
+        if codemapNonGitPolicyIsDisabled(rootEpoch: rootEpoch) {
             return
         }
         guard !codemapGenerationIsSuspended(rootEpoch: rootEpoch),

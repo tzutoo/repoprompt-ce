@@ -11,6 +11,7 @@ extension AgentSessionRuntimeHost {
     ) {
         let codex = codexCoordinator
         let claude = claudeCoordinator
+        let pi = piCoordinator
         scope.worktrees.effects = .init(
             drainOracle: { [weak interactions] session in
                 guard let interactions else { preconditionFailure("Worktree effects require the installed interaction runtime") }
@@ -30,11 +31,17 @@ extension AgentSessionRuntimeHost {
                     for: session, sourceTitle: sessionTitle(session), environment: environment(session), command: command
                 )
             },
-            retireProvider: { [weak codex, weak claude] session in
+            retireProvider: { [weak codex, weak claude, weak pi] session in
                 // Admission retains the scope/execution; retain its exact coordinators for this
                 // effect without making terminal hook -> worktree effect backedges own them.
-                guard let codex, let claude else { preconditionFailure("Worktree effects require the installed provider coordinators") }
-                await Self.invalidateProviderContextForExecutionLocationChange(session, codexCoordinator: codex, claudeCoordinator: claude)
+                guard let codex, let claude, let pi else { preconditionFailure("Worktree effects require the installed provider coordinators") }
+                // pi sessions are hosted by the pi coordinator, so retiring their old-root provider
+                // through the Claude coordinator would leave the pi controller and its launch
+                // settings behind.
+                let nonCodex = session.selectedAgent.usesPiNativeRuntime ? pi : claude
+                await Self.invalidateProviderContextForExecutionLocationChange(
+                    session, codexCoordinator: codex, nonCodexCoordinator: nonCodex
+                )
             }
         )
     }
@@ -42,7 +49,7 @@ extension AgentSessionRuntimeHost {
     private static func invalidateProviderContextForExecutionLocationChange(
         _ session: AgentTabSession,
         codexCoordinator: CodexAgentModeCoordinator,
-        claudeCoordinator: ClaudeAgentModeCoordinator
+        nonCodexCoordinator: ClaudeAgentModeCoordinator
     ) async {
         // The worktree runtime admitted its original command immediately before this call.
         // Detach and clear synchronously; awaited cleanup never touches a same-tab successor.
@@ -57,7 +64,7 @@ extension AgentSessionRuntimeHost {
         } else {
             codex = nil
         }
-        let claude = claudeCoordinator.detachForWorkspaceSwitchFinalizeSync(session)
+        let claude = nonCodexCoordinator.detachForWorkspaceSwitchFinalizeSync(session)
         session.providerSessionID = nil
         session.providerCleanupHandle = nil
         session.contextUsageSnapshot = nil
@@ -68,6 +75,6 @@ extension AgentSessionRuntimeHost {
         await acp?.cancelPrompt()
         await acp?.shutdown()
         if let codex { await codexCoordinator.retireDetachedControllerForWorkspaceSwitch(codex) }
-        if let claude { await claudeCoordinator.retireDetachedControllerForWorkspaceSwitch(claude, discardedSession: session) }
+        if let claude { await nonCodexCoordinator.retireDetachedControllerForWorkspaceSwitch(claude, discardedSession: session) }
     }
 }

@@ -2148,8 +2148,12 @@ package actor WorkspaceCodemapBindingEngine {
     private func graphIndexJobLooksStalled(_ job: GraphIndexJob) -> Bool {
         switch job.phase {
         case .complete, .checkpointed, .persistingManifestCache,
-             .cancelled, .superseded, .budgetLimited, .retryExhausted:
+             .cancelled, .superseded, .budgetLimited:
             true
+        case .retryExhausted:
+            // An exhausted retry budget is terminal until an explicit retry: a plain
+            // `scheduleGraphIndex` request must not restart it on its own.
+            false
         case .scheduled, .waitingForAdmission, .readingCatalogPage, .loadingEnvelopes,
              .classifyingBatch, .resolvingArtifacts, .stagingManifestCache,
              .publishingGraphChanges, .suspendedBusy:
