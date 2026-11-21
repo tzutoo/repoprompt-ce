@@ -39,6 +39,9 @@ final class AgentRuntimeProviderService {
         if Self.enableDebugLogging {
             Self.logger.debug("Creating provider for agent: \(agent.displayName), model: \(modelString ?? "default"), runType: \(String(describing: runType))")
         }
+        guard AgentOperationEligibility.AgentOperation.contextBuilder.supports(agent) else {
+            return UnsupportedHeadlessAgentProvider(reason: "\(agent.displayName) does not support Context Builder discovery.")
+        }
         switch agent {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             let runtimeVariant = agent.claudeRuntimeVariant ?? .standard
@@ -118,7 +121,8 @@ final class AgentRuntimeProviderService {
             }
             return PiExecAgentProvider(config: config)
         case .antigravity:
-            return UnsupportedHeadlessAgentProvider(reason: "Headless execution is not supported for this provider.")
+            // No discovery adapter yet. Keep the exhaustive dispatch fail-closed.
+            return UnsupportedHeadlessAgentProvider(reason: "Antigravity does not support Context Builder discovery.")
         case .devin:
             return DevinACPHeadlessAgentProvider(
                 config: DevinAgentConfig(

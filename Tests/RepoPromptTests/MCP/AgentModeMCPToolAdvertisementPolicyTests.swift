@@ -456,7 +456,9 @@ final class AgentWorktreePlacementPolicyTests: XCTestCase {
                         XCTAssertTrue(prompt.contains("omit `path` to use the app-managed `.repoprompt-worktrees` container"), context)
                         XCTAssertTrue(prompt.contains("omit `worktree_path`"), context)
                         XCTAssertTrue(prompt.contains("only for a user-requested location"), context)
-                        if provider == .codexExec {
+                        if AgentModePrompts.Fragments.usesServerQualifiedRepoPromptTools(provider) {
+                            // Codex and pi expose MCP tools under the server namespace, so the
+                            // rendered prompt must qualify the canonical name.
                             XCTAssertTrue(prompt.contains("`mcp__RepoPromptCE__manage_worktree`"), context)
                             XCTAssertFalse(prompt.contains("`mcp__RepoPrompt__manage_worktree`"), context)
                             XCTAssertFalse(prompt.contains("`manage_worktree`"), context)
