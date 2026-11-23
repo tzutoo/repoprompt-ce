@@ -162,6 +162,12 @@ final class AgentSessionUsageRuntime {
             promptTokens: nil,
             modelContextWindow: vouchableWindow
         )
+        if let conversation = session.providerSessionID,
+           session.claudeWakeCompactionSpentConversation == conversation,
+           ClaudeWakeContextPressure.current(for: session)?.hasRearmHeadroom == true
+        {
+            session.claudeWakeCompactionSpentConversation = nil
+        }
         return didAppend
     }
 

@@ -23,7 +23,8 @@ let package = Package(
         .testTarget(
             name: "RepoPromptClaudeCompatibleProviderTests",
             dependencies: ["RepoPromptClaudeCompatibleProvider"],
-            path: "Tests/RepoPromptClaudeCompatibleProviderTests"
+            path: "Tests/RepoPromptClaudeCompatibleProviderTests",
+            resources: [.copy("Fixtures")]
         ),
         .target(
             name: "RepoPromptPiProvider",

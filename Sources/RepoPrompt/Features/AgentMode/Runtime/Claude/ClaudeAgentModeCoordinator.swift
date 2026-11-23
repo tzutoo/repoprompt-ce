@@ -764,7 +764,8 @@ final class ClaudeAgentModeCoordinator {
         session: AgentTabSession,
         intent: NativeSessionIntent,
         providerLaunchInput: AgentProviderLaunchInput? = nil,
-        routingLease: MCPBootstrapLease? = nil
+        routingLease: MCPBootstrapLease? = nil,
+        controlCommand: AgentProviderControlCommand? = nil
     ) async -> EnsureSessionOutcome {
         // Shared by Claude-compatible and pi native controllers: both ride this
         // coordinator through NativeAgentRuntimeControlling. Reject only agents
@@ -786,6 +787,7 @@ final class ClaudeAgentModeCoordinator {
         }
         guard intentIsCurrent(intent, for: session, providerLaunchInput: providerLaunchInput) else { return .superseded }
 
+        if let controlCommand, session.providerSessionID != controlCommand.expectedProviderConversation { return .superseded }
         let runID = intent.runID
         let launchModelRaw = session.selectedModelRaw
         let runtimeVariant = session.selectedAgent.claudeRuntimeVariant ?? .standard
@@ -901,9 +903,16 @@ final class ClaudeAgentModeCoordinator {
                 effectiveAllowNativeBashTool: effectiveAllowNativeBashTool,
                 effectiveMCPStrictMode: effectiveMCPStrictMode,
                 providerLaunchInput: providerLaunchInput,
-                routingLease: routingLease
+                routingLease: routingLease,
+                controlCommand: controlCommand
             )
             guard intentIsCurrent(intent, for: session, providerLaunchInput: providerLaunchInput) else { return .superseded }
+            if let controlCommand, controlCommand.expectedProviderConversation != sessionRef.sessionID {
+                if let detached = detachClaudeController(controller, from: session, removeToolTracking: true) {
+                    await cancelClaudeRun(session, oldController: detached)
+                }
+                return .superseded
+            }
             updateProviderSessionIDIfNeeded(sessionRef.sessionID, for: session)
             return .ready
         } catch ControllerLifecycleError.superseded {
@@ -1143,10 +1152,14 @@ final class ClaudeAgentModeCoordinator {
         effectiveAllowNativeBashTool: Bool?,
         effectiveMCPStrictMode: Bool?,
         providerLaunchInput: AgentProviderLaunchInput?,
-        routingLease: MCPBootstrapLease?
+        routingLease: MCPBootstrapLease?,
+        controlCommand: AgentProviderControlCommand?
     ) async throws -> NativeAgentRuntimeSessionRef {
         let isPeriodic = session.oversight.pendingAutoWake?.isPeriodic == true
         let existingSessionID = session.providerSessionID
+        if let controlCommand, existingSessionID == nil || existingSessionID != controlCommand.expectedProviderConversation {
+            throw ControllerLifecycleError.superseded
+        }
         let systemPromptOverride = agentModeSystemPromptOverride(for: session)
         let effortLevel = currentClaudeEffortLevel(for: session)
         guard await retainRoutingCleanup(from: routingLease, on: controller, for: session),
@@ -1181,7 +1194,7 @@ final class ClaudeAgentModeCoordinator {
                 throw ControllerLifecycleError.superseded
             }
             // A periodic turn cannot recover into a fresh conversation without its handoff.
-            guard !isPeriodic, intent.allowsFreshStartRecovery,
+            guard !isPeriodic, controlCommand == nil, intent.allowsFreshStartRecovery,
                   shouldRetryFreshStartWithoutResume(after: error, existingSessionID: existingSessionID)
             else {
                 throw error
@@ -1452,6 +1465,34 @@ final class ClaudeAgentModeCoordinator {
         return try await controller.sendUserMessage(text, configuration: configuration)
     }
 
+    /// Private evidence about the previous input, not a live usage reading. The runner retains
+    /// at most one witness and may only use it for the native completion naming `inputID`.
+    struct OverflowInputEvidence {
+        let inputID: UUID
+        let writer: AgentSessionRuntimeStore.WriterReceipt
+        let intent: NativeSessionIntent
+        let installation: UUID
+        let controllerID: ObjectIdentifier
+        let conversation: String
+        let model: String
+        let compactBoundary: UUID?
+        let compactedAt: Date?
+        let withdrawnVouchRevision: UInt64
+    }
+
+    func overflowInputEvidenceIsCurrent(_ evidence: OverflowInputEvidence, for session: AgentTabSession) -> Bool {
+        !Task.isCancelled && evidence.writer.disposition(for: session) == .current
+            && intentIsCurrent(evidence.intent, for: session)
+            && session.selectedAgent == .claudeCode && session.selectedModelRaw == evidence.model
+            && session.providerSessionID == evidence.conversation
+            && session.claudeController.map { ObjectIdentifier($0) } == evidence.controllerID
+            && controllerListeners[session.tabID]?.hasInstallation(evidence.installation) == true
+            && session.claudeCompactBoundaryID == evidence.compactBoundary
+            && session.contextCompactedAt == evidence.compactedAt
+            && session.contextCountVouchRevision == evidence.withdrawnVouchRevision
+            && session.claudeAcceptedHostTurnIDs == [evidence.inputID]
+    }
+
     @discardableResult
     func sendClaudeNativeMessage(
         session: AgentTabSession,
@@ -1467,7 +1508,8 @@ final class ClaudeAgentModeCoordinator {
         providerLaunchInput: AgentProviderLaunchInput? = nil,
         routingLease: MCPBootstrapLease? = nil,
         inputResourcesAreCurrent callerResourcesAreCurrent: @escaping @MainActor () -> Bool = { true },
-        validateInputResources: (@MainActor () async -> Bool)? = nil
+        validateInputResources: (@MainActor () async -> Bool)? = nil,
+        overflowEvidence: (writer: AgentSessionRuntimeStore.WriterReceipt, accept: (OverflowInputEvidence) -> Void)? = nil
     ) async -> NativeSendOutcome {
         let inputResourcesAreCurrent = {
             callerResourcesAreCurrent() && providerLaunchInput?.isCurrent(for: session) != false
@@ -1475,6 +1517,8 @@ final class ClaudeAgentModeCoordinator {
         guard inputResourcesAreCurrent() else { return .failed(message: "The input resource generation changed before Claude dispatch.") }
         guard intentIsCurrent(intent, for: session) else { return .superseded }
         let isSelfNote = selfCompactDispatchID?.stage == .note
+        let proactiveCompact = providerControlCommand?.claudeWakeCompaction
+        let usesExistingControllerOnly = isSelfNote || proactiveCompact != nil
         let isMaintenance = providerControlCommand != nil || isSelfNote
         let auditTurnID = session.pendingTurnRuntimeAnchors.first?.userItemID
         var handler = toolHandler(for: session)
@@ -1484,6 +1528,18 @@ final class ClaudeAgentModeCoordinator {
         // controller is a transport retry of the *same* user turn, so every attempt must carry a
         // byte-equivalent oversight supplement rather than re-deciding per attempt.
         let promptDispatchID = AgentSessionLinkPromptDispatchID.claudeNativeSend(UUID())
+        @discardableResult
+        func invalidateWakeUsageAfterSend(_ controller: any NativeAgentRuntimeControlling, previousVouch: UInt64) -> UInt64? {
+            // A new count can arrive while the stdin call is suspended. Only retire the vouch
+            // that existed before the write, never a newer provider reading.
+            if session.contextCountVouchRevision == previousVouch,
+               intentIsCurrent(intent, for: session), sessionOwnsClaudeController(controller, for: session)
+            {
+                session.invalidateClaudeWakeUsage()
+                return session.contextCountVouchRevision
+            }
+            return nil
+        }
         /// A control command acts only on the conversation it was admitted for and never interrupts.
         /// A rebind, a fresh-start fallback after a failed resume (whose staged recovery handoff stays
         /// for the next ordinary turn), or a turn in flight all refuse it.
@@ -1495,7 +1551,8 @@ final class ClaudeAgentModeCoordinator {
             // nothing can rebind between this answer and the caller's next step.
             let turnInFlight = await controller.hasTurnInFlight
             guard intentIsCurrent(intent, for: session),
-                  sessionOwnsClaudeController(controller, for: session)
+                  sessionOwnsClaudeController(controller, for: session),
+                  command.claudeWakeCompaction?.isCurrent(for: session) != false
             else {
                 return .superseded
             }
@@ -1622,7 +1679,8 @@ final class ClaudeAgentModeCoordinator {
                       session.selfCompactState.active?.owner?.matchesLocalBinding(session) == true
                 else { return .superseded }
             }
-            switch isSelfNote ? .ready : await ensureClaudeNativeSession(session: session, intent: intent, providerLaunchInput: providerLaunchInput, routingLease: routingLease) {
+            if let proactiveCompact, !proactiveCompact.isCurrent(for: session) { return .superseded }
+            switch usesExistingControllerOnly ? .ready : await ensureClaudeNativeSession(session: session, intent: intent, providerLaunchInput: providerLaunchInput, routingLease: routingLease, controlCommand: providerControlCommand?.isClaudeOverflowRecovery == true ? providerControlCommand : nil) {
             case .ready:
                 break
             case let .failed(message):
@@ -1654,6 +1712,7 @@ final class ClaudeAgentModeCoordinator {
             }
 
             if hasEffectiveClaudeControllerLaunchSettingsMismatch(for: session, providerLaunchInput: providerLaunchInput) {
+                if proactiveCompact != nil { return .superseded }
                 if let refusal = await prepareClearTurn(controller) { return refusal }
                 guard await recycleAndRefreshTracking(controller) else { return .superseded }
                 continue
@@ -1753,6 +1812,7 @@ final class ClaudeAgentModeCoordinator {
             // Validate launch settings before ordinary-turn configuration application below.
             // Application can suspend, so the complete snapshot is fenced again before dispatch.
             if hasEffectiveClaudeControllerLaunchSettingsMismatch(for: session, providerLaunchInput: providerLaunchInput) {
+                if proactiveCompact != nil { return .superseded }
                 guard await recycleAndRefreshTracking(controller) else { return .superseded }
                 continue
             }
@@ -2005,14 +2065,28 @@ final class ClaudeAgentModeCoordinator {
                 {
                     return .superseded
                 }
+                if proactiveCompact != nil {
+                    guard inputResourcesAreCurrent(), session.claudeExpectedTurnIDs.isEmpty else { return .superseded }
+                }
                 do {
-                    let turnID: UUID = if session.selectedAgent.usesPiNativeRuntime,
-                                          providerControlCommand.kind == .compact,
-                                          let piController = controller as? PiNativeSessionController
+                    let previousVouch = session.contextCountVouchRevision
+                    defer { invalidateWakeUsageAfterSend(controller, previousVouch: previousVouch) }
+                    let turnID: UUID
+                    if session.selectedAgent.usesPiNativeRuntime,
+                       providerControlCommand.kind == .compact,
+                       let piController = controller as? PiNativeSessionController
                     {
-                        try await piController.compactSession()
+                        turnID = try await piController.compactSession()
+                    } else if proactiveCompact != nil {
+                        turnID = try await controller.sendIsolatedCompact(expectedConversation: providerControlCommand.expectedProviderConversation)
+                    } else if providerControlCommand.isClaudeOverflowRecovery {
+                        guard let active = session.selfCompactState.active, active.claudeOverflowHoldID != nil,
+                              providerControlCommand.selfCompactDispatchID?.requestID == active.id,
+                              active.compactProviderConversation == providerControlCommand.expectedProviderConversation
+                        else { return .superseded }
+                        turnID = try await controller.compactContext(expectedConversationID: providerControlCommand.expectedProviderConversation)
                     } else {
-                        try await controller.sendUserMessage(providerControlCommand.providerText)
+                        turnID = try await controller.sendUserMessage(providerControlCommand.providerText)
                     }
                     return await acceptSentTurn(turnID, controller: controller)
                 } catch {
@@ -2049,6 +2123,8 @@ final class ClaudeAgentModeCoordinator {
                 session.selfCompactState = state
                 hostCapabilities.scheduleSave(session)
                 do {
+                    let previousVouch = session.contextCountVouchRevision
+                    defer { invalidateWakeUsageAfterSend(controller, previousVouch: previousVouch) }
                     let turnID = try await controller.sendUserMessage(text)
                     state = session.selfCompactState
                     if state.noteAccepted(dispatchID) {
@@ -2187,13 +2263,25 @@ final class ClaudeAgentModeCoordinator {
                 inputInbox?.beginInputHandoff()
                 defer { inputInbox?.endInputHandoff() }
                 inputAttemptChanged?(true)
-                let turnID = try await sendNativeUserMessage(
-                    providerBoundText,
-                    configuration: configurationProof,
-                    images: images,
-                    controller: controller,
-                    agent: session.selectedAgent
-                )
+                let previousVouch = session.contextCountVouchRevision
+                let priorLoad = overflowEvidence == nil ? nil : AgentModeViewModel.observationContextLoad(for: session)
+                let priorConversation = session.providerSessionID
+                let priorModel = session.selectedModelRaw
+                let priorBoundary = session.claudeCompactBoundaryID
+                let priorCompactedAt = session.contextCompactedAt
+                let installation = controllerListeners[session.tabID]?.installationWitness
+                var withdrawnVouchRevision: UInt64?
+                let turnID: UUID
+                do {
+                    defer { withdrawnVouchRevision = invalidateWakeUsageAfterSend(controller, previousVouch: previousVouch) }
+                    turnID = try await sendNativeUserMessage(
+                        providerBoundText,
+                        configuration: configurationProof,
+                        images: images,
+                        controller: controller,
+                        agent: session.selectedAgent
+                    )
+                }
                 session.oracleBackgroundAwareness.accept(oracle)
                 recordOrdinaryDispatchAttempt()
                 if let parked {
@@ -2221,7 +2309,20 @@ final class ClaudeAgentModeCoordinator {
                 // The returned provider turn ID is the acceptance signal. Acknowledge before the
                 // currency guard: even a locally superseded turn delivered this supplement.
                 hostCapabilities.acceptAgentSessionLinkPromptClaim(session, monitoring.dispatchContext, released.claim)
-                return await acceptSentTurn(turnID, controller: controller)
+                let outcome = await acceptSentTurn(turnID, controller: controller)
+                if outcome == .sent, let overflowEvidence, let installation, let withdrawnVouchRevision,
+                   let priorConversation, !priorConversation.isEmpty, priorLoad?.confidence == .exact,
+                   ClaudeOverflowRecoveryPolicy.historyIsNearLimit(used: priorLoad?.usedTokens, window: priorLoad?.windowTokens)
+                {
+                    let evidence = OverflowInputEvidence(
+                        inputID: turnID, writer: overflowEvidence.writer, intent: intent,
+                        installation: installation, controllerID: ObjectIdentifier(controller),
+                        conversation: priorConversation, model: priorModel, compactBoundary: priorBoundary,
+                        compactedAt: priorCompactedAt, withdrawnVouchRevision: withdrawnVouchRevision
+                    )
+                    if overflowInputEvidenceIsCurrent(evidence, for: session) { overflowEvidence.accept(evidence) }
+                }
+                return outcome
             } catch NativeAgentRuntimeControllerError.configurationNotCurrent,
                 NativeAgentRuntimeControllerError.cancelledBeforeWrite
             {
@@ -2423,6 +2524,11 @@ final class ClaudeAgentModeCoordinator {
         session.providerSessionID = nil
         session.providerCleanupHandle = nil
         return detached
+    }
+
+    func prepareFreshConversationAfterOverflow(_ session: AgentTabSession) {
+        let detached = prepareClaudeProviderIdentityResetSync(session)
+        beginClaudeResumeTransferIfNeeded(for: session, oldController: detached, captureProviderSessionID: false)
     }
 
     func handleProviderIdentityTransitionSync(
