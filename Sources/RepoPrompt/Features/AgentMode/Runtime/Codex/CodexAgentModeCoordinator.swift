@@ -3971,6 +3971,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
         controller: (any CodexSessionControlling)?,
         existingRef: CodexNativeSessionController.SessionRef?,
         baseInstructions: String,
+        developerInstructions: CodexDeveloperInstructionPlan,
         model: String?,
         reasoningEffort: String?,
         serviceTier: String?,
@@ -3989,6 +3990,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
             let ref = try await controller.startOrResume(
                 existing: existingRef,
                 baseInstructions: baseInstructions,
+                developerInstructions: existingRef == nil ? developerInstructions.newThread : developerInstructions.resume,
                 model: model,
                 reasoningEffort: reasoningEffort,
                 serviceTier: serviceTier
@@ -4010,6 +4012,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
                 let ref = try await controller.startOrResume(
                     existing: nil,
                     baseInstructions: baseInstructions,
+                    developerInstructions: developerInstructions.newThread,
                     model: model,
                     reasoningEffort: reasoningEffort,
                     serviceTier: serviceTier
@@ -4117,7 +4120,19 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
             conversationID: session.codexConversationID ?? "",
             rolloutPath: session.codexRolloutPath,
             model: session.codexModel,
-            reasoningEffort: session.codexReasoningEffort
+            reasoningEffort: session.codexReasoningEffort,
+            instructionMode: session.codexInstructionMode
+        )
+    }
+
+    /// RepoPrompt developer instructions for this session's next bind. Eligibility decides whether a
+    /// new thread may use Codex's own base instructions; a resume follows the conversation's
+    /// recorded mode, so later role or parent changes cannot strip a native thread's guidance.
+    static func codexDeveloperInstructionPlan(for session: AgentTabSession) -> CodexDeveloperInstructionPlan {
+        CodexDeveloperInstructionPlan.resolve(
+            note: AgentModePrompts.codexNativeDeveloperNote(),
+            eligibleForNativeStart: session.mcpControlContext?.taskLabelKind == nil && session.parentSessionID == nil,
+            conversationMode: session.codexInstructionMode
         )
     }
 
@@ -4626,6 +4641,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
             cancelCodexTransportClosedFallback(for: session.tabID)
             session.codexConversationID = ref.conversationID
             session.codexRolloutPath = ref.rolloutPath
+            session.codexInstructionMode = ref.instructionMode
             session.providerCleanupHandle = ProviderConversationCleanupHandle(
                 provider: AgentProviderKind.codexExec.rawValue,
                 conversationID: ref.conversationID,
@@ -7094,6 +7110,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
             taskLabelKind: session.mcpControlContext?.taskLabelKind,
             codeMapsDisabled: GlobalSettingsStore.shared.globalCodeMapsDisabled()
         )
+        let developerInstructions = Self.codexDeveloperInstructionPlan(for: session)
         let resumeCandidate = Self.codexResumeCandidate(
             for: session,
             skipResumeWhenNoPriorCodexHistory: skipResumeWhenNoPriorCodexHistory
@@ -7107,6 +7124,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
                 controller: startController,
                 existingRef: existingRef,
                 baseInstructions: basePrompt,
+                developerInstructions: developerInstructions,
                 model: selection.model,
                 reasoningEffort: selection.reasoningEffort,
                 serviceTier: selection.serviceTier,
@@ -7188,6 +7206,7 @@ final class CodexAgentModeCoordinator: AgentRunInteractionStateObserving {
                             controller: recoveredController,
                             existingRef: existingRef,
                             baseInstructions: basePrompt,
+                            developerInstructions: developerInstructions,
                             model: selection.model,
                             reasoningEffort: selection.reasoningEffort,
                             serviceTier: selection.serviceTier,

@@ -230,6 +230,14 @@ struct AgentSession: Codable, Identifiable {
     /// State of the last run
     var lastRunState: String?
 
+    /// Workflow applied to the first accepted run. The identity is write-once.
+    var originWorkflowID: String?
+    var originWorkflowDisplayName: String?
+
+    /// Start time of the most recently accepted run. This is durable and is not
+    /// the transient elapsed-timer value used while a run is active.
+    var lastRunStartedAt: Date?
+
     /// Provider-specific resumable session identifier (e.g., Claude CLI session_id)
     /// Used to resume conversations with --resume instead of replaying history
     var providerSessionID: String?
@@ -263,6 +271,8 @@ struct AgentSession: Codable, Identifiable {
     /// Codex native session identifiers (v2 thread and rollout path)
     var codexConversationID: String?
     var codexRolloutPath: String?
+    /// How the Codex conversation's base instructions were chosen; nil when unknown.
+    var codexInstructionMode: CodexThreadInstructionMode?
 
     /// Codex native session metadata
     var codexModel: String?
@@ -344,6 +354,9 @@ struct AgentSession: Codable, Identifiable {
         agentReasoningEffort: String? = nil,
         acpModelParameterSelections: [ACPModelParameterSelection] = [],
         lastRunState: String? = nil,
+        originWorkflowID: String? = nil,
+        originWorkflowDisplayName: String? = nil,
+        lastRunStartedAt: Date? = nil,
         providerSessionID: String? = nil,
         providerCleanupHandle: ProviderConversationCleanupHandle? = nil,
         autoEditEnabled: Bool = true,
@@ -357,6 +370,7 @@ struct AgentSession: Codable, Identifiable {
         automationTurnAudit: [AgentAutomationTurnAudit] = [],
         codexConversationID: String? = nil,
         codexRolloutPath: String? = nil,
+        codexInstructionMode: CodexThreadInstructionMode? = nil,
         codexModel: String? = nil,
         codexReasoningEffort: String? = nil,
         codexContextWindow: Int? = nil,
@@ -398,6 +412,9 @@ struct AgentSession: Codable, Identifiable {
         self.agentReasoningEffort = agentReasoningEffort
         self.acpModelParameterSelections = ACPModelParameterSelection.normalized(acpModelParameterSelections)
         self.lastRunState = lastRunState
+        self.originWorkflowID = originWorkflowID
+        self.originWorkflowDisplayName = originWorkflowDisplayName
+        self.lastRunStartedAt = lastRunStartedAt
         self.providerSessionID = providerSessionID
         self.providerCleanupHandle = providerCleanupHandle
         self.autoEditEnabled = autoEditEnabled
@@ -411,6 +428,7 @@ struct AgentSession: Codable, Identifiable {
         self.automationTurnAudit = AgentAutomationTurnAudit.retain(automationTurnAudit)
         self.codexConversationID = codexConversationID
         self.codexRolloutPath = codexRolloutPath
+        self.codexInstructionMode = codexInstructionMode
         self.codexModel = codexModel
         self.codexReasoningEffort = codexReasoningEffort
         self.codexContextWindow = codexContextWindow
@@ -454,6 +472,9 @@ struct AgentSession: Codable, Identifiable {
         case agentReasoningEffort
         case acpModelParameterSelections
         case lastRunState
+        case originWorkflowID
+        case originWorkflowDisplayName
+        case lastRunStartedAt
         case providerSessionID
         case providerCleanupHandle
         case autoEditEnabled
@@ -467,6 +488,7 @@ struct AgentSession: Codable, Identifiable {
         case automationTurnAudit
         case codexConversationID
         case codexRolloutPath
+        case codexInstructionMode
         case codexModel
         case codexReasoningEffort
         case codexContextWindow
@@ -515,6 +537,9 @@ struct AgentSession: Codable, Identifiable {
             container.decodeIfPresent([ACPModelParameterSelection].self, forKey: .acpModelParameterSelections) ?? []
         )
         lastRunState = try container.decodeIfPresent(String.self, forKey: .lastRunState)
+        originWorkflowID = try container.decodeIfPresent(String.self, forKey: .originWorkflowID)
+        originWorkflowDisplayName = try container.decodeIfPresent(String.self, forKey: .originWorkflowDisplayName)
+        lastRunStartedAt = try container.decodeIfPresent(Date.self, forKey: .lastRunStartedAt)
         providerSessionID = try container.decodeIfPresent(String.self, forKey: .providerSessionID)
         providerCleanupHandle = try container.decodeIfPresent(ProviderConversationCleanupHandle.self, forKey: .providerCleanupHandle)
         autoEditEnabled = try container.decode(Bool.self, forKey: .autoEditEnabled)
@@ -533,6 +558,9 @@ struct AgentSession: Codable, Identifiable {
         )
         codexConversationID = try container.decodeIfPresent(String.self, forKey: .codexConversationID)
         codexRolloutPath = try container.decodeIfPresent(String.self, forKey: .codexRolloutPath)
+        // Lenient: an unrecognized mode is treated as unknown rather than failing the session.
+        let rawInstructionMode: String? = try? container.decodeIfPresent(String.self, forKey: .codexInstructionMode)
+        codexInstructionMode = rawInstructionMode.flatMap(CodexThreadInstructionMode.init(rawValue:))
         codexModel = try container.decodeIfPresent(String.self, forKey: .codexModel)
         codexReasoningEffort = try container.decodeIfPresent(String.self, forKey: .codexReasoningEffort)
         codexContextWindow = try container.decodeIfPresent(Int.self, forKey: .codexContextWindow)

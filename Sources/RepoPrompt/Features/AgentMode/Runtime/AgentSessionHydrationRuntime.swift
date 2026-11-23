@@ -218,6 +218,7 @@ enum AgentSessionHydrationRuntime {
         }
         session.codexConversationID = persisted.codexConversationID
         session.codexRolloutPath = persisted.codexRolloutPath
+        session.codexInstructionMode = persisted.codexInstructionMode
         session.providerCleanupHandle = persisted.resolvedProviderCleanupHandle
         session.codexModel = persisted.codexModel
         session.codexReasoningEffort = persisted.codexReasoningEffort
@@ -260,6 +261,9 @@ enum AgentSessionHydrationRuntime {
         session.organizationalParentID = indexedPlacement?.organizationalParentID ?? persisted.organizationalParentID
         session.delegationScopeID = indexedPlacement?.delegationScopeID ?? persisted.delegationScopeID
         session.isMCPOriginated = persisted.isMCPOriginated
+        session.originWorkflowID = persisted.originWorkflowID
+        session.originWorkflowDisplayName = persisted.originWorkflowDisplayName
+        session.lastRunStartedAt = persisted.lastRunStartedAt
         session.worktreeBindings = persisted.worktreeBindings
         session.worktreeMergeOperations = persisted.worktreeMergeOperations
         session.nextSequenceIndex = payload.transcript.nextSequenceIndex
