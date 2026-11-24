@@ -5167,6 +5167,31 @@ class DaemonState:
                 global_heavy_slot = self._acquire_global_heavy_slot(job.ticket)
                 if global_heavy_slot is None:
                     return
+            if job.operation == "swift-build":
+                iroh_fetch = (
+                    self.paths.repo_root
+                    / "Packages"
+                    / "RepoPromptIrohTransport"
+                    / "Scripts"
+                    / "fetch-xcframework.sh"
+                )
+                if iroh_fetch.is_file():
+                    fetch_result = subprocess.run(
+                        [str(iroh_fetch)],
+                        cwd=str(self.paths.repo_root),
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    fetch_output = (fetch_result.stdout or "") + (fetch_result.stderr or "")
+                    if fetch_output:
+                        with self.condition:
+                            self._append_system_line_locked(job, fetch_output)
+                    if fetch_result.returncode != 0:
+                        raise ConductorError(
+                            f"fetch-xcframework.sh failed with exit code {fetch_result.returncode}"
+                        )
             if job_builds_app_index(job.operation, job.args):
                 app_index_source_before = app_source_hashes(self.paths.repo_root)
                 with contextlib.suppress(FileNotFoundError):

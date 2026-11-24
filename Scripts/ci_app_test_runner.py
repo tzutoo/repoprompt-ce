@@ -1084,8 +1084,20 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+def ensure_iroh_xcframework(root: Path) -> None:
+    fetch_script = root / "Packages" / "RepoPromptIrohTransport" / "Scripts" / "fetch-xcframework.sh"
+    if fetch_script.is_file():
+        subprocess.run([str(fetch_script)], cwd=root, check=True)
+
+
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
+    if not args.skip_build:
+        try:
+            ensure_iroh_xcframework(args.cwd or Path.cwd())
+        except subprocess.CalledProcessError as error:
+            print(f"::error::fetch-xcframework.sh failed with status {error.returncode}", file=sys.stderr)
+            return error.returncode or 1
     if args.local and args.module:
         return run_module_tests(
             swift_binary=args.swift_binary, cwd=args.cwd,

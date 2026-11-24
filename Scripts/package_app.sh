@@ -263,6 +263,12 @@ phase "Acquiring pinned Codex $CODEX_VERSION package artifacts"
 run python3 "$CODEX_ARTIFACT_TOOL" --manifest "$CODEX_MANIFEST" acquire \
     --arch "$CODEX_BUNDLE_ARCH" --cache-root "$CODEX_CACHE_ROOT"
 
+IROH_FETCH_TOOL="$ROOT_DIR/Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh"
+if [[ -x "$IROH_FETCH_TOOL" ]]; then
+    phase "Ensuring pinned IrohTransportFFI XCFramework"
+    run "$IROH_FETCH_TOOL"
+fi
+
 # KeyboardShortcuts' default Bundle.module lookup does not match RepoPrompt's
 # packaged resource layout. Host-native builds patch the default checkout below;
 # the universal builder patches each isolated architecture checkout before compiling.

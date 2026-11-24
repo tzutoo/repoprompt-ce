@@ -77,6 +77,7 @@ case "$ACTION" in
         ;;
     mcp)
         if [[ "${REPOPROMPT_XCODE_UNCOORDINATED:-0}" == "1" ]]; then
+            ./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
             ./Scripts/run_without_github_tokens.sh swift build -c debug --product repoprompt-mcp
         else
             ./conductor swift-build --product repoprompt-mcp
@@ -85,6 +86,7 @@ case "$ACTION" in
         ;;
     test)
         if [[ "${REPOPROMPT_XCODE_UNCOORDINATED:-0}" == "1" ]]; then
+            ./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
             command=(./Scripts/run_without_github_tokens.sh swift test)
             if [[ -n "${REPOPROMPT_XCODE_TEST_FILTER:-}" ]]; then
                 command+=(--filter "$REPOPROMPT_XCODE_TEST_FILTER")

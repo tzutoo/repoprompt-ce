@@ -128,6 +128,11 @@ def write_timing_report(root: Path, durations: dict, baseline: dict, enforce: bo
 
 
 def main() -> int:
+    fetch_script = ROOT / 'Packages' / 'RepoPromptIrohTransport' / 'Scripts' / 'fetch-xcframework.sh'
+    if fetch_script.is_file():
+        fetch = subprocess.run([str(fetch_script)], cwd=ROOT, check=False)
+        if fetch.returncode:
+            return fetch.returncode
     invalidate_build_identity(ROOT)
     ratchets = json.loads(BASELINE.read_text(encoding='utf-8'))
     baseline = ratchets['typecheck']

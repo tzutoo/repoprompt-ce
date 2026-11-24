@@ -23,9 +23,15 @@ Third-party notices are in `THIRD_PARTY-NOTICES.md`.
 
 ## Binary delivery
 
-Ordinary SwiftPM and Xcode builds consume the checksum-pinned release asset declared in `Package.swift`, currently hosted on a contributor fork. The approximately 293 MiB uncompressed XCFramework is not stored in Git and a clean checkout does not run Cargo. SwiftPM verifies the ZIP’s content, not its build provenance. Release acceptance requires an organization-controlled artifact with a source-to-binary receipt and a bundled transitive license inventory.
+Ordinary SwiftPM and Xcode builds consume `Artifacts/IrohTransportFFI.xcframework` (gitignored), populated on demand by `Scripts/fetch-xcframework.sh` via `curl` + SHA-256 verification against the pinned release asset (`02dfc51f930e8bd7eaa67536363264b1e7a36026f21b2a7ed5322b6b46fc4764`), avoiding SwiftPM's `URLSession` binary-artifact downloader. The approximately 293 MiB uncompressed XCFramework is not stored in Git and a clean checkout does not run Cargo unless you explicitly rebuild from Rust. Release acceptance requires an organization-controlled artifact with a source-to-binary receipt and a bundled transitive license inventory.
 
-To reproduce the artifact locally:
+To fetch the pinned XCFramework without Rust/Cargo:
+
+```bash
+Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
+```
+
+To reproduce the artifact locally from Rust:
 
 ```bash
 Packages/RepoPromptIrohTransport/Scripts/build-xcframework.sh

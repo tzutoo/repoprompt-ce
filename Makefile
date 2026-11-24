@@ -76,6 +76,7 @@ doctor:
 setup:
 	./Scripts/install_format_tools.sh install
 	./Scripts/doctor.sh
+	./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
 	swift package resolve
 
 install-format-tools:
@@ -120,6 +121,7 @@ codex-update-candidate:
 	python3 Scripts/codex_update_candidate.py "$$@"
 
 resolve:
+	./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
 	swift package resolve
 
 build:
@@ -129,6 +131,7 @@ run:
 	./Scripts/run.sh
 
 test:
+	./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
 	swift test
 
 # Deliberately serial even under make -j: fail before starting the next phase.
@@ -238,6 +241,7 @@ xcode-open: xcode-generate
 	open "$$(python3 Scripts/generate_xcode_workspace.py print-path)"
 
 xcode-generate:
+	./Packages/RepoPromptIrohTransport/Scripts/fetch-xcframework.sh
 	python3 Scripts/generate_xcode_workspace.py generate
 
 xcode-check:
